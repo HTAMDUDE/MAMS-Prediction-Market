@@ -306,6 +306,7 @@ def delete_market(db, market_id):
                                (r["net"], r["user_id"]))
         db.execute("DELETE FROM positions WHERE outcome_id IN (SELECT id FROM outcomes WHERE market_id = ?)",
                    (market_id,))
+        db.execute("UPDATE proposals SET market_id = NULL WHERE market_id = ?", (market_id,))
         for table in ("trades", "price_history", "comments", "outcomes"):
             db.execute(f"DELETE FROM {table} WHERE market_id = ?", (market_id,))
         db.execute("DELETE FROM markets WHERE id = ?", (market_id,))
@@ -376,7 +377,10 @@ def admin_required(view):
 @app.context_processor
 def inject_globals():
     can_bonus = bool(g.user) and g.user["last_bonus"] != date.today().isoformat()
-    return {"csrf_token": csrf_token, "user": g.user, "can_bonus": can_bonus,
+    pending = 0
+    if g.user and g.user["is_admin"]:
+        pending = get_db().execute("SELECT COUNT(*) FROM proposals WHERE status = 'pending'").fetchone()[0]
+    return {"csrf_token": csrf_token, "user": g.user, "can_bonus": can_bonus, "pending_proposals": pending,
             "CURRENCY": CURRENCY, "DAILY_BONUS": DAILY_BONUS, "CATEGORIES": CATEGORIES}
 
 
@@ -666,38 +670,133 @@ def admin():
     settled = [bundle(db, m) for m in db.execute(
         "SELECT * FROM markets WHERE status != 'open' ORDER BY resolved_at DESC")]
     users = db.execute("SELECT * FROM users ORDER BY username").fetchall()
+    proposals = [dict(p, outcomes=json.loads(p["outcomes"])) for p in db.execute(
+        "SELECT p.*, u.username FROM proposals p JOIN users u ON u.id = p.user_id "
+        "WHERE p.status = 'pending' ORDER BY p.id")]
     default_close = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M")
-    return render_template("admin.html", markets=markets, settled=settled, users=users, default_close=default_close)
+    return render_template("admin.html", markets=markets, settled=settled, users=users,
+                           proposals=proposals, default_close=default_close)
 
 
-@app.post("/admin/markets")
-@admin_required
-def admin_create():
-    f = request.form
+def read_market_form(f):
+    """Validate a create/propose/review form. Returns (fields, error_message)."""
     question = f.get("question", "").strip()
-    labels = []
-    for line in f.get("outcomes", "").splitlines():
-        line = line.strip()
-        if line and line.lower() not in [x.lower() for x in labels]:
-            labels.append(line[:60])
+    labels = parse_outcome_lines(f.get("outcomes", ""))
     try:
         closes_at = datetime.fromisoformat(f.get("closes_at", ""))
     except ValueError:
         closes_at = None
     if not question or len(question) > 200:
-        flash("Question is required (max 200 characters).", "error")
-    elif not 2 <= len(labels) <= 8:
-        flash("Give 2–8 distinct outcomes, one per line.", "error")
-    elif closes_at is None or closes_at <= datetime.now():
-        flash("Pick a closing time in the future.", "error")
-    else:
-        mid = create_market(get_db(), question, f.get("description", "").strip()[:2000],
-                            f.get("category") if f.get("category") in CATEGORIES else "Other",
-                            closes_at.strftime("%Y-%m-%d %H:%M:%S"), labels,
-                            LIQUIDITY.get(f.get("liquidity"), LIQUIDITY["medium"]), g.user["id"])
-        flash("Market created.", "success")
+        return None, "Question is required (max 200 characters)."
+    if not 2 <= len(labels) <= 8:
+        return None, "Give 2–8 distinct outcomes, one per line."
+    if closes_at is None or closes_at <= datetime.now():
+        return None, "Pick a closing time in the future."
+    return {
+        "question": question,
+        "description": f.get("description", "").strip()[:2000],
+        "category": f.get("category") if f.get("category") in CATEGORIES else "Other",
+        "closes_at": closes_at.strftime("%Y-%m-%d %H:%M:%S"),
+        "labels": labels,
+        "b": LIQUIDITY.get(f.get("liquidity"), LIQUIDITY["medium"]),
+    }, None
+
+
+@app.post("/admin/markets")
+@admin_required
+def admin_create():
+    fields, error = read_market_form(request.form)
+    if error:
+        flash(error, "error")
+        return redirect(url_for("admin"))
+    mid = create_market(get_db(), fields["question"], fields["description"], fields["category"],
+                        fields["closes_at"], fields["labels"], fields["b"], g.user["id"])
+    flash("Market created.", "success")
+    return redirect(url_for("market", mid=mid))
+
+
+# ---------------------------------------------------------------- routes: proposals
+
+MAX_PENDING_PROPOSALS = 5
+
+
+@app.route("/propose", methods=["GET", "POST"])
+@login_required
+def propose():
+    db = get_db()
+    if request.method == "POST":
+        pending = db.execute("SELECT COUNT(*) FROM proposals WHERE user_id = ? AND status = 'pending'",
+                             (g.user["id"],)).fetchone()[0]
+        fields, error = read_market_form(request.form)
+        if pending >= MAX_PENDING_PROPOSALS:
+            error = f"You already have {MAX_PENDING_PROPOSALS} proposals waiting. Wait for an admin to review them."
+        if error:
+            flash(error, "error")
+            return render_template("propose.html", form=request.form, mine=my_proposals(db))
+        db.execute(
+            "INSERT INTO proposals (user_id, question, description, category, outcomes, closes_at, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (g.user["id"], fields["question"], fields["description"], fields["category"],
+             json.dumps(fields["labels"]), fields["closes_at"], now_str()))
+        flash("Thanks! Your market was sent to the admins for approval.", "success")
+        return redirect(url_for("propose"))
+    return render_template("propose.html", form={}, mine=my_proposals(db))
+
+
+def my_proposals(db):
+    return [dict(p, outcomes=json.loads(p["outcomes"])) for p in db.execute(
+        "SELECT * FROM proposals WHERE user_id = ? ORDER BY id DESC LIMIT 20", (g.user["id"],))]
+
+
+@app.post("/propose/<int:pid>/withdraw")
+@login_required
+def withdraw_proposal(pid):
+    cur = get_db().execute("DELETE FROM proposals WHERE id = ? AND user_id = ? AND status = 'pending'",
+                           (pid, g.user["id"]))
+    flash("Proposal withdrawn." if cur.rowcount else "That proposal can't be withdrawn.",
+          "success" if cur.rowcount else "error")
+    return redirect(url_for("propose"))
+
+
+@app.route("/admin/proposals/<int:pid>", methods=["GET", "POST"])
+@admin_required
+def admin_review(pid):
+    """Review a proposal: the admin can tweak any field, then approve (creates the market) or reject."""
+    db = get_db()
+    p = db.execute("SELECT p.*, u.username FROM proposals p JOIN users u ON u.id = p.user_id WHERE p.id = ?",
+                   (pid,)).fetchone()
+    if p is None:
+        abort(404)
+    if request.method == "POST":
+        if p["status"] != "pending":
+            flash("This proposal was already reviewed.", "error")
+            return redirect(url_for("admin"))
+        note = request.form.get("review_note", "").strip()[:500]
+        if request.form.get("decision") == "reject":
+            db.execute("UPDATE proposals SET status = 'rejected', review_note = ?, reviewed_by = ?, reviewed_at = ? "
+                       "WHERE id = ? AND status = 'pending'", (note, g.user["id"], now_str(), pid))
+            flash("Proposal rejected.", "success")
+            return redirect(url_for("admin") + "#proposals")
+        fields, error = read_market_form(request.form)
+        if error:
+            flash(error, "error")
+            return render_template("review_proposal.html", p=p, form=request.form)
+        claimed = db.execute("UPDATE proposals SET status = 'approved', review_note = ?, reviewed_by = ?, "
+                             "reviewed_at = ? WHERE id = ? AND status = 'pending'",
+                             (note, g.user["id"], now_str(), pid)).rowcount
+        if not claimed:  # another admin got there first
+            flash("This proposal was already reviewed.", "error")
+            return redirect(url_for("admin"))
+        mid = create_market(db, fields["question"], fields["description"], fields["category"],
+                            fields["closes_at"], fields["labels"], fields["b"], p["user_id"])
+        db.execute("UPDATE proposals SET market_id = ? WHERE id = ?", (mid, pid))
+        flash(f"Approved! The market is now live. (Proposed by {p['username']}.)", "success")
         return redirect(url_for("market", mid=mid))
-    return redirect(url_for("admin"))
+
+    form = {"question": p["question"], "description": p["description"], "category": p["category"],
+            "outcomes": "\n".join(json.loads(p["outcomes"])),
+            "closes_at": parse_dt(p["closes_at"]).strftime("%Y-%m-%dT%H:%M"), "liquidity": "medium"}
+    return render_template("review_proposal.html", p=p, form=form)
 
 
 @app.post("/admin/markets/<int:mid>/resolve")

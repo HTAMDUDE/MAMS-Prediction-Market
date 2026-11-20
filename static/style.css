@@ -221,3 +221,15 @@ main { padding-top: 8px; padding-bottom: 32px; }
 .spaced { margin-top: 24px; }
 .edit-card { max-width: 720px; }
 .outcome-input { margin-bottom: 6px; }
+
+/* proposals */
+.badge { display: inline-block; min-width: 18px; padding: 0 6px; border-radius: 999px; background: var(--brand);
+         color: var(--brand-ink); font-size: .72rem; font-weight: 700; line-height: 18px; text-align: center; }
+.status-pending { background: color-mix(in srgb, var(--gold) 22%, transparent); }
+.status-approved { background: color-mix(in srgb, var(--up) 18%, transparent); color: var(--up); }
+.status-rejected { background: color-mix(in srgb, var(--down) 14%, transparent); color: var(--down); }
+.propose-layout { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 16px; align-items: start; margin-top: 16px; }
+.proposal { border-top: 1px solid var(--border); padding: 12px 0; display: flex; flex-direction: column; gap: 4px; }
+.proposal:first-of-type { border-top: 0; padding-top: 0; }
+.note { margin: 4px 0; font-size: .9rem; background: var(--surface-2); padding: 6px 10px; border-radius: 8px; }
+@media (max-width: 860px) { .propose-layout { grid-template-columns: 1fr; } }

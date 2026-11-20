@@ -209,3 +209,73 @@ def test_login_lockout_after_repeated_failures():
 def test_uses_school_timezone():
     import time as _time
     assert _time.tzname[0] in ("EST", "EDT")
+
+
+def test_proposals_flow():
+    path = os.path.join(tempfile.mkdtemp(), "proposals.db")
+    old = appmod.DB_PATH
+    appmod.DB_PATH = path
+    appmod._hits.clear()
+    try:
+        appmod.init_db()
+        db = appmod.connect()
+        admin, sam = appmod.app.test_client(), appmod.app.test_client()
+        signup(admin, "headadmin")
+        signup(sam, "sam")
+        closes = (datetime.now() + timedelta(days=5)).strftime("%Y-%m-%dT%H:%M")
+
+        def propose(question):
+            tok = csrf(sam.get("/propose"))
+            return sam.post("/propose", data={"csrf_token": tok, "question": question, "description": "why",
+                                              "outcomes": "Yes\nNo", "category": "Events", "closes_at": closes},
+                            follow_redirects=True)
+
+        assert "sent to the admins" in propose("Will the pep rally have a band?").get_data(as_text=True)
+        assert sam.get("/admin").status_code == 403
+        pid = db.execute("SELECT id FROM proposals WHERE question LIKE 'Will the pep%'").fetchone()[0]
+        assert sam.get(f"/admin/proposals/{pid}").status_code == 403
+
+        # admin sees it, with a badge, and approves with edited wording
+        page = admin.get("/admin").get_data(as_text=True)
+        assert "Will the pep rally have a band?" in page and 'class="badge"' in page
+        tok = csrf(admin.get(f"/admin/proposals/{pid}"))
+        r = admin.post(f"/admin/proposals/{pid}", data={
+            "csrf_token": tok, "decision": "approve", "question": "Will the pep rally have a live band?",
+            "description": "why", "outcomes": "Yes\nNo", "category": "Events", "closes_at": closes,
+            "liquidity": "high", "review_note": "Clarified wording"}, follow_redirects=True)
+        assert "Approved!" in r.get_data(as_text=True)
+        p = db.execute("SELECT * FROM proposals WHERE id=?", (pid,)).fetchone()
+        assert p["status"] == "approved" and p["market_id"]
+        m = db.execute("SELECT * FROM markets WHERE id=?", (p["market_id"],)).fetchone()
+        assert m["question"] == "Will the pep rally have a live band?" and m["b"] == 250
+        assert "Clarified wording" in sam.get("/propose").get_data(as_text=True)
+
+        # approving twice does nothing
+        tok = csrf(admin.get("/admin"))
+        admin.post(f"/admin/proposals/{pid}", data={"csrf_token": tok, "decision": "approve", "question": "X",
+                                                    "outcomes": "A\nB", "closes_at": closes})
+        assert db.execute("SELECT COUNT(*) FROM markets").fetchone()[0] == 1
+
+        # rejection with a note
+        propose("Bad question?")
+        pid2 = db.execute("SELECT id FROM proposals WHERE question='Bad question?'").fetchone()[0]
+        tok = csrf(admin.get(f"/admin/proposals/{pid2}"))
+        admin.post(f"/admin/proposals/{pid2}", data={"csrf_token": tok, "decision": "reject",
+                                                     "review_note": "Too vague"})
+        assert db.execute("SELECT status FROM proposals WHERE id=?", (pid2,)).fetchone()[0] == "rejected"
+        assert "Too vague" in sam.get("/propose").get_data(as_text=True)
+
+        # withdraw, and the 5-pending cap
+        for i in range(5):
+            propose(f"Q{i}?")
+        assert "already have 5" in propose("One too many?").get_data(as_text=True)
+        q0 = db.execute("SELECT id FROM proposals WHERE question='Q0?'").fetchone()[0]
+        sam.post(f"/propose/{q0}/withdraw", data={"csrf_token": csrf(sam.get("/propose"))})
+        assert db.execute("SELECT COUNT(*) FROM proposals WHERE id=?", (q0,)).fetchone()[0] == 0
+
+        # deleting the approved market still works
+        appmod.delete_market(db, p["market_id"])
+        for path_ in ["/", "/propose", "/admin", f"/admin/proposals/{pid}"]:
+            assert admin.get(path_).status_code == 200, path_
+    finally:
+        appmod.DB_PATH = old

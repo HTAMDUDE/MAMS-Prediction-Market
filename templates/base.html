@@ -21,7 +21,8 @@
       <a href="{{ url_for('leaderboard') }}" class="{{ 'active' if request.endpoint == 'leaderboard' }}">Leaderboard</a>
       {% if user %}
         <a href="{{ url_for('portfolio') }}" class="{{ 'active' if request.endpoint == 'portfolio' }}">Portfolio</a>
-        {% if user.is_admin %}<a href="{{ url_for('admin') }}" class="{{ 'active' if request.endpoint == 'admin' }}">Admin</a>{% endif %}
+        <a href="{{ url_for('propose') }}" class="{{ 'active' if request.endpoint == 'propose' }}">Propose</a>
+        {% if user.is_admin %}<a href="{{ url_for('admin') }}" class="{{ 'active' if request.endpoint in ('admin', 'admin_review', 'admin_edit') }}">Admin{% if pending_proposals %} <span class="badge" title="{{ pending_proposals }} proposal(s) waiting">{{ pending_proposals }}</span>{% endif %}</a>{% endif %}
       {% endif %}
     </nav>
     <div class="account">

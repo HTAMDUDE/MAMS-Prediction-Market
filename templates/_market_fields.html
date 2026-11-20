@@ -1,0 +1,31 @@
+{# Shared market fields. Expects `form` (dict-like) and optional `show_liquidity`. #}
+<label class="field"><span>Question</span>
+  <input name="question" maxlength="200" required value="{{ form.question or '' }}"
+         placeholder="Will MAMS win the regional Science Bowl?">
+</label>
+<label class="field"><span>Resolution criteria <em class="muted">(how will we know the answer?)</em></span>
+  <textarea name="description" rows="3"
+            placeholder="Resolves Yes if the official results list MAMS in first place.">{{ form.description or '' }}</textarea>
+</label>
+<label class="field"><span>Outcomes <em class="muted">(one per line, 2–8)</em></span>
+  <textarea name="outcomes" rows="3" required>{{ form.outcomes or 'Yes\nNo' }}</textarea>
+</label>
+<div class="row">
+  <label class="field"><span>Category</span>
+    <select name="category">
+      {% for c in CATEGORIES %}<option {{ 'selected' if c == form.category }}>{{ c }}</option>{% endfor %}
+    </select>
+  </label>
+  <label class="field"><span>Betting closes</span>
+    <input type="datetime-local" name="closes_at" value="{{ form.closes_at or default_close }}" required>
+  </label>
+  {% if show_liquidity %}
+  <label class="field"><span>Liquidity</span>
+    <select name="liquidity" title="Higher liquidity = prices move less per bet">
+      {% for key, label in [('low', 'Low (prices swing fast)'), ('medium', 'Medium'), ('high', 'High (prices steady)')] %}
+        <option value="{{ key }}" {{ 'selected' if key == (form.liquidity or 'medium') }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  {% endif %}
+</div>

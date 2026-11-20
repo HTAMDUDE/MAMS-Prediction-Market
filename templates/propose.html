@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Propose a market · MAMS Prediction Market{% endblock %}
+{% block content %}
+<div class="propose-layout">
+  <div class="card">
+    <h1>Propose a market</h1>
+    <p class="muted">Got a question about something happening at Mass Academy? Suggest it here. An admin will review it,
+      may tweak the wording, and then put it live or explain why not.</p>
+    <form method="post" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      {% set default_close = '' %}
+      {% include "_market_fields.html" %}
+      <p class="muted small">Tips: ask about something with a clear, checkable answer and a known date. Avoid questions
+        about individual people's grades or anything private.</p>
+      <button class="btn">Send for approval</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Your proposals</h2>
+    {% for p in mine %}
+      <div class="proposal">
+        <div class="card-meta">
+          <span class="tag">{{ p.category }}</span>
+          <span class="status status-{{ p.status }}">{{ {'pending': 'Waiting for review', 'approved': 'Approved', 'rejected': 'Not approved'}[p.status] }}</span>
+        </div>
+        <strong>{{ p.question }}</strong>
+        <div class="muted small">{{ p.outcomes|join(' · ') }} — sent {{ p.created_at|ago }}</div>
+        {% if p.review_note %}<p class="note"><b>Admin note:</b> {{ p.review_note }}</p>{% endif %}
+        {% if p.status == 'approved' and p.market_id %}
+          <a href="{{ url_for('market', mid=p.market_id) }}">View market →</a>
+        {% elif p.status == 'pending' %}
+          <form method="post" action="{{ url_for('withdraw_proposal', pid=p.id) }}" class="inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="btn btn-small btn-ghost">Withdraw</button>
+          </form>
+        {% endif %}
+      </div>
+    {% else %}
+      <p class="muted">You haven't proposed anything yet.</p>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

@@ -10,6 +10,7 @@ assemblies, and anything else the admins post.
   Buying an outcome raises its price, and all prices in a market add up to 100%, so you can read them as the
   school's estimated probability.
 - You can sell shares back at the current price any time before the market closes.
+- Anyone can **propose a market** from the Propose page. It goes live once an admin approves it.
 - Admins create, edit, resolve, cancel and delete markets (see [Admin guide](#admin-guide)).
 - The site also has a leaderboard (ranked by net worth), a portfolio page, a price-history chart and comments on
   each market.
@@ -44,6 +45,7 @@ Admins see an **Admin** link in the top bar.
 
 | Action | Where | What happens |
 |---|---|---|
+| **Review proposals** | Admin page → "Proposals waiting for approval" (the Admin link shows a count) | Open a proposal, fix anything you want, then **Approve & publish** (it goes live immediately, credited to the proposer) or **Reject**. You can leave a note the proposer will see. One admin's decision is final. |
 | **Create** | Admin page | Set the question, resolution criteria, 2–8 outcomes, category, closing time and liquidity. |
 | **Edit** | Admin page or the market's page | Question, criteria, category and closing time can always change. Before anyone bets, outcomes and liquidity can change too. After the first bet, outcomes can only be renamed, so earlier bets stay fair. Moving the closing time later reopens a closed market. |
 | **Resolve** | Admin page or the market's page | Pick the winning outcome. Each winning share pays Ⓜ1 immediately. This can't be undone. |
@@ -52,6 +54,8 @@ Admins see an **Admin** link in the top bar.
 | **Adjust balance / Make admin** | Admin page → Users | Add or remove MAMS Bucks, or promote/demote other users. |
 
 When betting closes, a market moves to **Awaiting result** until an admin resolves it.
+
+Users can have up to 5 proposals waiting at once, and can withdraw a proposal until it's reviewed.
 
 ## Deploying on PythonAnywhere (free)
 

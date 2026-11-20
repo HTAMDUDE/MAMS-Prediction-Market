@@ -66,6 +66,24 @@ CREATE TABLE IF NOT EXISTS comments (
     created_at TEXT NOT NULL
 );
 
+-- Markets suggested by users, waiting for an admin to approve or reject.
+CREATE TABLE IF NOT EXISTS proposals (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id),
+    question    TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    category    TEXT NOT NULL DEFAULT 'Other',
+    outcomes    TEXT NOT NULL,                     -- JSON list of labels
+    closes_at   TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected
+    review_note TEXT NOT NULL DEFAULT '',
+    reviewed_by INTEGER REFERENCES users(id),
+    reviewed_at TEXT,
+    market_id   INTEGER REFERENCES markets(id),
+    created_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
 CREATE INDEX IF NOT EXISTS idx_outcomes_market ON outcomes(market_id);
 CREATE INDEX IF NOT EXISTS idx_trades_market   ON trades(market_id);
 CREATE INDEX IF NOT EXISTS idx_trades_user     ON trades(user_id);
