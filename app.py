@@ -39,6 +39,7 @@ LIQUIDITY = {"low": 50.0, "medium": 100.0, "high": 250.0}
 CATEGORIES = ["Academics", "Competitions", "Sports", "Events", "Campus Life", "Weather", "Other"]
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,20}$")
 EPS = 1e-9
+OWNER_USERNAME = "Kaushik"
 
 
 def _secret_key():
