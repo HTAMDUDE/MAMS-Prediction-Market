@@ -1,5 +1,6 @@
 import { DISPUTE_WINDOW_MS } from "@/lib/constants";
 import { prisma, type Tx } from "@/lib/db";
+import { logAudit } from "./audit";
 import { getOutcomes } from "./markets";
 import { adjustBalance, assertAdmin, lockMarket, TradeError, type Actor } from "./permissions";
 
@@ -35,25 +36,28 @@ async function resolveInTx(tx: Tx, marketId: number, outcomeId: number, resolved
 /** Nobody is paid yet: an admin names the winner and the result finalizes after the challenge window. */
 export async function proposeResult(actor: Actor, marketId: number, outcomeId: number) {
   assertAdmin(actor);
-  await prisma.$transaction(async (tx) => {
+  const logged = await prisma.$transaction(async (tx) => {
     await lockMarket(tx, marketId);
     const m = await tx.market.findUnique({ where: { id: marketId } });
     if (!m || m.status !== "open") throw new TradeError("Only unresolved markets can have a result proposed.");
     if (new Date() < m.closesAt) throw new TradeError("Betting hasn't closed yet. Propose a result once it has.");
-    if (!(await getOutcomes(tx, marketId)).some((o) => o.id === outcomeId)) throw new TradeError("Unknown outcome.");
+    const outcome = (await getOutcomes(tx, marketId)).find((o) => o.id === outcomeId);
+    if (!outcome) throw new TradeError("Unknown outcome.");
     const now = new Date();
     await tx.market.update({
       where: { id: marketId },
       data: { proposedOutcomeId: outcomeId, proposedById: actor.id, proposedAt: now, finalizesAt: new Date(now.getTime() + DISPUTE_WINDOW_MS) },
     });
     await handleOpenDisputes(tx, marketId); // proposing again restarts the window and clears disputes
+    return { question: m.question, label: outcome.label };
   });
+  await logAudit(actor, "result.propose", { targetType: "market", targetId: marketId, targetLabel: logged.question, detail: `Proposed “${logged.label}”.` });
 }
 
 /** Take back a proposed result before it finalizes. */
 export async function retractResult(actor: Actor, marketId: number) {
   assertAdmin(actor);
-  await prisma.$transaction(async (tx) => {
+  const question = await prisma.$transaction(async (tx) => {
     await lockMarket(tx, marketId);
     const m = await tx.market.findUnique({ where: { id: marketId } });
     if (!m || m.status !== "open" || m.proposedOutcomeId === null) throw new TradeError("There's no proposed result to withdraw.");
@@ -62,7 +66,9 @@ export async function retractResult(actor: Actor, marketId: number) {
       data: { proposedOutcomeId: null, proposedById: null, proposedAt: null, finalizesAt: null },
     });
     await handleOpenDisputes(tx, marketId);
+    return m.question;
   });
+  await logAudit(actor, "result.retract", { targetType: "market", targetId: marketId, targetLabel: question });
 }
 
 /** An admin confirms a disputed result right away; winners are paid immediately. */
@@ -74,7 +80,9 @@ export async function confirmResult(actor: Actor, marketId: number): Promise<num
   if (m.proposedOutcomeId === null || disputes === 0) {
     throw new TradeError("Only a disputed result needs confirming; others finalize on their own.");
   }
-  return prisma.$transaction((tx) => resolveInTx(tx, marketId, m.proposedOutcomeId!, actor.id, false), { timeout: 60000 });
+  const paid = await prisma.$transaction((tx) => resolveInTx(tx, marketId, m.proposedOutcomeId!, actor.id, false), { timeout: 60000 });
+  await logAudit(actor, "result.confirm", { targetType: "market", targetId: marketId, targetLabel: m.question, detail: `Paid ${paid} winning position(s).` });
+  return paid;
 }
 
 /** Pay out every market whose challenge window ended with no unhandled dispute. Called on page loads and by cron. */

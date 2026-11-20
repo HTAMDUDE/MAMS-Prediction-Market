@@ -10,7 +10,10 @@ export function MarketCard({ b }: { b: Bundle }) {
     <Link href={`/market/${b.m.id}`} className="block">
       <Card className="h-full gap-3 p-4 transition-shadow hover:shadow-md">
         <div className="flex items-center justify-between gap-2 text-sm">
-          <Tag>{b.m.category}</Tag>
+          <span className="flex items-center gap-1.5">
+            <Tag>{b.m.category}</Tag>
+            {b.m.featured && <span title="Featured by the admins" className="text-gold">★ Featured</span>}
+          </span>
           {b.state === "open" ? <span className="text-muted-foreground">{until(b.m.closesAt)}</span> : <StateBadge state={b.state} />}
         </div>
         <h3 className="text-base leading-snug font-semibold">{b.m.question}</h3>

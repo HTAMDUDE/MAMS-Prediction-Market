@@ -26,7 +26,7 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ s
   if (status === "closed") markets = markets.filter((b) => ["closed", "proposed", "disputed"].includes(b.state)); // "Awaiting result" also covers proposed and disputed
   else if (["open", "resolved", "cancelled"].includes(status)) markets = markets.filter((b) => b.state === status);
   if (cat) markets = markets.filter((b) => b.m.category === cat);
-  if (status === "open") markets.sort((a, b) => b.volume - a.volume);
+  if (status === "open") markets.sort((a, b) => Number(b.m.featured) - Number(a.m.featured) || b.volume - a.volume); // featured first, then busiest
   else if (status === "resolved" || status === "cancelled") markets.sort((a, b) => (b.m.resolvedAt?.getTime() ?? 0) - (a.m.resolvedAt?.getTime() ?? 0));
 
   return (

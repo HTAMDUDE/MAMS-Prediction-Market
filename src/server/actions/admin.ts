@@ -3,10 +3,15 @@
 import { redirect } from "next/navigation";
 import { CURRENCY } from "@/lib/constants";
 import { requireUser, toActor } from "@/lib/session";
+import { parseSchoolLocal } from "@/lib/time";
 import { amountSchema, clarifySchema, idSchema, readEditForm, readMarketForm } from "@/lib/validation";
+import { deleteUser, markEmailVerified, resendVerification, updateUserEmail } from "@/server/services/accounts";
+import { logAudit } from "@/server/services/audit";
+import { deleteComment, setCommentHidden, toggleCommentMute } from "@/server/services/comments";
 import {
-  addClarification, cancelMarket, createMarketAsAdmin, deleteMarket, editMarket,
+  addClarification, cancelMarket, closeMarketEarly, createMarketAsAdmin, deleteMarket, editMarket, reopenMarket, setFeatured,
 } from "@/server/services/markets";
+import { setAnnouncement } from "@/server/services/settings";
 import {
   blockUserInMarket, grantBalance, toggleAdmin, toggleTradingBan, unblockUserInMarket,
 } from "@/server/services/moderation";
@@ -171,9 +176,98 @@ export async function resetPasswordAction(_prev: ActionState, fd: FormData): Pro
     const u = await prisma.user.findUnique({ where: { id: userId }, select: { displayUsername: true, username: true } });
     if (!u) throw new TradeError("User not found.");
     const password = await setTemporaryPassword(userId);
+    await logAudit(actor, "user.password_reset", { targetType: "user", targetId: userId, targetLabel: u.displayUsername ?? u.username });
     return {
       message: `Temporary password for ${u.displayUsername ?? u.username}: ${password}. Share it privately; they can change it on their Portfolio page.`,
       persist: true,
     };
+  });
+}
+
+// ------------------------------------------------------------------ user accounts
+
+export async function updateEmailAction(_prev: ActionState, fd: FormData): Promise<ActionState> {
+  return run(async () => {
+    const email = await updateUserEmail(await admin(), String(fd.get("user_id")), String(fd.get("email") ?? ""));
+    return `Email changed. A verification link was sent to ${email}; they can't log in until they use it.`;
+  });
+}
+
+export async function markVerifiedAction(_prev: ActionState, fd: FormData): Promise<ActionState> {
+  return run(async () => {
+    await markEmailVerified(await admin(), String(fd.get("user_id")));
+    return "Email marked as verified. They can log in now.";
+  });
+}
+
+export async function resendVerificationAction(_prev: ActionState, fd: FormData): Promise<ActionState> {
+  return run(async () => {
+    await resendVerification(await admin(), String(fd.get("user_id")));
+    return "Verification email sent.";
+  });
+}
+
+export async function deleteUserAction(_prev: ActionState, fd: FormData): Promise<ActionState> {
+  return run(async () => {
+    const r = await deleteUser(await admin(), String(fd.get("user_id")));
+    return `Deleted ${r.username}.` + (r.refund ? " Their open bets were removed and prices restored." : "");
+  });
+}
+
+export async function commentMuteAction(_prev: ActionState, fd: FormData): Promise<ActionState> {
+  return run(async () => {
+    const r = await toggleCommentMute(await admin(), String(fd.get("user_id")));
+    return r.muted ? `${r.username} can no longer comment.` : `${r.username} can comment again.`;
+  });
+}
+
+// ------------------------------------------------------------------ comments
+
+export async function hideCommentAction(_prev: ActionState, fd: FormData): Promise<ActionState> {
+  return run(async () => {
+    const hidden = fd.get("hidden") === "1";
+    await setCommentHidden(await admin(), id(fd, "comment_id"), hidden);
+    return hidden ? "Comment hidden." : "Comment restored.";
+  });
+}
+
+export async function deleteCommentAction(_prev: ActionState, fd: FormData): Promise<ActionState> {
+  return run(async () => {
+    await deleteComment(await admin(), id(fd, "comment_id"));
+    return "Comment deleted.";
+  });
+}
+
+// ------------------------------------------------------------------ market controls and site settings
+
+export async function closeEarlyAction(_prev: ActionState, fd: FormData): Promise<ActionState> {
+  return run(async () => {
+    await closeMarketEarly(await admin(), id(fd, "market_id"));
+    return "Betting closed. You can propose a result now.";
+  });
+}
+
+export async function reopenAction(_prev: ActionState, fd: FormData): Promise<ActionState> {
+  return run(async () => {
+    const closesAt = parseSchoolLocal(String(fd.get("closes_at") ?? ""));
+    if (!closesAt) throw new TradeError("Pick a valid closing time.");
+    await reopenMarket(await admin(), id(fd, "market_id"), closesAt);
+    return "Betting reopened.";
+  });
+}
+
+export async function featureAction(_prev: ActionState, fd: FormData): Promise<ActionState> {
+  return run(async () => {
+    const featured = fd.get("featured") === "1";
+    await setFeatured(await admin(), id(fd, "market_id"), featured);
+    return featured ? "Market featured: it now appears first on the home page." : "Market is no longer featured.";
+  });
+}
+
+export async function announcementAction(_prev: ActionState, fd: FormData): Promise<ActionState> {
+  return run(async () => {
+    const text = fd.get("clear") ? "" : String(fd.get("text") ?? "");
+    const saved = await setAnnouncement(await admin(), text);
+    return saved ? "Announcement published." : "Announcement cleared.";
   });
 }

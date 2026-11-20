@@ -1,20 +1,23 @@
 import Link from "next/link";
 import { ago, money, until, when } from "@/lib/format";
 import { prisma } from "@/lib/db";
-import { getAdminOrNull, getOwnerId } from "@/lib/session";
+import { getAdminOrNull, toActor } from "@/lib/session";
 import { schoolLocalInDays } from "@/lib/time";
 import { ensureFinalized } from "@/server/finalize";
+import { listUsers } from "@/server/services/accounts";
 import { bundles, type Bundle } from "@/server/services/markets";
-import { createMarketAction, proposeResultAction } from "@/server/actions/admin";
+import { ANNOUNCEMENT_MAX, getAnnouncement } from "@/server/services/settings";
+import { announcementAction, createMarketAction, proposeResultAction } from "@/server/actions/admin";
 import { ActionForm, ConfirmButton } from "@/components/action-form";
 import { AdminUsersTable } from "@/components/admin-users-table";
 import { DeleteMarketButton } from "@/components/delete-market-button";
 import { Forbidden } from "@/components/forbidden";
 import { MarketForm } from "@/components/market-form";
 import { Status } from "@/components/state-badge";
-import { buttonVariants } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { NativeSelect } from "@/components/ui/native-select";
+import { Textarea } from "@/components/ui/textarea";
 
 export const metadata = { title: "Admin · MAMS Prediction Market" };
 
@@ -41,25 +44,39 @@ function MarketRow({ b, children }: { b: Bundle; children?: React.ReactNode }) {
   );
 }
 
-export default async function Admin() {
+export default async function Admin({ searchParams }: { searchParams: Promise<{ q?: string; filter?: string; upage?: string }> }) {
   await ensureFinalized();
   const me = await getAdminOrNull();
   if (!me) return <Forbidden />;
-  const [openMarkets, settledMarkets, users, bans, proposals, ownerId] = await Promise.all([
+  const sp = await searchParams;
+  const [openMarkets, settledMarkets, userData, proposals, announcement] = await Promise.all([
     prisma.market.findMany({ where: { status: "open" }, orderBy: { closesAt: "asc" } }),
     prisma.market.findMany({ where: { status: { not: "open" } }, orderBy: { resolvedAt: "desc" } }),
-    prisma.user.findMany({ orderBy: { username: "asc" } }),
-    prisma.tradeBan.findMany({ select: { userId: true } }),
+    listUsers(toActor(me), { q: sp.q, filter: sp.filter, page: Number(sp.upage) || 1 }),
     prisma.proposal.findMany({ where: { status: "pending" }, orderBy: { id: "asc" }, include: { user: true } }),
-    getOwnerId(),
+    getAnnouncement(),
   ]);
   const [markets, settled] = await Promise.all([bundles(prisma, openMarkets), bundles(prisma, settledMarkets)]);
-  const banned = new Set(bans.map((b) => b.userId));
   const defaultClose = schoolLocalInDays(7);
 
   return (
     <div className="space-y-4">
-      <h1>Admin</h1>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h1>Admin</h1>
+        <Link href="/admin/activity" className={buttonVariants({ variant: "outline" })}>Activity log</Link>
+      </div>
+
+      <Card className="gap-2 p-5" id="announcement">
+        <h2>Site announcement</h2>
+        <p className="text-sm text-muted-foreground">Shown in a banner at the top of every page until you clear it (e.g. “Betting on the snow-day market closes at noon”).</p>
+        <ActionForm action={announcementAction} className="space-y-2">
+          <Textarea name="text" rows={2} maxLength={ANNOUNCEMENT_MAX} defaultValue={announcement ?? ""} placeholder="No announcement right now." />
+          <div className="flex gap-2">
+            <Button size="sm">Publish</Button>
+            {announcement && <Button size="sm" variant="outline" name="clear" value="1">Clear</Button>}
+          </div>
+        </ActionForm>
+      </Card>
 
       <Card className="gap-2 p-5" id="proposals">
         <h2>Proposals waiting for approval {proposals.length > 0 && <span className="ml-1 rounded-full bg-primary px-2 py-0.5 text-xs text-primary-foreground">{proposals.length}</span>}</h2>
@@ -107,10 +124,7 @@ export default async function Admin() {
         </Card>
       </div>
 
-      <AdminUsersTable
-        meId={me.id} ownerId={ownerId} isOwner={me.isOwner}
-        users={users.map((u) => ({ id: u.id, username: u.displayUsername ?? u.username ?? u.name, balance: u.balance, isAdmin: u.isAdmin || u.id === ownerId, banned: banned.has(u.id) }))}
-      />
+      <AdminUsersTable data={userData} meId={me.id} isOwner={me.isOwner} />
     </div>
   );
 }

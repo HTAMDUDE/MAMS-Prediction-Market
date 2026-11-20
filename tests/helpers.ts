@@ -9,7 +9,7 @@ export const hours = (h: number) => new Date(Date.now() + h * 3600 * 1000);
 /** Empty every table between tests. */
 export async function resetDb() {
   await prisma.$executeRawUnsafe(
-    `TRUNCATE "Dispute","Clarification","MarketBlock","TradeBan","Comment","PriceHistory","Trade","Position","Proposal","Outcome","Market","LoginFailure","rateLimit","session","account","verification","user" RESTART IDENTITY CASCADE`,
+    `TRUNCATE "AuditLog","SiteSetting","CommentMute","Dispute","Clarification","MarketBlock","TradeBan","Comment","PriceHistory","Trade","Position","Proposal","Outcome","Market","LoginFailure","rateLimit","session","account","verification","user" RESTART IDENTITY CASCADE`,
   );
 }
 

@@ -1,6 +1,7 @@
 import { MAX_PENDING_PROPOSALS } from "@/lib/constants";
 import { prisma } from "@/lib/db";
 import type { MarketFields } from "@/lib/validation";
+import { logAudit } from "./audit";
 import { createMarket } from "./markets";
 import { assertAdmin, TradeError, type Actor } from "./permissions";
 
@@ -28,7 +29,7 @@ export async function withdrawProposal(userId: string, id: number) {
 /** Approve a proposal (the admin may have tweaked every field): creates the market, credited to the proposer. */
 export async function approveProposal(actor: Actor, id: number, f: MarketFields, note: string) {
   assertAdmin(actor);
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const p = await tx.proposal.findUnique({ where: { id }, include: { user: true } });
     if (!p) throw new TradeError("Proposal not found.");
     const { count } = await tx.proposal.updateMany({
@@ -40,6 +41,10 @@ export async function approveProposal(actor: Actor, id: number, f: MarketFields,
     await tx.proposal.update({ where: { id }, data: { marketId } });
     return { marketId, proposer: p.user.displayUsername ?? p.user.username ?? "the proposer" };
   });
+  await logAudit(actor, "proposal.approve", {
+    targetType: "proposal", targetId: id, targetLabel: f.question, detail: `By ${result.proposer}; market #${result.marketId}.${note ? ` Note: ${note}` : ""}`,
+  });
+  return result;
 }
 
 export async function rejectProposal(actor: Actor, id: number, note: string) {
@@ -49,4 +54,6 @@ export async function rejectProposal(actor: Actor, id: number, note: string) {
     data: { status: "rejected", reviewNote: note.slice(0, 500), reviewedById: actor.id, reviewedAt: new Date() },
   });
   if (!count) throw new TradeError("This proposal was already reviewed.");
+  const p = await prisma.proposal.findUnique({ where: { id }, select: { question: true } });
+  await logAudit(actor, "proposal.reject", { targetType: "proposal", targetId: id, targetLabel: p?.question, detail: note });
 }

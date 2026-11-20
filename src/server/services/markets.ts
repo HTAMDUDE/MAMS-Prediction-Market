@@ -2,6 +2,7 @@ import { Prisma, type Market } from "@/generated/prisma/client";
 import { marketB, isPreset } from "@/lib/constants";
 import { prisma, type Db } from "@/lib/db";
 import * as lmsr from "@/lib/lmsr";
+import { logAudit } from "./audit";
 import { adjustBalance, assertAdmin, lockMarket, TradeError, type Actor } from "./permissions";
 
 export type MarketState = "open" | "closed" | "proposed" | "disputed" | "resolved" | "cancelled";
@@ -102,19 +103,23 @@ export async function createMarket(db: Db, f: NewMarket, createdById: string | n
 /** Create a market as an admin (the "Create a market" form). */
 export async function createMarketAsAdmin(actor: Actor, f: NewMarket): Promise<number> {
   assertAdmin(actor);
-  return prisma.$transaction((tx) => createMarket(tx, f, actor.id));
+  const id = await prisma.$transaction((tx) => createMarket(tx, f, actor.id));
+  await logAudit(actor, "market.create", { targetType: "market", targetId: id, targetLabel: f.question });
+  return id;
 }
 
 /** Void a market: everyone gets back what they net-spent on it. */
 export async function cancelMarket(actor: Actor, marketId: number) {
   assertAdmin(actor);
-  await prisma.$transaction(async (tx) => {
+  const question = await prisma.$transaction(async (tx) => {
     await lockMarket(tx, marketId);
     const m = await tx.market.findUnique({ where: { id: marketId } });
     if (!m || m.status !== "open") throw new TradeError("Only unresolved markets can be cancelled.");
     await refundNetSpend(tx, marketId);
     await tx.market.update({ where: { id: marketId }, data: { status: "cancelled", resolvedAt: new Date() } });
+    return m.question;
   }, { timeout: 30000 });
+  await logAudit(actor, "market.cancel", { targetType: "market", targetId: marketId, targetLabel: question });
 }
 
 async function refundNetSpend(tx: Db, marketId: number) {
@@ -128,13 +133,15 @@ async function refundNetSpend(tx: Db, marketId: number) {
 /** Remove a market entirely. If it was never settled, everyone's net spend is refunded first. Payouts from an already-resolved market are kept. */
 export async function deleteMarket(actor: Actor, marketId: number) {
   assertAdmin(actor);
-  await prisma.$transaction(async (tx) => {
+  const m = await prisma.$transaction(async (tx) => {
     await lockMarket(tx, marketId);
     const m = await tx.market.findUnique({ where: { id: marketId } });
     if (!m) throw new TradeError("Market not found.");
     if (m.status === "open") await refundNetSpend(tx, marketId);
     await tx.market.delete({ where: { id: marketId } }); // children cascade; proposals.marketId is set to null
+    return m;
   }, { timeout: 30000 });
+  await logAudit(actor, "market.delete", { targetType: "market", targetId: marketId, targetLabel: m.question, detail: `Status was ${m.status}.` });
 }
 
 export type EditMarketInput = {
@@ -199,18 +206,63 @@ export async function editMarket(actor: Actor, marketId: number, input: EditMark
       await snapshotPrices(tx, marketId, b);
     }
   }, { timeout: 30000 });
+  await logAudit(actor, "market.edit", { targetType: "market", targetId: marketId, targetLabel: input.question });
 }
 
 export async function addClarification(actor: Actor, marketId: number, body: string) {
   assertAdmin(actor);
-  if (!(await prisma.market.findUnique({ where: { id: marketId }, select: { id: true } }))) throw new TradeError("Market not found.");
+  const m = await prisma.market.findUnique({ where: { id: marketId }, select: { question: true } });
+  if (!m) throw new TradeError("Market not found.");
   if (body.length < 5 || body.length > 500) throw new TradeError("A clarification needs 5–500 characters.");
   await prisma.clarification.create({ data: { marketId, adminId: actor.id, body } });
+  await logAudit(actor, "market.clarify", { targetType: "market", targetId: marketId, targetLabel: m.question, detail: body });
 }
 
 export async function addComment(userId: string, marketId: number, body: string) {
   if (!body) throw new TradeError("Comment can't be empty.");
   if (body.length > 500) throw new TradeError("Keep comments under 500 characters.");
   if (!(await prisma.market.findUnique({ where: { id: marketId }, select: { id: true } }))) throw new TradeError("Market not found.");
+  if (await prisma.commentMute.findUnique({ where: { userId } })) throw new TradeError("An admin has turned off commenting for your account.");
   await prisma.comment.create({ data: { marketId, userId, body } });
+}
+
+// ------------------------------------------------------------------ market controls
+
+/** Stop betting right now (the market moves to "awaiting result"). */
+export async function closeMarketEarly(actor: Actor, marketId: number) {
+  assertAdmin(actor);
+  const question = await prisma.$transaction(async (tx) => {
+    await lockMarket(tx, marketId);
+    const m = await tx.market.findUnique({ where: { id: marketId } });
+    if (!m || m.status !== "open") throw new TradeError("Only unresolved markets can be closed.");
+    if (marketState(m) !== "open") throw new TradeError("Betting is already closed on this market.");
+    await tx.market.update({ where: { id: marketId }, data: { closesAt: new Date() } });
+    return m.question;
+  });
+  await logAudit(actor, "market.close_early", { targetType: "market", targetId: marketId, targetLabel: question });
+}
+
+/** Open a closed market for betting again until `closesAt`. A proposed result must be withdrawn first. */
+export async function reopenMarket(actor: Actor, marketId: number, closesAt: Date) {
+  assertAdmin(actor);
+  if (!(closesAt > new Date())) throw new TradeError("Pick a closing time in the future.");
+  const question = await prisma.$transaction(async (tx) => {
+    await lockMarket(tx, marketId);
+    const m = await tx.market.findUnique({ where: { id: marketId } });
+    if (!m || m.status !== "open") throw new TradeError("Only unresolved markets can be reopened.");
+    if (m.proposedOutcomeId !== null) throw new TradeError("A result is proposed for this market. Withdraw it before reopening betting.");
+    if (marketState(m) !== "closed") throw new TradeError("Betting is still open on this market.");
+    await tx.market.update({ where: { id: marketId }, data: { closesAt } });
+    return m.question;
+  });
+  await logAudit(actor, "market.reopen", { targetType: "market", targetId: marketId, targetLabel: question, detail: `New closing time ${closesAt.toISOString()}` });
+}
+
+/** Pin a market first on the home page (or unpin it). */
+export async function setFeatured(actor: Actor, marketId: number, featured: boolean) {
+  assertAdmin(actor);
+  const m = await prisma.market.findUnique({ where: { id: marketId }, select: { question: true } });
+  if (!m) throw new TradeError("Market not found.");
+  await prisma.market.update({ where: { id: marketId }, data: { featured } });
+  await logAudit(actor, featured ? "market.feature" : "market.unfeature", { targetType: "market", targetId: marketId, targetLabel: m.question });
 }

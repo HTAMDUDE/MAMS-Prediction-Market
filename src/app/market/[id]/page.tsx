@@ -3,12 +3,14 @@ import { notFound } from "next/navigation";
 import { ago, money, pct, until, when } from "@/lib/format";
 import { prisma } from "@/lib/db";
 import * as lmsr from "@/lib/lmsr";
-import { getCurrentUser } from "@/lib/session";
+import { getCurrentUser, getOwnerId } from "@/lib/session";
 import { ensureFinalized } from "@/server/finalize";
 import { bundle } from "@/server/services/markets";
 import { tradeBlockReason } from "@/server/services/trading";
 import { disputeResult, postComment } from "@/server/actions/market";
-import { ActionForm } from "@/components/action-form";
+import { deleteCommentAction, hideCommentAction } from "@/server/actions/admin";
+import { HIDDEN_PLACEHOLDER, loadComments } from "@/server/services/comments";
+import { ActionForm, ConfirmButton } from "@/components/action-form";
 import { DeleteMarketButton } from "@/components/delete-market-button";
 import { MarketAdminLinks, MarketAdminPanel } from "@/components/market-admin-panel";
 import { PriceChart } from "@/components/price-chart";
@@ -30,14 +32,18 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
   if (!Number.isInteger(id) || id <= 0) notFound();
   const m = await prisma.market.findUnique({ where: { id } });
   if (!m) notFound();
-  const [user, b] = await Promise.all([getCurrentUser(), bundle(prisma, m)]);
+  const [user, b, ownerId] = await Promise.all([getCurrentUser(), bundle(prisma, m), getOwnerId()]);
+  const muted = user ? (await prisma.commentMute.findUnique({ where: { userId: user.id } })) !== null : false;
+  // Same rule as for people: admins moderate regular users and themselves; only the owner moderates admins.
+  const canModerate = (c: { userId: string; authorIsAdmin: boolean }) =>
+    Boolean(user?.isAdmin) && (user!.isOwner || c.userId === user!.id || (!c.authorIsAdmin && c.userId !== ownerId));
 
   const proposed = m.proposedOutcomeId !== null && m.status === "open";
   const [history, trades, clarifications, comments, disputes, proposer] = await Promise.all([
     prisma.priceHistory.findMany({ where: { marketId: id }, orderBy: { id: "asc" } }),
     prisma.trade.findMany({ where: { marketId: id }, orderBy: { id: "desc" }, take: 25, include: { user: true, outcome: true } }),
     prisma.clarification.findMany({ where: { marketId: id }, orderBy: { id: "asc" } }),
-    prisma.comment.findMany({ where: { marketId: id }, orderBy: { id: "desc" }, include: { user: true } }),
+    loadComments(id, Boolean(user?.isAdmin)),
     proposed ? prisma.dispute.findMany({ where: { marketId: id, handledAt: null }, orderBy: { id: "asc" }, include: { user: true } }) : [],
     proposed && m.proposedById ? prisma.user.findUnique({ where: { id: m.proposedById } }) : null,
   ]);
@@ -163,7 +169,8 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
 
           <Card className="gap-3 p-5" id="discussion">
             <h2>Discussion</h2>
-            {user && (
+            {user && muted && <p className="text-sm text-muted-foreground">An admin has turned off commenting for your account.</p>}
+            {user && !muted && (
               <ActionForm action={postComment} className="flex items-start gap-2" resetOnSuccess>
                 <input type="hidden" name="market_id" value={id} />
                 <Textarea name="body" maxLength={500} rows={2} placeholder="Share your reasoning…" required />
@@ -171,7 +178,29 @@ export default async function MarketPage({ params }: { params: Promise<{ id: str
               </ActionForm>
             )}
             {comments.length ? comments.map((c) => (
-              <div key={c.id} className="border-t pt-2"><strong>{name(c.user)}</strong> <span className="text-sm text-muted-foreground">{ago(c.createdAt)}</span><p className="mt-0.5 whitespace-pre-wrap">{c.body}</p></div>
+              <div key={c.id} className="border-t pt-2">
+                <div className="flex flex-wrap items-center gap-x-2">
+                  <strong>{c.username}</strong>
+                  <span className="text-sm text-muted-foreground">{ago(c.createdAt)}</span>
+                  {c.hidden && <Tag title="Only admins can see the text">hidden</Tag>}
+                  {canModerate(c) && (
+                    <span className="ml-auto flex gap-1">
+                      <ActionForm action={hideCommentAction}>
+                        <input type="hidden" name="comment_id" value={c.id} />
+                        <input type="hidden" name="hidden" value={c.hidden ? "0" : "1"} />
+                        <Button variant="ghost" size="xs">{c.hidden ? "Unhide" : "Hide"}</Button>
+                      </ActionForm>
+                      <ActionForm action={deleteCommentAction}>
+                        <input type="hidden" name="comment_id" value={c.id} />
+                        <ConfirmButton variant="ghost" size="xs" className="text-down" title="Delete this comment?" message="It's removed for everyone and can't be restored. Hide it instead to keep a copy for admins." confirmLabel="Delete">Delete</ConfirmButton>
+                      </ActionForm>
+                    </span>
+                  )}
+                </div>
+                {c.body === null
+                  ? <p className="mt-0.5 text-sm text-muted-foreground italic">{HIDDEN_PLACEHOLDER}</p>
+                  : <p className={`mt-0.5 whitespace-pre-wrap ${c.hidden ? "text-muted-foreground line-through" : ""}`}>{c.body}</p>}
+              </div>
             )) : <p className="text-muted-foreground">No comments yet.</p>}
           </Card>
         </div>

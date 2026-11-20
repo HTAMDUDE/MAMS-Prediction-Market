@@ -39,6 +39,7 @@ model User {
   clarifications Clarification[]
   blocks       MarketBlock[]
   tradeBan     TradeBan?
+  commentMute  CommentMute?
 
   @@map("user")
 }
@@ -131,6 +132,7 @@ model Market {
   proposedAt        DateTime?
   finalizesAt       DateTime?
   resolvedById      String?
+  featured          Boolean   @default(false) // pinned first on the home page
 
   outcomes       Outcome[]
   trades         Trade[]
@@ -203,9 +205,40 @@ model Comment {
   userId    String
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   body      String
+  hidden    Boolean  @default(false) // hidden by an admin: shown to admins only
   createdAt DateTime @default(now())
 
   @@index([marketId])
+}
+
+// Users an admin has barred from commenting (trading is separate, see TradeBan).
+model CommentMute {
+  userId    String   @id
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+}
+
+// Every admin action, newest first on Admin → Activity. Names are copied in so entries survive deleted accounts.
+model AuditLog {
+  id          Int      @id @default(autoincrement())
+  actorId     String?
+  actorName   String
+  action      String // e.g. "user.delete", see src/lib/audit-actions.ts
+  targetType  String? // user | market | comment | proposal | site
+  targetId    String?
+  targetLabel String?
+  detail      String   @default("")
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([action])
+}
+
+// Small key/value settings, e.g. the site announcement banner.
+model SiteSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
 }
 
 // Markets suggested by users, waiting for an admin to approve or reject.
@@ -250,8 +283,8 @@ model Clarification {
   id        Int      @id @default(autoincrement())
   marketId  Int
   market    Market   @relation(fields: [marketId], references: [id], onDelete: Cascade)
-  adminId   String
-  admin     User     @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  adminId   String? // kept (as null) if the admin's account is later deleted: the rules note must survive
+  admin     User?    @relation(fields: [adminId], references: [id], onDelete: SetNull)
   body      String
   createdAt DateTime @default(now())
 

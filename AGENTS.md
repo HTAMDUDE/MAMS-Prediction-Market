@@ -72,7 +72,8 @@ scripts/                     import-sqlite.ts, reset-password.ts (run with tsx)
 src/lib/                     lmsr.ts (market-maker math), constants.ts, time.ts (school timezone), format.ts, validation.ts (zod),
                              auth.ts / auth-client.ts (better-auth), session.ts (current user, server-only), db.ts (Prisma), username.ts,
                              email.ts (Resend sender, swappable transport for tests), email-templates.ts, verify.ts (resend cooldown)
-src/server/services/         ALL business logic: markets, trading, resolution, moderation, proposals, portfolio, permissions
+src/server/services/         ALL business logic: markets, trading, resolution, moderation, proposals, portfolio, permissions,
+                             accounts (user admin: email/verify/delete/list), comments (moderation), settings (announcement), audit
 src/server/actions/          thin "use server" actions: zod-parse → auth → service → toast/redirect
 src/server/finalize.ts       ensureFinalized(): pays out markets whose dispute window ended (cached per request)
 src/app/                     pages (App Router) + api/auth, api/quote, api/cron/finalize
@@ -82,6 +83,8 @@ tests/                       Vitest suites (helpers.ts has the test fixtures)
 
 ## Conventions
 
+- **Every admin action is audited.** A service that an admin can trigger must call `logAudit(actor, "<action key>", {...})` (`src/server/services/audit.ts`) after its transaction commits, and the key must exist in `src/lib/audit-actions.ts` (that map also drives the labels on Admin → Activity). Failed or forbidden attempts are not logged. Add a test that checks the entry. Audit rows copy names in (no foreign keys) so they survive deleted accounts, and nothing in the app edits or deletes them.
+- **Permission rule for acting on people (and their comments):** the owner can act on anyone, admins only on regular users (and themselves for their own comments); nobody but the owner touches the owner. Use `canManage()`; never re-implement it. Deleting an account is further limited: not yourself, not the owner, and admins must be demoted first.
 - **Business rules live only in `src/server/services`.** Actions and routes stay thin. Services take an `Actor` (`{id, isAdmin, isOwner}`) and enforce permissions themselves (`assertAdmin`, `canManage`), so tests cover them. Add tests there for any rule you add.
 - **Every input is zod-validated** (`src/lib/validation.ts`). User-facing failures throw `TradeError` (message shown as-is in a toast); `run()` in `src/server/actions/util.ts` converts it to a result.
 - **Money:** stored as `Float`, always rounded to cents with `cents()` / `adjustBalance()` (atomic SQL `ROUND(...::numeric, 2)`). Never read-modify-write a balance. Lock the market row first (`lockMarket`) in any transaction that changes outcomes, trades or balances; lock markets in ascending id order.
@@ -125,6 +128,17 @@ tests/                       Vitest suites (helpers.ts has the test fixtures)
 ## Change log
 
 Newest first. One entry per change; see rule 2 above.
+
+### 2026-11-20: More admin controls
+
+- **User accounts:** Admin → Users now has search (username/email), filters (admins, banned, muted, unverified) and pagination, and a per-user **Manage** dialog with every control: balance, ban/allow trading, mute/allow commenting, change email (re-verifies and mails the new address), resend verification, mark verified, reset password, role, and **delete account** (reverses their bets in unresolved markets first; not self/owner; admins must be demoted first). Fixes the known mistyped-email gap.
+- **Audit log:** new `AuditLog` table, `logAudit()`/`listAudit()` in `src/server/services/audit.ts`, action catalog in `src/lib/audit-actions.ts`, and an Admin → Activity page (search + pagination). Every existing admin service (markets, results, proposals, blocks, bans, balances, roles, password reset) is now instrumented, as are all the new controls.
+- **Comment moderation:** hide/unhide and delete comments from the market page (hidden text is never sent to non-admins), and mute a user from commenting (`CommentMute`, enforced in `addComment`). Same `canManage` rules as for people.
+- **Market controls:** close betting early, reopen a closed market (no proposed result, new closing time), feature markets (`Market.featured`: sorted first on the home page, ★ badge), and a site-wide announcement banner (`SiteSetting`, 300 chars).
+- Schema migration `admin_controls` (additive; `Clarification.adminId` is now nullable with `SetNull` so a deleted admin's rules notes survive). New tests in `tests/admin-controls.test.ts` (83 tests total).
+- Fixed: the Users "admins" filter now counts the owner even if their stored flag was never set.
+- Files: `prisma/schema.prisma`, `src/server/services/{accounts,audit,comments,settings,markets,moderation,resolution,proposals}.ts`, `src/server/actions/admin.ts`, `src/lib/audit-actions.ts`, `src/components/{admin-users-table,manage-dialog,market-admin-panel,market-card}.tsx`, `src/app/{admin/page,admin/activity/page,market/[id]/page,layout,page}.tsx`, `tests/{admin-controls,helpers}.ts`, `README.md`.
+- Notes: auto-finalized results (system action) are not in the audit log. The announcement banner lives in the root layout, so people already on the site see a new one on their next full page load.
 
 ### 2026-11-20: Email verification with Resend, and a setup guide
 

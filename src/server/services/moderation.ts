@@ -1,5 +1,6 @@
 import { cents } from "@/lib/constants";
 import { prisma, type Tx } from "@/lib/db";
+import { logAudit, userLabel } from "./audit";
 import { snapshotPrices } from "./markets";
 import { adjustBalance, assertAdmin, canManage, findOwnerId, lockMarket, NOT_ALLOWED, TradeError, type Actor } from "./permissions";
 
@@ -39,12 +40,17 @@ export async function blockUserInMarket(actor: Actor, marketId: number, username
     });
     return refundUserInMarket(tx, u.id, marketId);
   }, { timeout: 30000 });
-  return { username: u.displayUsername ?? u.username ?? name, refund };
+  const username = u.displayUsername ?? u.username ?? name;
+  await logAudit(actor, "market.block", {
+    targetType: "user", targetId: u.id, targetLabel: username, detail: `Market #${marketId}.${refund ? ` Refunded Ⓜ${refund.toFixed(2)}.` : ""}`,
+  });
+  return { username, refund };
 }
 
 export async function unblockUserInMarket(actor: Actor, marketId: number, userId: string) {
   assertAdmin(actor);
   await prisma.marketBlock.deleteMany({ where: { marketId, userId } });
+  await logAudit(actor, "market.unblock", { targetType: "user", targetId: userId, targetLabel: await userLabel(userId), detail: `Market #${marketId}.` });
 }
 
 /** Turn trading off for a user (refunding their open bets everywhere), or back on if it was off. */
@@ -57,6 +63,7 @@ export async function toggleTradingBan(actor: Actor, userId: string) {
   if (userId === (await findOwnerId())) throw new TradeError("The owner can't be banned from trading.");
   if (await prisma.tradeBan.findUnique({ where: { userId } })) {
     await prisma.tradeBan.delete({ where: { userId } });
+    await logAudit(actor, "user.unban", { targetType: "user", targetId: userId, targetLabel: label });
     return { banned: false, refund: 0, username: label };
   }
   const refund = await prisma.$transaction(async (tx) => {
@@ -69,6 +76,9 @@ export async function toggleTradingBan(actor: Actor, userId: string) {
     }
     return total;
   }, { timeout: 60000 });
+  await logAudit(actor, "user.ban", {
+    targetType: "user", targetId: userId, targetLabel: label, detail: refund ? `Refunded Ⓜ${refund.toFixed(2)} from open bets.` : "",
+  });
   return { banned: true, refund, username: label };
 }
 
@@ -80,6 +90,9 @@ export async function grantBalance(actor: Actor, userId: string, amountInput: nu
   }
   if (!(await canManage(actor, userId))) throw new TradeError(NOT_ALLOWED);
   await adjustBalance(prisma, userId, amount, { floorAtZero: true });
+  await logAudit(actor, "user.grant", {
+    targetType: "user", targetId: userId, targetLabel: await userLabel(userId), detail: `${amount > 0 ? "+" : "−"}Ⓜ${Math.abs(amount).toFixed(2)}`,
+  });
   return amount;
 }
 
@@ -89,4 +102,5 @@ export async function toggleAdmin(actor: Actor, userId: string) {
   const u = await prisma.user.findUnique({ where: { id: userId }, select: { isAdmin: true } });
   if (!u) throw new TradeError("User not found.");
   await prisma.user.update({ where: { id: userId }, data: { isAdmin: !u.isAdmin } });
+  await logAudit(actor, u.isAdmin ? "user.admin_off" : "user.admin_on", { targetType: "user", targetId: userId, targetLabel: await userLabel(userId) });
 }

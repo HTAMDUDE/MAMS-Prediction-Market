@@ -1,7 +1,8 @@
 import Link from "next/link";
 import type { Bundle } from "@/server/services/markets";
+import { schoolLocalInDays } from "@/lib/time";
 import {
-  blockAction, cancelAction, clarifyAction, proposeResultAction, resultAction, unblockAction,
+  blockAction, cancelAction, clarifyAction, closeEarlyAction, featureAction, proposeResultAction, reopenAction, resultAction, unblockAction,
 } from "@/server/actions/admin";
 import { ActionForm, ConfirmButton } from "@/components/action-form";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -15,6 +16,31 @@ export function MarketAdminPanel({ b, blocked, allUsers }: { b: Bundle; blocked:
   return (
     <Card className="gap-3 border-primary/40 p-4" id="admin">
       <h2>Admin</h2>
+
+      <div className="space-y-2">
+        {b.state === "open" && (
+          <ActionForm action={closeEarlyAction}>
+            <input type="hidden" name="market_id" value={b.m.id} />
+            <ConfirmButton variant="outline" className="w-full" title="Close betting now?" message="Nobody can bet or sell after this, and you can propose a result right away. You can reopen betting later." confirmLabel="Close betting">
+              Close betting now
+            </ConfirmButton>
+          </ActionForm>
+        )}
+        {b.state === "closed" && (
+          <ActionForm action={reopenAction} className="space-y-2">
+            <input type="hidden" name="market_id" value={b.m.id} />
+            <label className="text-sm font-medium">Reopen betting until
+              <Input type="datetime-local" name="closes_at" required defaultValue={schoolLocalInDays(1)} className="mt-1.5 font-normal" />
+            </label>
+            <Button variant="outline" className="w-full">Reopen betting</Button>
+          </ActionForm>
+        )}
+        <ActionForm action={featureAction}>
+          <input type="hidden" name="market_id" value={b.m.id} />
+          <input type="hidden" name="featured" value={b.m.featured ? "0" : "1"} />
+          <Button variant="outline" className="w-full">{b.m.featured ? "★ Remove from featured" : "☆ Feature on the home page"}</Button>
+        </ActionForm>
+      </div>
       {b.state === "open" ? (
         <p className="text-sm text-muted-foreground">You can propose a result once betting closes.</p>
       ) : (

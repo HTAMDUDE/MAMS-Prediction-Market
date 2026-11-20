@@ -69,6 +69,15 @@ Admins see an **Admin** link in the top bar.
 | **Block from one market** | The market's page → Admin → "Blocked from this market" | Stops that person betting on this market (e.g. someone who already knows the answer). Any bets they placed here are refunded and removed, which also undoes their effect on the price. Can be undone with Unblock. |
 | **Ban from trading** | Admin page → Users → Trading | Stops someone betting anywhere. Their bets in every unresolved market are refunded and removed. Already-resolved markets are not changed. Click **Allow** to lift the ban. |
 | **Reset a password** | Admin page → Users → Password | Gives the user a temporary password (shown once) and signs them out. They can change it on their Portfolio page. |
+| **Find a user** | Admin page → Users | Search by username or email, filter (admins, banned, muted, email not verified), 25 per page. Click **Manage** on a row for everything below. Emails are visible to admins only. |
+| **Fix or verify an email** | Users → Manage → Email | **Change email** (for a typo, or to give an imported account one) sends a verification link to the new address and they can't log in until they use it. **Resend verification** and **Mark as verified** (when you know the address is theirs) unblock people who are stuck. |
+| **Mute from commenting** | Users → Manage → Trading and commenting | Stops someone commenting without touching their trading. Undo with **Allow commenting**. |
+| **Delete an account** | Users → Manage → Danger zone | Removes the account, comments and proposals. Their bets in unresolved markets are reversed and prices restored; payouts already made are kept. Admins must be demoted first; the owner and your own account can't be deleted. |
+| **Moderate comments** | Market page → Discussion | **Hide** a comment (only admins can read it, others see “hidden by an admin”) or **Delete** it for good. Same permissions as for people: admins moderate regular users and themselves; only the owner moderates admins. |
+| **Close betting early / Reopen** | Market page → Admin | **Close betting now** moves the market to *Awaiting result*. **Reopen betting** (on a closed market, with no proposed result) sets a new closing time. |
+| **Feature a market** | Market page → Admin | Featured markets are pinned first on the home page and marked ★. |
+| **Site announcement** | Admin page → Site announcement | A banner at the top of every page (up to 300 characters) until you clear it. People already on the site see a new one on their next page load. |
+| **Activity log** | Admin page → Activity log | Every admin action (who, what, to whom, when), searchable and paginated. Entries can't be edited or removed, and keep names even after an account is deleted. |
 | **Adjust balance / Make admin** (admins: owner only) | Admin page → Users | Add or remove MAMS Bucks, or promote/demote other users. |
 
 When betting closes, a market moves to **Awaiting result**. An admin proposes the result, there is a 24-hour challenge

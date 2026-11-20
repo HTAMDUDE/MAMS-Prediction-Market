@@ -7,6 +7,7 @@ import { FLASH_COOKIE } from "@/lib/flash";
 import { Flash } from "@/components/flash";
 import { Header } from "@/components/header";
 import { ThemeProvider } from "@/components/theme-provider";
+import { getAnnouncement } from "@/server/services/settings";
 import { VerifyToast } from "@/components/verify-toast";
 import { Toaster } from "@/components/ui/sonner";
 import "./globals.css";
@@ -22,12 +23,20 @@ export const metadata: Metadata = {
 };
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
-  const flash = (await cookies()).get(FLASH_COOKIE)?.value ?? null;
+  const [flash, announcement] = await Promise.all([
+    cookies().then((c) => c.get(FLASH_COOKIE)?.value ?? null),
+    getAnnouncement(),
+  ]);
   return (
     <html lang="en" className={inter.variable} suppressHydrationWarning>
       <body className="flex min-h-screen flex-col">
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
           <Header />
+          {announcement && (
+            <div role="status" className="border-b border-gold/40 bg-gold/15">
+              <p className="mx-auto max-w-280 px-4 py-2 text-sm font-medium whitespace-pre-line">📢 {announcement}</p>
+            </div>
+          )}
           <main className="mx-auto w-full max-w-280 flex-1 px-4 py-5">{children}</main>
           <footer className="mx-auto w-full max-w-280 px-4 py-6 text-sm text-muted-foreground">
             Play money only — {CURRENCY} have no cash value. Prices are the crowd&apos;s estimate of how likely each outcome is.
