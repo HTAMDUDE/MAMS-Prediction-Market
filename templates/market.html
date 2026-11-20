@@ -89,7 +89,9 @@
     {% if b.state == 'open' %}
     <div class="card trade-card" id="trade">
       <h2>Place a bet</h2>
-      {% if user %}
+      {% if user and block_reason %}
+        <p class="muted">{{ block_reason }}</p>
+      {% elif user %}
       <form method="post" action="{{ url_for('trade', mid=b.m.id) }}" id="trade-form"
             data-market="{{ b.m.id }}" data-quote="{{ url_for('quote') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -136,7 +138,7 @@
     {% endif %}
 
     {% if user and user.is_admin and b.m.status == 'open' %}
-    <div class="card admin-card">
+    <div class="card admin-card" id="admin">
       <h2>Admin</h2>
       <form method="post" action="{{ url_for('admin_resolve', mid=b.m.id) }}"
             onsubmit="return confirm('Resolve this market? Winners are paid immediately and this cannot be undone.')">
@@ -153,6 +155,28 @@
             onsubmit="return confirm('Cancel this market and refund everyone?')">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <button class="btn btn-block btn-danger">Cancel &amp; refund</button>
+      </form>
+
+      <h3 class="spaced">Blocked from this market</h3>
+      <p class="muted small">For people who know the answer ahead of time. Blocking someone refunds and removes any
+        bets they already placed here.</p>
+      {% for bu in blocked %}
+        <div class="blocked-row">
+          <span>{{ bu.username }}</span>
+          <form method="post" action="{{ url_for('admin_unblock', mid=b.m.id, uid=bu.id) }}" class="inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="btn btn-small btn-ghost">Unblock</button>
+          </form>
+        </div>
+      {% else %}
+        <p class="muted small">Nobody is blocked.</p>
+      {% endfor %}
+      <form method="post" action="{{ url_for('admin_block', mid=b.m.id) }}" class="inline block-form"
+            onsubmit="return confirm('Block ' + this.username.value + ' from this market? Their bets here will be refunded and removed.')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input name="username" list="all-users" placeholder="Username" required autocomplete="off">
+        <datalist id="all-users">{% for name in all_users %}<option value="{{ name }}">{% endfor %}</datalist>
+        <button class="btn btn-small btn-danger">Block</button>
       </form>
     </div>
     {% endif %}

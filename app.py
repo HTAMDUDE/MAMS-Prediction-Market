@@ -184,6 +184,70 @@ class TradeError(Exception):
     pass
 
 
+def trade_block_reason(db, user_id, market_id):
+    """Why this user can't trade in this market, or None if they can."""
+    if db.execute("SELECT 1 FROM trade_bans WHERE user_id = ?", (user_id,)).fetchone():
+        return "An admin has turned off trading for your account."
+    if db.execute("SELECT 1 FROM market_blocks WHERE user_id = ? AND market_id = ?",
+                  (user_id, market_id)).fetchone():
+        return "An admin has blocked you from betting on this market."
+    return None
+
+
+def refund_user_in_market(db, user_id, market_id):
+    """Undo a user's bets in an unresolved market: give back what they net-spent, remove their shares
+    from the market (reversing their effect on prices) and erase their trades. Must run inside a
+    transaction. Returns the amount refunded."""
+    m = db.execute("SELECT * FROM markets WHERE id = ?", (market_id,)).fetchone()
+    if m is None or m["status"] != "open":
+        return 0.0  # resolved/cancelled markets are already settled
+    had_trades = db.execute("SELECT 1 FROM trades WHERE user_id = ? AND market_id = ? LIMIT 1",
+                            (user_id, market_id)).fetchone()
+    if not had_trades:
+        return 0.0
+    net = db.execute("SELECT COALESCE(SUM(amount), 0) FROM trades WHERE user_id = ? AND market_id = ?",
+                     (user_id, market_id)).fetchone()[0]
+    for p in db.execute("SELECT p.outcome_id, p.shares FROM positions p JOIN outcomes o ON o.id = p.outcome_id "
+                        "WHERE p.user_id = ? AND o.market_id = ?", (user_id, market_id)).fetchall():
+        db.execute("UPDATE outcomes SET shares = shares - ? WHERE id = ?", (p["shares"], p["outcome_id"]))
+    db.execute("DELETE FROM positions WHERE user_id = ? AND outcome_id IN "
+               "(SELECT id FROM outcomes WHERE market_id = ?)", (user_id, market_id))
+    db.execute("DELETE FROM trades WHERE user_id = ? AND market_id = ?", (user_id, market_id))
+    refund = cents(max(net, 0.0))  # if they already sold at a profit, there's nothing to give back
+    if refund > 0:
+        db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (refund, user_id))
+    snapshot_prices(db, market_id, m["b"])
+    return refund
+
+
+def block_user_in_market(db, user_id, market_id):
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        db.execute("INSERT OR IGNORE INTO market_blocks (market_id, user_id, created_at) VALUES (?, ?, ?)",
+                   (market_id, user_id, now_str()))
+        refund = refund_user_in_market(db, user_id, market_id)
+        db.execute("COMMIT")
+        return refund
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+
+
+def ban_user_from_trading(db, user_id):
+    """Site-wide trading ban; refunds the user's bets in every unresolved market."""
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        db.execute("INSERT OR IGNORE INTO trade_bans (user_id, created_at) VALUES (?, ?)", (user_id, now_str()))
+        refund = 0.0
+        for r in db.execute("SELECT DISTINCT market_id FROM trades WHERE user_id = ?", (user_id,)).fetchall():
+            refund += refund_user_in_market(db, user_id, r["market_id"])
+        db.execute("COMMIT")
+        return refund
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+
+
 def execute_trade(db, user_id, market_id, outcome_id, action, value):
     """Buy (value = coins to spend) or sell (value = shares to sell). Returns a status message."""
     db.execute("BEGIN IMMEDIATE")
@@ -193,6 +257,9 @@ def execute_trade(db, user_id, market_id, outcome_id, action, value):
             raise TradeError("Market not found.")
         if market_state(m) != "open":
             raise TradeError("This market is no longer accepting bets.")
+        block = trade_block_reason(db, user_id, market_id)
+        if block:
+            raise TradeError(block)
         outs = get_outcomes(db, market_id)
         ids = [o["id"] for o in outs]
         if outcome_id not in ids:
@@ -307,7 +374,7 @@ def delete_market(db, market_id):
         db.execute("DELETE FROM positions WHERE outcome_id IN (SELECT id FROM outcomes WHERE market_id = ?)",
                    (market_id,))
         db.execute("UPDATE proposals SET market_id = NULL WHERE market_id = ?", (market_id,))
-        for table in ("trades", "price_history", "comments", "outcomes"):
+        for table in ("trades", "price_history", "comments", "market_blocks", "outcomes"):
             db.execute(f"DELETE FROM {table} WHERE market_id = ?", (market_id,))
         db.execute("DELETE FROM markets WHERE id = ?", (market_id,))
         db.execute("COMMIT")
@@ -546,8 +613,15 @@ def market(mid):
             o = by_id[p["outcome_id"]]
             my_positions.append({"outcome": o, "shares": p["shares"], "cost": p["cost"],
                                  "value": p["shares"] * o["price"]})
-    return render_template("market.html", b=b, history=history, trades=trades,
-                           comments=comments, my_positions=my_positions)
+    block_reason = trade_block_reason(db, g.user["id"], mid) if g.user else None
+    blocked, all_users = [], []
+    if g.user and g.user["is_admin"]:
+        blocked = db.execute("SELECT u.id, u.username FROM market_blocks mb JOIN users u ON u.id = mb.user_id "
+                             "WHERE mb.market_id = ? ORDER BY u.username", (mid,)).fetchall()
+        all_users = [r["username"] for r in db.execute("SELECT username FROM users ORDER BY username")]
+    return render_template("market.html", b=b, history=history, trades=trades, comments=comments,
+                           my_positions=my_positions, block_reason=block_reason,
+                           blocked=blocked, all_users=all_users)
 
 
 @app.post("/market/<int:mid>/trade")
@@ -669,8 +743,9 @@ def admin():
     markets = [bundle(db, m) for m in db.execute("SELECT * FROM markets WHERE status = 'open' ORDER BY closes_at")]
     settled = [bundle(db, m) for m in db.execute(
         "SELECT * FROM markets WHERE status != 'open' ORDER BY resolved_at DESC")]
-    users = db.execute("SELECT * FROM users ORDER BY username").fetchall()
-    proposals = [dict(p, outcomes=json.loads(p["outcomes"])) for p in db.execute(
+    users = db.execute("SELECT u.*, (tb.user_id IS NOT NULL) AS banned FROM users u "
+                       "LEFT JOIN trade_bans tb ON tb.user_id = u.id ORDER BY u.username").fetchall()
+    proposals =[dict(p, outcomes=json.loads(p["outcomes"])) for p in db.execute(
         "SELECT p.*, u.username FROM proposals p JOIN users u ON u.id = p.user_id "
         "WHERE p.status = 'pending' ORDER BY p.id")]
     default_close = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M")
@@ -906,6 +981,48 @@ def admin_delete(mid):
     except TradeError as e:
         flash(str(e), "error")
     return redirect(url_for("admin"))
+
+
+@app.post("/admin/markets/<int:mid>/block")
+@admin_required
+def admin_block(mid):
+    db = get_db()
+    if db.execute("SELECT 1 FROM markets WHERE id = ?", (mid,)).fetchone() is None:
+        abort(404)
+    name = request.form.get("username", "").strip()
+    u = db.execute("SELECT id, username FROM users WHERE username = ?", (name,)).fetchone()
+    if u is None:
+        flash(f"No user named “{name}”.", "error")
+    else:
+        refund = block_user_in_market(db, u["id"], mid)
+        flash(f"{u['username']} can no longer bet on this market."
+              + (f" Refunded Ⓜ{refund:,.2f} and removed their bets." if refund else ""), "success")
+    return redirect(url_for("market", mid=mid) + "#admin")
+
+
+@app.post("/admin/markets/<int:mid>/unblock/<int:uid>")
+@admin_required
+def admin_unblock(mid, uid):
+    get_db().execute("DELETE FROM market_blocks WHERE market_id = ? AND user_id = ?", (mid, uid))
+    flash("They can bet on this market again.", "success")
+    return redirect(url_for("market", mid=mid) + "#admin")
+
+
+@app.post("/admin/users/<int:uid>/trading")
+@admin_required
+def admin_trading(uid):
+    db = get_db()
+    u = db.execute("SELECT id, username FROM users WHERE id = ?", (uid,)).fetchone()
+    if u is None:
+        abort(404)
+    if db.execute("SELECT 1 FROM trade_bans WHERE user_id = ?", (uid,)).fetchone():
+        db.execute("DELETE FROM trade_bans WHERE user_id = ?", (uid,))
+        flash(f"{u['username']} can trade again.", "success")
+    else:
+        refund = ban_user_from_trading(db, uid)
+        flash(f"Trading turned off for {u['username']}."
+              + (f" Refunded Ⓜ{refund:,.2f} from their open bets." if refund else ""), "success")
+    return redirect(url_for("admin") + "#users")
 
 
 @app.post("/admin/users/<int:uid>/grant")

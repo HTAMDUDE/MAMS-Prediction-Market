@@ -279,3 +279,70 @@ def test_proposals_flow():
             assert admin.get(path_).status_code == 200, path_
     finally:
         appmod.DB_PATH = old
+
+
+def test_blocking_and_bans_refund_bets():
+    path = os.path.join(tempfile.mkdtemp(), "blocks.db")
+    old = appmod.DB_PATH
+    appmod.DB_PATH = path
+    appmod._hits.clear()
+    try:
+        appmod.init_db()
+        db = appmod.connect()
+        admin, eve, fay = (appmod.app.test_client() for _ in range(3))
+        signup(admin, "boss")
+        signup(eve, "eve")
+        signup(fay, "fay")
+        uid = lambda n: db.execute("SELECT id FROM users WHERE username=?", (n,)).fetchone()[0]
+        bal = lambda n: db.execute("SELECT balance FROM users WHERE username=?", (n,)).fetchone()[0]
+        closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+        m1 = appmod.create_market(db, "M1?", "", "Other", closes, ["Yes", "No"], 100)
+        m2 = appmod.create_market(db, "M2?", "", "Other", closes, ["Yes", "No"], 100)
+        yes1 = appmod.get_outcomes(db, m1)[0]["id"]
+        yes2 = appmod.get_outcomes(db, m2)[0]["id"]
+
+        appmod.execute_trade(db, uid("eve"), m1, yes1, "buy", 200)
+        appmod.execute_trade(db, uid("fay"), m1, yes1, "buy", 100)
+        fay_shares = db.execute("SELECT shares FROM positions WHERE user_id=?", (uid("fay"),)).fetchone()[0]
+
+        # per-market block: eve refunded, her shares leave the market, fay untouched
+        tok = csrf(admin.get(f"/market/{m1}"))
+        r = admin.post(f"/admin/markets/{m1}/block", data={"csrf_token": tok, "username": "eve"},
+                       follow_redirects=True)
+        assert "Refunded Ⓜ200.00" in r.get_data(as_text=True)
+        assert bal("eve") == pytest.approx(1000)
+        assert db.execute("SELECT COUNT(*) FROM trades WHERE user_id=?", (uid("eve"),)).fetchone()[0] == 0
+        q = db.execute("SELECT shares FROM outcomes WHERE id=?", (yes1,)).fetchone()[0]
+        assert q == pytest.approx(fay_shares)
+        assert bal("fay") == pytest.approx(900)
+        assert "blocked you from betting" in eve.get(f"/market/{m1}").get_data(as_text=True)
+        with pytest.raises(appmod.TradeError):
+            appmod.execute_trade(db, uid("eve"), m1, yes1, "buy", 10)
+        appmod.execute_trade(db, uid("eve"), m2, yes2, "buy", 10)  # other markets still fine
+
+        # unblock
+        tok = csrf(admin.get(f"/market/{m1}"))
+        admin.post(f"/admin/markets/{m1}/unblock/{uid('eve')}", data={"csrf_token": tok})
+        appmod.execute_trade(db, uid("eve"), m1, yes1, "buy", 10)
+
+        # site-wide ban refunds every open market
+        tok = csrf(admin.get("/admin"))
+        r = admin.post(f"/admin/users/{uid('eve')}/trading", data={"csrf_token": tok}, follow_redirects=True)
+        assert "Trading turned off for eve" in r.get_data(as_text=True)
+        assert bal("eve") == pytest.approx(1000)
+        with pytest.raises(appmod.TradeError):
+            appmod.execute_trade(db, uid("eve"), m2, yes2, "buy", 10)
+        assert "Banned" in admin.get("/admin").get_data(as_text=True)
+
+        # lift the ban
+        tok = csrf(admin.get("/admin"))
+        admin.post(f"/admin/users/{uid('eve')}/trading", data={"csrf_token": tok})
+        appmod.execute_trade(db, uid("eve"), m2, yes2, "buy", 10)
+
+        # deleting a market with blocks still works
+        block_tok = csrf(admin.get(f"/market/{m2}"))
+        admin.post(f"/admin/markets/{m2}/block", data={"csrf_token": block_tok, "username": "fay"})
+        appmod.delete_market(db, m2)
+        assert admin.get(f"/market/{m1}").status_code == 200
+    finally:
+        appmod.DB_PATH = old

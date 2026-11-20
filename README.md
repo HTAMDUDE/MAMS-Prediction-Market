@@ -51,6 +51,8 @@ Admins see an **Admin** link in the top bar.
 | **Resolve** | Admin page or the market's page | Pick the winning outcome. Each winning share pays Ⓜ1 immediately. This can't be undone. |
 | **Cancel & refund** | The market's page | Stops the market and refunds everyone's net spend. The market stays visible under "All". |
 | **Delete** | Admin page or the market's page | Removes the market completely. Unresolved markets refund bets first; payouts from resolved markets are kept. |
+| **Block from one market** | The market's page → Admin → "Blocked from this market" | Stops that person betting on this market (e.g. someone who already knows the answer). Any bets they placed here are refunded and removed, which also undoes their effect on the price. Can be undone with Unblock. |
+| **Ban from trading** | Admin page → Users → Trading | Stops someone betting anywhere. Their bets in every unresolved market are refunded and removed. Already-resolved markets are not changed. Click **Allow** to lift the ban. |
 | **Adjust balance / Make admin** | Admin page → Users | Add or remove MAMS Bucks, or promote/demote other users. |
 
 When betting closes, a market moves to **Awaiting result** until an admin resolves it.

@@ -83,6 +83,20 @@ CREATE TABLE IF NOT EXISTS proposals (
     created_at  TEXT NOT NULL
 );
 
+-- Users an admin has barred from trading in one market (e.g. people who know the answer).
+CREATE TABLE IF NOT EXISTS market_blocks (
+    market_id  INTEGER NOT NULL REFERENCES markets(id),
+    user_id    INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (market_id, user_id)
+);
+
+-- Users an admin has barred from trading anywhere on the site.
+CREATE TABLE IF NOT EXISTS trade_bans (
+    user_id    INTEGER PRIMARY KEY REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
 CREATE INDEX IF NOT EXISTS idx_outcomes_market ON outcomes(market_id);
 CREATE INDEX IF NOT EXISTS idx_trades_market   ON trades(market_id);
