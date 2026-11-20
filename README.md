@@ -33,8 +33,16 @@ python3 -m venv .venv
 Other people on the same network can open `http://<your-computer's-IP>:8000`.
 (Port 5000 isn't used because macOS's AirPlay Receiver already takes it.)
 
-**The first account you register becomes the admin.** To make specific usernames admins when they sign up, set
-`MAMS_ADMINS=alice,bob`. Admins can also promote other users from the Admin page.
+**The first account you register becomes the owner.** To pick the owner by name instead, set
+`MAMS_OWNER=yourusername`. To make specific usernames admins when they sign up, set `MAMS_ADMINS=alice,bob`.
+
+### Roles
+
+| Role | Can do |
+|---|---|
+| **Owner** (one person) | Everything admins can, plus add/remove admins and manage other admins. Nobody can demote, ban, block or change the owner's balance. |
+| **Admin** | Run markets (create, edit, approve proposals, resolve, cancel, delete) and manage **regular users** (balances, bans, blocks). Can't act on the owner or other admins, and can't create admins. |
+| **User** | Bet, comment and propose markets. |
 
 Use `.venv/bin/python`, not plain `python3`, so the app runs with the Flask installed in the virtual environment.
 After changing any code, stop the server (Ctrl+C) and start it again.
@@ -53,7 +61,7 @@ Admins see an **Admin** link in the top bar.
 | **Delete** | Admin page or the market's page | Removes the market completely. Unresolved markets refund bets first; payouts from resolved markets are kept. |
 | **Block from one market** | The market's page → Admin → "Blocked from this market" | Stops that person betting on this market (e.g. someone who already knows the answer). Any bets they placed here are refunded and removed, which also undoes their effect on the price. Can be undone with Unblock. |
 | **Ban from trading** | Admin page → Users → Trading | Stops someone betting anywhere. Their bets in every unresolved market are refunded and removed. Already-resolved markets are not changed. Click **Allow** to lift the ban. |
-| **Adjust balance / Make admin** | Admin page → Users | Add or remove MAMS Bucks, or promote/demote other users. |
+| **Adjust balance / Make admin** (admins: owner only) | Admin page → Users | Add or remove MAMS Bucks, or promote/demote other users. |
 
 When betting closes, a market moves to **Awaiting result** until an admin resolves it.
 
@@ -96,7 +104,7 @@ Fine-grained → read-only access to this repo's contents). Your normal GitHub p
       sys.path.insert(0, path)
 
   os.environ["MAMS_PRODUCTION"] = "1"   # secure cookies + correct visitor IPs behind PythonAnywhere's proxy
-  # os.environ["MAMS_ADMINS"] = "yourname"  # optional: usernames that become admins on sign-up
+  os.environ["MAMS_OWNER"] = "yourusername"  # the site owner (can't be removed by other admins)
 
   from app import app as application
   ```
@@ -124,6 +132,7 @@ accounts or bets.
 |---------------|----------------------|-----------------------------------------------------|
 | `PORT`        | `8000`               | Port to listen on                                   |
 | `MAMS_DB`     | `instance/mams.db`   | SQLite database file                                |
+| `MAMS_OWNER`  | first account        | Username of the site owner                          |
 | `MAMS_ADMINS` | (empty)              | Comma-separated usernames that become admins        |
 | `SECRET_KEY`  | auto-generated       | Session signing key (saved to `instance/secret_key`)|
 | `MAMS_PRODUCTION` | (off)            | Set to `1` when hosted on HTTPS: secure cookies, trust proxy IPs |

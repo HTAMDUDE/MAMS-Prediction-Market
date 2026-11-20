@@ -35,18 +35,7 @@ DAILY_BONUS = 100.0
 MIN_BET = 1.0
 CURRENCY = "MAMS Bucks"
 ADMIN_USERNAMES = {u.strip().lower() for u in os.environ.get("MAMS_ADMINS", "").split(",") if u.strip()}
-# Liquidity presets are for a yes/no market; markets with more outcomes scale up (see market_b)
-# so a bet moves an 8-way market about as much as it moves a 2-way one.
-LIQUIDITY = {"low": 150.0, "medium": 300.0, "high": 600.0}
-
-
-def market_b(preset, n_outcomes):
-    return LIQUIDITY.get(preset, LIQUIDITY["medium"]) * math.log2(max(n_outcomes, 2))
-
-
-def preset_for(b, n_outcomes):
-    """The preset whose scaled liquidity is closest to a market's stored b (old markets may not match exactly)."""
-    return min(LIQUIDITY, key=lambda k: abs(market_b(k, n_outcomes) - b))
+LIQUIDITY = {"low": 50.0, "medium": 100.0, "high": 250.0}
 CATEGORIES = ["Academics", "Competitions", "Sports", "Events", "Campus Life", "Weather", "Other"]
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,20}$")
 EPS = 1e-9
@@ -443,10 +432,15 @@ def csrf_token():
 @app.before_request
 def load_user_and_check_csrf():
     g.user = None
+    g.owner_id = owner_id(get_db())
     if session.get("uid"):
-        g.user = get_db().execute("SELECT * FROM users WHERE id = ?", (session["uid"],)).fetchone()
+        db = get_db()
+        g.user = db.execute("SELECT * FROM users WHERE id = ?", (session["uid"],)).fetchone()
         if g.user is None:
             session.pop("uid")
+        elif g.user["id"] == g.owner_id and not g.user["is_admin"]:
+            db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (g.user["id"],))  # owner is always admin
+            g.user = db.execute("SELECT * FROM users WHERE id = ?", (g.user["id"],)).fetchone()
     if request.method == "POST":
         token = request.form.get("csrf_token", "")
         if not token or not secrets.compare_digest(token, session.get("_csrf", "")):
@@ -461,6 +455,31 @@ def login_required(view):
             return redirect(url_for("login", next=request.path))
         return view(*args, **kwargs)
     return wrapped
+
+
+def owner_id(db):
+    if OWNER_USERNAME:
+        row = db.execute("SELECT id FROM users WHERE username = ?", (OWNER_USERNAME,)).fetchone()
+    else:
+        row = db.execute("SELECT MIN(id) AS id FROM users").fetchone()
+    return row["id"] if row else None
+
+
+def is_owner():
+    return g.get("user") is not None and g.user["id"] == g.get("owner_id")
+
+
+def can_manage(target_id):
+    """Owner can manage anyone. Other admins can only manage regular (non-admin) users."""
+    if is_owner():
+        return True
+    if target_id == g.owner_id:
+        return False
+    target = get_db().execute("SELECT is_admin FROM users WHERE id = ?", (target_id,)).fetchone()
+    return target is not None and not target["is_admin"]
+
+
+NOT_ALLOWED = "Only the site owner can do that to an admin."
 
 
 def admin_required(view):
@@ -479,6 +498,7 @@ def inject_globals():
     if g.user and g.user["is_admin"]:
         pending = get_db().execute("SELECT COUNT(*) FROM proposals WHERE status = 'pending'").fetchone()[0]
     return {"csrf_token": csrf_token, "user": g.user, "can_bonus": can_bonus, "pending_proposals": pending,
+            "owner_id": g.get("owner_id"), "is_owner": is_owner(),
             "CURRENCY": CURRENCY, "DAILY_BONUS": DAILY_BONUS, "CATEGORIES": CATEGORIES}
 
 
@@ -541,7 +561,8 @@ def register():
         else:
             db = get_db()
             first_user = db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
-            is_admin = int(first_user or username.lower() in ADMIN_USERNAMES)
+            is_admin = int((first_user and not OWNER_USERNAME) or username.lower() == OWNER_USERNAME
+                           or username.lower() in ADMIN_USERNAMES)
             try:
                 cur = db.execute(
                     "INSERT INTO users (username, password_hash, balance, is_admin, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -1040,6 +1061,8 @@ def admin_block(mid):
     u = db.execute("SELECT id, username FROM users WHERE username = ?", (name,)).fetchone()
     if u is None:
         flash(f"No user named “{name}”.", "error")
+    elif not can_manage(u["id"]):
+        flash(NOT_ALLOWED, "error")
     else:
         refund = block_user_in_market(db, u["id"], mid)
         flash(f"{u['username']} can no longer bet on this market."
@@ -1062,7 +1085,11 @@ def admin_trading(uid):
     u = db.execute("SELECT id, username FROM users WHERE id = ?", (uid,)).fetchone()
     if u is None:
         abort(404)
-    if db.execute("SELECT 1 FROM trade_bans WHERE user_id = ?", (uid,)).fetchone():
+    if not can_manage(uid):
+        flash(NOT_ALLOWED, "error")
+    elif uid == g.owner_id:
+        flash("The owner can't be banned from trading.", "error")
+    elif db.execute("SELECT 1 FROM trade_bans WHERE user_id = ?", (uid,)).fetchone():
         db.execute("DELETE FROM trade_bans WHERE user_id = ?", (uid,))
         flash(f"{u['username']} can trade again.", "success")
     else:
@@ -1082,6 +1109,9 @@ def admin_grant(uid):
     except ValueError:
         flash("Enter an amount between -100,000 and 100,000.", "error")
         return redirect(url_for("admin"))
+    if not can_manage(uid):
+        flash(NOT_ALLOWED, "error")
+        return redirect(url_for("admin") + "#users")
     get_db().execute("UPDATE users SET balance = MAX(0, ROUND(balance + ?, 2)) WHERE id = ?", (amount, uid))
     flash(f"Adjusted balance by {amount:,.2f}.", "success")
     return redirect(url_for("admin") + "#users")
@@ -1090,7 +1120,9 @@ def admin_grant(uid):
 @app.post("/admin/users/<int:uid>/toggle-admin")
 @admin_required
 def admin_toggle(uid):
-    if uid == g.user["id"]:
+    if not is_owner():
+        flash("Only the site owner can add or remove admins.", "error")
+    elif uid == g.user["id"]:
         flash("You can't remove your own admin access.", "error")
     else:
         get_db().execute("UPDATE users SET is_admin = 1 - is_admin WHERE id = ?", (uid,))

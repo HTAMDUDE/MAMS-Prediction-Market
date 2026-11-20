@@ -468,3 +468,80 @@ def test_quote_matches_trade_and_reports_errors():
         assert appmod.app.test_client().get(url(yes, "buy", 10)).get_json()["ok"]
     finally:
         appmod.DB_PATH = old
+
+
+def test_owner_cannot_be_overridden_by_other_admins():
+    path = os.path.join(tempfile.mkdtemp(), "owner.db")
+    old = appmod.DB_PATH
+    appmod.DB_PATH = path
+    appmod._hits.clear()
+    try:
+        appmod.init_db()
+        db = appmod.connect()
+        owner, helper, kid = (appmod.app.test_client() for _ in range(3))
+        signup(owner, "founder")
+        signup(helper, "helper")
+        signup(kid, "kid")
+        uid = lambda n: db.execute("SELECT id FROM users WHERE username=?", (n,)).fetchone()[0]
+        row = lambda n: db.execute("SELECT * FROM users WHERE username=?", (n,)).fetchone()
+        banned = lambda n: db.execute("SELECT 1 FROM trade_bans WHERE user_id=?", (uid(n),)).fetchone() is not None
+
+        # owner promotes helper
+        owner.post(f"/admin/users/{uid('helper')}/toggle-admin", data={"csrf_token": csrf(owner.get("/admin"))})
+        assert row("helper")["is_admin"] == 1
+        page = owner.get("/admin").get_data(as_text=True)
+        assert ">Owner<" in page and "only you can add or remove admins" in page
+
+        # helper can't touch the owner in any way
+        tok = csrf(helper.get("/admin"))
+        r = helper.post(f"/admin/users/{uid('founder')}/toggle-admin", data={"csrf_token": tok}, follow_redirects=True)
+        assert "Only the site owner" in r.get_data(as_text=True)
+        assert row("founder")["is_admin"] == 1
+        helper.post(f"/admin/users/{uid('founder')}/trading", data={"csrf_token": tok})
+        assert not banned("founder")
+        helper.post(f"/admin/users/{uid('founder')}/grant", data={"csrf_token": tok, "amount": -1000})
+        assert row("founder")["balance"] == pytest.approx(1000)
+        closes = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+        mid = appmod.create_market(db, "Owner test?", "", "Other", closes, ["Yes", "No"], 100)
+        helper.post(f"/admin/markets/{mid}/block", data={"csrf_token": tok, "username": "founder"})
+        assert db.execute("SELECT COUNT(*) FROM market_blocks").fetchone()[0] == 0
+
+        # helper can't make new admins
+        helper.post(f"/admin/users/{uid('kid')}/toggle-admin", data={"csrf_token": tok})
+        assert row("kid")["is_admin"] == 0
+
+        # helper CAN manage regular users
+        helper.post(f"/admin/users/{uid('kid')}/trading", data={"csrf_token": tok})
+        assert banned("kid")
+        helper.post(f"/admin/users/{uid('kid')}/grant", data={"csrf_token": tok, "amount": 50})
+        assert row("kid")["balance"] == pytest.approx(1050)
+
+        # owner can demote the helper; owner can't be banned even by themself
+        tok = csrf(owner.get("/admin"))
+        owner.post(f"/admin/users/{uid('helper')}/toggle-admin", data={"csrf_token": tok})
+        assert row("helper")["is_admin"] == 0
+        assert helper.get("/admin").status_code == 403
+        owner.post(f"/admin/users/{uid('founder')}/trading", data={"csrf_token": tok})
+        assert not banned("founder")
+    finally:
+        appmod.DB_PATH = old
+
+
+def test_owner_from_env_var(monkeypatch):
+    path = os.path.join(tempfile.mkdtemp(), "owner_env.db")
+    old = appmod.DB_PATH
+    appmod.DB_PATH = path
+    appmod._hits.clear()
+    monkeypatch.setattr(appmod, "OWNER_USERNAME", "realowner")
+    try:
+        appmod.init_db()
+        db = appmod.connect()
+        first, real = appmod.app.test_client(), appmod.app.test_client()
+        signup(first, "earlybird")      # first account, but not the configured owner
+        signup(real, "RealOwner")       # matches MAMS_OWNER case-insensitively
+        admin_flag = lambda n: db.execute("SELECT is_admin FROM users WHERE username=?", (n,)).fetchone()[0]
+        assert admin_flag("earlybird") == 0
+        assert admin_flag("RealOwner") == 1
+        assert ">Owner<" in real.get("/admin").get_data(as_text=True)
+    finally:
+        appmod.DB_PATH = old

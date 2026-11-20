@@ -104,22 +104,31 @@ No</textarea>
 </div>
 <div class="card" id="users">
   <h2>Users</h2>
+  <p class="muted small">
+    {% if is_owner %}You're the owner: you can manage everyone, and only you can add or remove admins.
+    {% else %}Only the site owner can add or remove admins, or change an admin's balance or trading access.{% endif %}
+  </p>
   <div class="table-scroll">
   <table class="table">
     <thead><tr><th>User</th><th class="num">Balance</th><th>Adjust balance</th><th>Trading</th><th>Role</th></tr></thead>
     <tbody>
     {% for u in users %}
+      {% set manageable = is_owner or (u.id != owner_id and not u.is_admin) %}
       <tr>
-        <td><strong>{{ u.username }}</strong></td>
+        <td><strong>{{ u.username }}</strong>{% if u.id == user.id %} <span class="muted small">(you)</span>{% endif %}</td>
         <td class="num">Ⓜ{{ u.balance|money }}</td>
         <td>
+          {% if manageable %}
           <form method="post" action="{{ url_for('admin_grant', uid=u.id) }}" class="inline">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="number" name="amount" step="0.01" placeholder="±Ⓜ" class="narrow" required>
             <button class="btn btn-small btn-ghost">Apply</button>
           </form>
+          {% else %}<span class="muted small">Owner only</span>{% endif %}
         </td>
         <td>
+          {% if u.id == owner_id %}<span class="muted small">—</span>
+          {% elif manageable %}
           <form method="post" action="{{ url_for('admin_trading', uid=u.id) }}" class="inline"
                 {% if not u.banned %}onsubmit="return confirm({{ ('Turn off trading for ' ~ u.username ~ '? Their bets in all unresolved markets will be refunded and removed.')|tojson|forceescape }})"{% endif %}>
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -130,14 +139,20 @@ No</textarea>
               <button class="btn btn-small btn-ghost">Ban from trading</button>
             {% endif %}
           </form>
+          {% else %}
+            {% if u.banned %}<span class="status status-rejected">Banned</span>{% else %}<span class="muted small">Owner only</span>{% endif %}
+          {% endif %}
         </td>
         <td>
-          {% if u.id == user.id %}<span class="tag">admin (you)</span>
-          {% else %}
+          {% if u.id == owner_id %}<span class="tag">Owner</span>
+          {% elif is_owner %}
           <form method="post" action="{{ url_for('admin_toggle', uid=u.id) }}" class="inline">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            {% if u.is_admin %}<span class="tag">Admin</span>{% endif %}
             <button class="btn btn-small btn-ghost">{{ 'Remove admin' if u.is_admin else 'Make admin' }}</button>
           </form>
+          {% else %}
+            <span class="{{ 'tag' if u.is_admin else 'muted small' }}">{{ 'Admin' if u.is_admin else 'User' }}</span>
           {% endif %}
         </td>
       </tr>
