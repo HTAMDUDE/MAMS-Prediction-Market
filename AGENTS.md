@@ -130,6 +130,11 @@ tests/                       Vitest suites (helpers.ts has the test fixtures)
 
 Newest first. One entry per change; see rule 2 above.
 
+### 2026-11-20: Fix Vercel install (broken pnpm 11.12.0)
+
+- Vercel's `pnpm install` failed because `packageManager` pinned pnpm 11.12.0, a broken release (its `@pnpm/exe` shipped without a binary). Bumped the pin to `pnpm@11.28.12`; the lockfile is unchanged and `pnpm install --frozen-lockfile` passes.
+- Files: `package.json`.
+
 ### 2026-11-20: More admin controls
 
 - **User accounts:** Admin → Users now has search (username/email), filters (admins, banned, muted, unverified) and pagination, and a per-user **Manage** dialog with every control: balance, ban/allow trading, mute/allow commenting, change email (re-verifies and mails the new address), resend verification, mark verified, reset password, role, and **delete account** (reverses their bets in unresolved markets first; not self/owner; admins must be demoted first). Fixes the known mistyped-email gap.
