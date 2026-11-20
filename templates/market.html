@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% block title %}{{ b.m.question }} · MAMS Prediction Market{% endblock %}
+{% block content %}
+<a class="back" href="{{ url_for('index') }}">← All markets</a>
+
+<div class="market-layout">
+  <div class="market-main">
+    <div class="card">
+      <div class="card-meta">
+        <span class="tag">{{ b.m.category }}</span>
+        {% if b.state == 'open' %}<span class="muted">Closes {{ b.m.closes_at|when }} ({{ b.m.closes_at|until }})</span>
+        {% elif b.state == 'closed' %}<span class="status status-closed">Betting closed — awaiting result</span>
+        {% elif b.state == 'resolved' %}<span class="status status-resolved">Resolved {{ b.m.resolved_at|when }}</span>
+        {% else %}<span class="status status-cancelled">Cancelled — all bets refunded</span>{% endif %}
+      </div>
+      <h1 class="question">{{ b.m.question }}</h1>
+      {% if b.m.description %}<p class="description">{{ b.m.description }}</p>{% endif %}
+
+      <div class="chart-wrap">
+        <div id="chart" class="chart"></div>
+        <div class="legend">
+          {% for o in b.outcomes %}
+            <span class="{{ 'winner' if b.state == 'resolved' and o.id == b.m.resolved_outcome_id }}">
+              <i style="background: var(--c{{ loop.index0 }})"></i>{{ o.label }} <strong>{{ o.price|pct }}</strong>
+            </span>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="stats muted small">Ⓜ{{ b.volume|money }} traded · {{ b.traders }} trader{{ '' if b.traders == 1 else 's' }}</div>
+    </div>
+
+    {% if my_positions %}
+    <div class="card">
+      <h2>Your position</h2>
+      <table class="table">
+        <thead><tr><th>Outcome</th><th class="num">Shares</th><th class="num">Spent</th><th class="num">Value now</th><th class="num">Pays if right</th></tr></thead>
+        <tbody>
+        {% for p in my_positions %}
+          <tr>
+            <td>{{ p.outcome.label }}</td>
+            <td class="num">{{ p.shares|money }}</td>
+            <td class="num">Ⓜ{{ p.cost|money }}</td>
+            <td class="num">Ⓜ{{ p.value|money }}</td>
+            <td class="num">Ⓜ{{ p.shares|money }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    <div class="card">
+      <h2>Recent trades</h2>
+      {% if trades %}
+      <table class="table">
+        <tbody>
+        {% for t in trades %}
+          <tr>
+            <td><strong>{{ t.username }}</strong>
+              {% if t.shares > 0 %}<span class="buy">bought</span>{% else %}<span class="sell">sold</span>{% endif %}
+              {{ t.shares|abs|money }} × {{ t.label }}</td>
+            <td class="num">Ⓜ{{ t.amount|abs|money }}</td>
+            <td class="num muted small">{{ t.created_at|ago }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}<p class="muted">No trades yet. Be the first!</p>{% endif %}
+    </div>
+
+    <div class="card" id="discussion">
+      <h2>Discussion</h2>
+      {% if user %}
+      <form method="post" action="{{ url_for('comment', mid=b.m.id) }}" class="comment-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <textarea name="body" maxlength="500" rows="2" placeholder="Share your reasoning…" required></textarea>
+        <button class="btn btn-small">Post</button>
+      </form>
+      {% endif %}
+      {% for c in comments %}
+        <div class="comment"><strong>{{ c.username }}</strong> <span class="muted small">{{ c.created_at|ago }}</span><p>{{ c.body }}</p></div>
+      {% else %}
+        <p class="muted">No comments yet.</p>
+      {% endfor %}
+    </div>
+  </div>
+
+  <aside class="market-side">
+    {% if b.state == 'open' %}
+    <div class="card trade-card" id="trade">
+      <h2>Place a bet</h2>
+      {% if user %}
+      <form method="post" action="{{ url_for('trade', mid=b.m.id) }}" id="trade-form"
+            data-market="{{ b.m.id }}" data-quote="{{ url_for('quote') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="action" value="buy">
+        <div class="seg">
+          <button type="button" data-action="buy" class="active">Buy</button>
+          <button type="button" data-action="sell">Sell</button>
+        </div>
+        <div class="outcome-pick">
+          {% for o in b.outcomes %}
+            {% set held = (my_positions|selectattr('outcome.id', 'equalto', o.id)|map(attribute='shares')|first) or 0 %}
+            <label>
+              <input type="radio" name="outcome_id" value="{{ o.id }}" data-held="{{ held }}" data-label="{{ o.label }}" {{ 'checked' if loop.first }}>
+              <span><i style="background: var(--c{{ loop.index0 }})"></i>{{ o.label }}<b>{{ (o.price * 100)|round(1) }}¢</b></span>
+            </label>
+          {% endfor %}
+        </div>
+        <label class="field">
+          <span id="value-label">Amount (Ⓜ)</span>
+          <div class="input-row">
+            <input type="number" name="value" id="value" min="0.01" step="0.01" required placeholder="0.00" autocomplete="off">
+            <button type="button" class="btn btn-small btn-ghost" id="max-btn" data-balance="{{ user.balance }}">Max</button>
+          </div>
+        </label>
+        <div class="quick" id="quick">
+          {% for amt in [10, 50, 100] %}<button type="button" data-amt="{{ amt }}">+{{ amt }}</button>{% endfor %}
+        </div>
+        <div class="preview" id="preview"><span class="muted">Enter an amount to see your payout.</span></div>
+        <button class="btn btn-block" id="submit-btn">Buy</button>
+        <p class="muted small center">Balance Ⓜ{{ user.balance|money }}</p>
+      </form>
+      {% else %}
+        <p><a href="{{ url_for('login', next=request.path) }}">Log in</a> or <a href="{{ url_for('register') }}">sign up</a> to bet.</p>
+      {% endif %}
+    </div>
+    {% elif b.state == 'resolved' %}
+    <div class="card">
+      <h2>Result</h2>
+      {% for o in b.outcomes if o.id == b.m.resolved_outcome_id %}<p class="result">{{ o.label }}</p>{% endfor %}
+      <p class="muted small">Every “{% for o in b.outcomes if o.id == b.m.resolved_outcome_id %}{{ o.label }}{% endfor %}” share paid Ⓜ1.</p>
+    </div>
+    {% elif b.state == 'closed' %}
+    <div class="card"><h2>Betting closed</h2><p class="muted">An admin will resolve this market once the result is known.</p></div>
+    {% endif %}
+
+    {% if user and user.is_admin and b.m.status == 'open' %}
+    <div class="card admin-card">
+      <h2>Admin</h2>
+      <form method="post" action="{{ url_for('admin_resolve', mid=b.m.id) }}"
+            onsubmit="return confirm('Resolve this market? Winners are paid immediately and this cannot be undone.')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label class="field"><span>Winning outcome</span>
+          <select name="outcome_id" required>
+            <option value="">Choose…</option>
+            {% for o in b.outcomes %}<option value="{{ o.id }}">{{ o.label }}</option>{% endfor %}
+          </select>
+        </label>
+        <button class="btn btn-block">Resolve market</button>
+      </form>
+      <form method="post" action="{{ url_for('admin_cancel', mid=b.m.id) }}"
+            onsubmit="return confirm('Cancel this market and refund everyone?')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="btn btn-block btn-danger">Cancel &amp; refund</button>
+      </form>
+    </div>
+    {% endif %}
+    {% if user and user.is_admin %}
+    <a class="btn btn-block btn-ghost" href="{{ url_for('admin_edit', mid=b.m.id) }}">Edit market</a>
+    <form method="post" action="{{ url_for('admin_delete', mid=b.m.id) }}"
+          onsubmit="return confirm('Delete this market permanently? This cannot be undone.')">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button class="btn btn-block btn-danger">Delete market</button>
+    </form>
+    {% endif %}
+  </aside>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  drawChart(document.getElementById('chart'), {{ history|tojson }}, {{ b.outcomes|map(attribute='label')|list|tojson }},
+            {{ (b.m.resolved_at if b.state in ('resolved', 'cancelled') else none)|tojson }});
+  setupTradeForm(document.getElementById('trade-form'));
+</script>
+{% endblock %}

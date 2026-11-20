@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Edit market · MAMS Prediction Market{% endblock %}
+{% block content %}
+<a class="back" href="{{ url_for('market', mid=m.id) }}">← Back to market</a>
+<div class="card edit-card">
+  <h1>Edit market</h1>
+  {% if m.status != 'open' %}
+    <p class="flash flash-error">This market is already {{ m.status }}. Edits only change how it's displayed.</p>
+  {% endif %}
+  <form method="post" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label class="field"><span>Question</span>
+      <input name="question" maxlength="200" required value="{{ m.question }}">
+    </label>
+    <label class="field"><span>Resolution criteria</span>
+      <textarea name="description" rows="3">{{ m.description }}</textarea>
+    </label>
+
+    {% if has_trades %}
+      <div class="field"><span>Outcomes</span>
+        <p class="muted small">People have already bet, so you can rename outcomes but not add or remove them.</p>
+        {% for o in outcomes %}
+          <input name="label_{{ o.id }}" maxlength="60" required value="{{ o.label }}" class="outcome-input">
+        {% endfor %}
+      </div>
+    {% else %}
+      <label class="field"><span>Outcomes <em class="muted">(one per line, 2–8)</em></span>
+        <textarea name="outcomes" rows="{{ [outcomes|length, 3]|max }}" required>{{ outcomes|map(attribute='label')|join('\n') }}</textarea>
+      </label>
+    {% endif %}
+
+    <div class="row">
+      <label class="field"><span>Category</span>
+        <select name="category">
+          {% for c in CATEGORIES %}<option {{ 'selected' if c == m.category }}>{{ c }}</option>{% endfor %}
+        </select>
+      </label>
+      <label class="field"><span>Betting closes</span>
+        <input type="datetime-local" name="closes_at" value="{{ closes_value }}" required>
+      </label>
+      <label class="field"><span>Liquidity</span>
+        <select name="liquidity" {{ 'disabled' if has_trades }}
+                title="{{ 'Locked once people have bet' if has_trades else 'Higher liquidity = prices move less per bet' }}">
+          {% for key, label in [('low', 'Low (prices swing fast)'), ('medium', 'Medium'), ('high', 'High (prices steady)')] %}
+            <option value="{{ key }}" {{ 'selected' if key == liquidity }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+    {% if m.status == 'open' %}
+      <p class="muted small">Moving the closing time later reopens betting on a market that has already closed.</p>
+    {% endif %}
+    <div class="hero-actions">
+      <button class="btn">Save changes</button>
+      <a class="btn btn-ghost" href="{{ url_for('market', mid=m.id) }}">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

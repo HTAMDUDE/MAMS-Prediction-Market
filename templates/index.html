@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block content %}
+{% if not user %}
+<section class="hero">
+  <h1>Bet on what happens at Mass Academy.</h1>
+  <p>Sign up and get <strong>1,000 {{ CURRENCY }}</strong> of play money. Buy shares in the outcomes you believe in —
+     each winning share pays out Ⓜ1 when the market resolves. Prices move as people trade, so they show what the whole
+     school thinks will happen.</p>
+  <div class="hero-actions">
+    <a class="btn" href="{{ url_for('register') }}">Get started</a>
+    <a class="btn btn-ghost" href="#how">How it works</a>
+  </div>
+</section>
+{% endif %}
+
+<div class="toolbar">
+  <div class="tabs">
+    {% for key, label in [('open', 'Open'), ('closed', 'Awaiting result'), ('resolved', 'Resolved'), ('all', 'All')] %}
+      <a href="{{ url_for('index', status=key, cat=cat or None) }}" class="tab {{ 'active' if status == key }}">{{ label }}</a>
+    {% endfor %}
+  </div>
+  <div class="chips">
+    <a href="{{ url_for('index', status=status) }}" class="chip {{ 'active' if not cat }}">All topics</a>
+    {% for c in CATEGORIES %}
+      <a href="{{ url_for('index', status=status, cat=c) }}" class="chip {{ 'active' if cat == c }}">{{ c }}</a>
+    {% endfor %}
+  </div>
+</div>
+
+{% if markets %}
+<div class="grid">
+  {% for b in markets %}
+    <a class="card market-card" href="{{ url_for('market', mid=b.m.id) }}">
+      <div class="card-meta">
+        <span class="tag">{{ b.m.category }}</span>
+        {% if b.state == 'open' %}<span class="muted">{{ b.m.closes_at|until }}</span>
+        {% elif b.state == 'closed' %}<span class="status status-closed">Awaiting result</span>
+        {% elif b.state == 'resolved' %}<span class="status status-resolved">Resolved</span>
+        {% else %}<span class="status status-cancelled">Cancelled</span>{% endif %}
+      </div>
+      <h3>{{ b.m.question }}</h3>
+      <ul class="odds">
+        {% for o in b.outcomes[:4] %}
+          <li class="{{ 'winner' if b.state == 'resolved' and o.id == b.m.resolved_outcome_id }}">
+            <span class="odds-label">{{ o.label }}</span>
+            <span class="bar"><span style="width: {{ (o.price * 100)|round(1) }}%; background: var(--c{{ loop.index0 }})"></span></span>
+            <span class="odds-pct">{{ o.price|pct }}</span>
+          </li>
+        {% endfor %}
+        {% if b.outcomes|length > 4 %}<li class="muted small">+{{ b.outcomes|length - 4 }} more</li>{% endif %}
+      </ul>
+      <div class="card-foot muted small">Ⓜ{{ b.volume|money }} traded · {{ b.traders }} trader{{ '' if b.traders == 1 else 's' }}</div>
+    </a>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty">
+  <p>No markets here yet.</p>
+  {% if user and user.is_admin %}<a class="btn" href="{{ url_for('admin') }}">Create a market</a>{% endif %}
+</div>
+{% endif %}
+
+<section id="how" class="how">
+  <h2>How it works</h2>
+  <div class="how-grid">
+    <div><span class="step">1</span><h4>Pick a market</h4><p>Each market is a question about a Mass Academy event with two or more possible outcomes.</p></div>
+    <div><span class="step">2</span><h4>Buy shares</h4><p>A share at 30% costs about Ⓜ0.30. If that outcome happens, every share pays Ⓜ1. Buying pushes the price up.</p></div>
+    <div><span class="step">3</span><h4>Sell any time</h4><p>Changed your mind? Sell shares back before the market closes at the current price.</p></div>
+    <div><span class="step">4</span><h4>Climb the board</h4><p>When the result is known an admin resolves the market and winners get paid. Top net worth leads.</p></div>
+  </div>
+</section>
+{% endblock %}

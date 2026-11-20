@@ -1,0 +1,805 @@
+"""MAMS Prediction Market — bet virtual MAMS Bucks on Mass Academy events."""
+
+import json
+import math
+import os
+import re
+import secrets
+import sqlite3
+from datetime import date, datetime, timedelta
+from functools import wraps
+
+from flask import (Flask, abort, flash, g, jsonify, redirect, render_template,
+                   request, session, url_for)
+from werkzeug.security import check_password_hash, generate_password_hash
+
+import lmsr
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+INSTANCE_DIR = os.path.join(BASE_DIR, "instance")
+os.makedirs(INSTANCE_DIR, exist_ok=True)
+DB_PATH = os.environ.get("MAMS_DB", os.path.join(INSTANCE_DIR, "mams.db"))
+
+STARTING_BALANCE = 1000.0
+DAILY_BONUS = 100.0
+MIN_BET = 1.0
+CURRENCY = "MAMS Bucks"
+ADMIN_USERNAMES = {u.strip().lower() for u in os.environ.get("MAMS_ADMINS", "").split(",") if u.strip()}
+LIQUIDITY = {"low": 50.0, "medium": 100.0, "high": 250.0}
+CATEGORIES = ["Academics", "Competitions", "Sports", "Events", "Campus Life", "Weather", "Other"]
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,20}$")
+EPS = 1e-9
+
+
+def _secret_key():
+    if os.environ.get("SECRET_KEY"):
+        return os.environ["SECRET_KEY"]
+    path = os.path.join(INSTANCE_DIR, "secret_key")
+    if not os.path.exists(path):
+        with open(path, "w") as f:
+            f.write(secrets.token_hex(32))
+    with open(path) as f:
+        return f.read().strip()
+
+
+app = Flask(__name__)
+app.config.update(SECRET_KEY=_secret_key(), PERMANENT_SESSION_LIFETIME=timedelta(days=30))
+
+
+# ---------------------------------------------------------------- database
+
+def connect():
+    db = sqlite3.connect(DB_PATH, isolation_level=None, timeout=10)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA foreign_keys = ON")
+    return db
+
+
+def get_db():
+    if "db" not in g:
+        g.db = connect()
+    return g.db
+
+
+@app.teardown_appcontext
+def close_db(_exc):
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
+
+
+def init_db():
+    db = connect()
+    with open(os.path.join(BASE_DIR, "schema.sql")) as f:
+        db.executescript(f.read())
+    db.close()
+
+
+init_db()
+
+
+# ---------------------------------------------------------------- helpers
+
+def now_str():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def parse_dt(s):
+    return datetime.fromisoformat(s)
+
+
+def cents(x):
+    return round(x + 0.0, 2)
+
+
+def market_state(m):
+    """open | closed (past close date, awaiting resolution) | resolved | cancelled"""
+    if m["status"] in ("resolved", "cancelled"):
+        return m["status"]
+    return "closed" if datetime.now() >= parse_dt(m["closes_at"]) else "open"
+
+
+def get_outcomes(db, market_id):
+    return db.execute("SELECT * FROM outcomes WHERE market_id = ? ORDER BY position", (market_id,)).fetchall()
+
+
+def bundle(db, m):
+    """A market plus its outcomes and current prices, ready for templates."""
+    outs = get_outcomes(db, m["id"])
+    if m["status"] == "resolved":
+        ps = [1.0 if o["id"] == m["resolved_outcome_id"] else 0.0 for o in outs]
+    else:
+        ps = lmsr.prices([o["shares"] for o in outs], m["b"])
+    stats = db.execute(
+        "SELECT COALESCE(SUM(ABS(amount)), 0) AS volume, COUNT(DISTINCT user_id) AS traders "
+        "FROM trades WHERE market_id = ?", (m["id"],)).fetchone()
+    return {
+        "m": m,
+        "state": market_state(m),
+        "outcomes": [{"id": o["id"], "label": o["label"], "shares": o["shares"], "price": p}
+                     for o, p in zip(outs, ps)],
+        "volume": stats["volume"],
+        "traders": stats["traders"],
+    }
+
+
+def snapshot_prices(db, market_id, b):
+    outs = get_outcomes(db, market_id)
+    ps = lmsr.prices([o["shares"] for o in outs], b)
+    db.execute("INSERT INTO price_history (market_id, prices, created_at) VALUES (?, ?, ?)",
+               (market_id, json.dumps([round(p, 5) for p in ps]), now_str()))
+
+
+def current_prices(db):
+    """{outcome_id: price} for every outcome in an open or closed (unresolved) market."""
+    result = {}
+    for m in db.execute("SELECT * FROM markets WHERE status = 'open'").fetchall():
+        outs = get_outcomes(db, m["id"])
+        for o, p in zip(outs, lmsr.prices([o["shares"] for o in outs], m["b"])):
+            result[o["id"]] = p
+    return result
+
+
+def net_worths(db):
+    prices = current_prices(db)
+    worth = {u["id"]: u["balance"] for u in db.execute("SELECT id, balance FROM users")}
+    for p in db.execute("SELECT user_id, outcome_id, shares FROM positions WHERE shares > 0"):
+        if p["outcome_id"] in prices:
+            worth[p["user_id"]] += p["shares"] * prices[p["outcome_id"]]
+    return worth
+
+
+class TradeError(Exception):
+    pass
+
+
+def execute_trade(db, user_id, market_id, outcome_id, action, value):
+    """Buy (value = coins to spend) or sell (value = shares to sell). Returns a status message."""
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        m = db.execute("SELECT * FROM markets WHERE id = ?", (market_id,)).fetchone()
+        if m is None:
+            raise TradeError("Market not found.")
+        if market_state(m) != "open":
+            raise TradeError("This market is no longer accepting bets.")
+        outs = get_outcomes(db, market_id)
+        ids = [o["id"] for o in outs]
+        if outcome_id not in ids:
+            raise TradeError("Unknown outcome.")
+        idx = ids.index(outcome_id)
+        label = outs[idx]["label"]
+        q = [o["shares"] for o in outs]
+        user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        pos = db.execute("SELECT * FROM positions WHERE user_id = ? AND outcome_id = ?",
+                         (user_id, outcome_id)).fetchone()
+        held = pos["shares"] if pos else 0.0
+        held_cost = pos["cost"] if pos else 0.0
+
+        if action == "buy":
+            amount = cents(value)
+            if amount < MIN_BET:
+                raise TradeError(f"Minimum bet is {MIN_BET:.0f} {CURRENCY}.")
+            if amount > user["balance"] + EPS:
+                raise TradeError("You don't have enough MAMS Bucks for that bet.")
+            shares = lmsr.shares_for_amount(q, m["b"], idx, amount)
+            d_shares, d_cash = shares, -amount
+            new_shares, new_cost = held + shares, held_cost + amount
+            msg = f"Bought {shares:.2f} shares of “{label}” for {amount:.2f} {CURRENCY}."
+        elif action == "sell":
+            shares = value
+            if abs(shares - held) < 1e-6:
+                shares = held
+            if shares <= EPS:
+                raise TradeError("Enter a number of shares to sell.")
+            if shares > held + EPS:
+                raise TradeError(f"You only own {held:.2f} shares of “{label}”.")
+            refund = math.floor(lmsr.sell_value(q, m["b"], idx, shares) * 100) / 100
+            d_shares, d_cash = -shares, refund
+            new_shares = held - shares
+            new_cost = held_cost * (new_shares / held) if held > 0 else 0.0
+            msg = f"Sold {shares:.2f} shares of “{label}” for {refund:.2f} {CURRENCY}."
+        else:
+            raise TradeError("Unknown action.")
+
+        db.execute("UPDATE outcomes SET shares = shares + ? WHERE id = ?", (d_shares, outcome_id))
+        db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (d_cash, user_id))
+        if new_shares <= 1e-9:
+            db.execute("DELETE FROM positions WHERE user_id = ? AND outcome_id = ?", (user_id, outcome_id))
+        else:
+            db.execute(
+                "INSERT INTO positions (user_id, outcome_id, shares, cost) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(user_id, outcome_id) DO UPDATE SET shares = excluded.shares, cost = excluded.cost",
+                (user_id, outcome_id, new_shares, new_cost))
+        db.execute("INSERT INTO trades (user_id, market_id, outcome_id, shares, amount, created_at) "
+                   "VALUES (?, ?, ?, ?, ?, ?)", (user_id, market_id, outcome_id, d_shares, -d_cash, now_str()))
+        snapshot_prices(db, market_id, m["b"])
+        db.execute("COMMIT")
+        return msg
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+
+
+def resolve_market(db, market_id, outcome_id):
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        m = db.execute("SELECT * FROM markets WHERE id = ?", (market_id,)).fetchone()
+        if m is None or m["status"] != "open":
+            raise TradeError("Only unresolved markets can be resolved.")
+        if outcome_id not in [o["id"] for o in get_outcomes(db, market_id)]:
+            raise TradeError("Unknown outcome.")
+        winners = db.execute("SELECT user_id, shares FROM positions WHERE outcome_id = ?", (outcome_id,)).fetchall()
+        for w in winners:
+            db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (w["shares"], w["user_id"]))
+        db.execute("UPDATE markets SET status = 'resolved', resolved_outcome_id = ?, resolved_at = ? WHERE id = ?",
+                   (outcome_id, now_str(), market_id))
+        db.execute("COMMIT")
+        return len(winners)
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+
+
+def cancel_market(db, market_id):
+    """Void a market: everyone gets back what they net-spent on it."""
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        m = db.execute("SELECT * FROM markets WHERE id = ?", (market_id,)).fetchone()
+        if m is None or m["status"] != "open":
+            raise TradeError("Only unresolved markets can be cancelled.")
+        rows = db.execute("SELECT user_id, SUM(amount) AS net FROM trades WHERE market_id = ? GROUP BY user_id",
+                          (market_id,)).fetchall()
+        for r in rows:
+            if r["net"] > 0:
+                db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (r["net"], r["user_id"]))
+        db.execute("UPDATE markets SET status = 'cancelled', resolved_at = ? WHERE id = ?", (now_str(), market_id))
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+
+
+def delete_market(db, market_id):
+    """Remove a market entirely. If it was never settled, everyone's net spend is refunded first.
+    Payouts from an already-resolved market are kept."""
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        m = db.execute("SELECT * FROM markets WHERE id = ?", (market_id,)).fetchone()
+        if m is None:
+            raise TradeError("Market not found.")
+        if m["status"] == "open":
+            for r in db.execute("SELECT user_id, SUM(amount) AS net FROM trades WHERE market_id = ? GROUP BY user_id",
+                                (market_id,)).fetchall():
+                if r["net"] > 0:
+                    db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?",
+                               (r["net"], r["user_id"]))
+        db.execute("DELETE FROM positions WHERE outcome_id IN (SELECT id FROM outcomes WHERE market_id = ?)",
+                   (market_id,))
+        for table in ("trades", "price_history", "comments", "outcomes"):
+            db.execute(f"DELETE FROM {table} WHERE market_id = ?", (market_id,))
+        db.execute("DELETE FROM markets WHERE id = ?", (market_id,))
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+
+
+def create_market(db, question, description, category, closes_at, labels, b, created_by=None):
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        cur = db.execute(
+            "INSERT INTO markets (question, description, category, b, closes_at, created_by, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (question, description, category, b, closes_at, created_by, now_str()))
+        mid = cur.lastrowid
+        for i, label in enumerate(labels):
+            db.execute("INSERT INTO outcomes (market_id, label, position) VALUES (?, ?, ?)", (mid, label, i))
+        snapshot_prices(db, mid, b)
+        db.execute("COMMIT")
+        return mid
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+
+
+# ---------------------------------------------------------------- auth & csrf
+
+def csrf_token():
+    if "_csrf" not in session:
+        session["_csrf"] = secrets.token_hex(16)
+    return session["_csrf"]
+
+
+@app.before_request
+def load_user_and_check_csrf():
+    g.user = None
+    if session.get("uid"):
+        g.user = get_db().execute("SELECT * FROM users WHERE id = ?", (session["uid"],)).fetchone()
+        if g.user is None:
+            session.pop("uid")
+    if request.method == "POST":
+        token = request.form.get("csrf_token", "")
+        if not token or not secrets.compare_digest(token, session.get("_csrf", "")):
+            abort(400, "Your form expired. Go back, reload the page and try again.")
+
+
+def login_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if g.user is None:
+            flash("Log in to do that.", "error")
+            return redirect(url_for("login", next=request.path))
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def admin_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if g.user is None or not g.user["is_admin"]:
+            abort(403)
+        return view(*args, **kwargs)
+    return wrapped
+
+
+@app.context_processor
+def inject_globals():
+    can_bonus = bool(g.user) and g.user["last_bonus"] != date.today().isoformat()
+    return {"csrf_token": csrf_token, "user": g.user, "can_bonus": can_bonus,
+            "CURRENCY": CURRENCY, "DAILY_BONUS": DAILY_BONUS, "CATEGORIES": CATEGORIES}
+
+
+@app.template_filter("money")
+def money_filter(x):
+    return f"{x:,.2f}"
+
+
+@app.template_filter("pct")
+def pct_filter(p):
+    v = p * 100
+    if 0 < v < 1:
+        return "<1%"
+    if 99 < v < 100:
+        return ">99%"
+    return f"{v:.0f}%"
+
+
+@app.template_filter("when")
+def when_filter(s):
+    return parse_dt(s).strftime("%b %-d, %Y %-I:%M %p")
+
+
+@app.template_filter("ago")
+def ago_filter(s):
+    secs = (datetime.now() - parse_dt(s)).total_seconds()
+    if secs < 60:
+        return "just now"
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if secs >= size:
+            return f"{int(secs // size)}{unit} ago"
+
+
+@app.template_filter("until")
+def until_filter(s):
+    secs = (parse_dt(s) - datetime.now()).total_seconds()
+    if secs <= 0:
+        return "closed"
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if secs >= size:
+            return f"{int(secs // size)}{unit} left"
+    return "<1m left"
+
+
+# ---------------------------------------------------------------- routes: accounts
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        if not USERNAME_RE.match(username):
+            flash("Username must be 3–20 characters: letters, numbers, _ . -", "error")
+        elif len(password) < 6:
+            flash("Password must be at least 6 characters.", "error")
+        elif password != request.form.get("confirm", ""):
+            flash("Passwords don't match.", "error")
+        else:
+            db = get_db()
+            first_user = db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
+            is_admin = int(first_user or username.lower() in ADMIN_USERNAMES)
+            try:
+                cur = db.execute(
+                    "INSERT INTO users (username, password_hash, balance, is_admin, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (username, generate_password_hash(password), STARTING_BALANCE, is_admin, now_str()))
+            except sqlite3.IntegrityError:
+                flash("That username is taken.", "error")
+            else:
+                session.clear()
+                session.permanent = True
+                session["uid"] = cur.lastrowid
+                flash(f"Welcome! You start with {STARTING_BALANCE:,.0f} {CURRENCY}."
+                      + (" You're an admin, so you can create and resolve markets." if is_admin else ""), "success")
+                return redirect(url_for("index"))
+    return render_template("register.html")
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        u = get_db().execute("SELECT * FROM users WHERE username = ?",
+                             (request.form.get("username", "").strip(),)).fetchone()
+        if u and check_password_hash(u["password_hash"], request.form.get("password", "")):
+            session.clear()
+            session.permanent = True
+            session["uid"] = u["id"]
+            nxt = request.args.get("next", "")
+            return redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else url_for("index"))
+        flash("Wrong username or password.", "error")
+    return render_template("login.html")
+
+
+@app.post("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("index"))
+
+
+@app.post("/bonus")
+@login_required
+def bonus():
+    today = date.today().isoformat()
+    cur = get_db().execute(
+        "UPDATE users SET balance = ROUND(balance + ?, 2), last_bonus = ? "
+        "WHERE id = ? AND (last_bonus IS NULL OR last_bonus != ?)",
+        (DAILY_BONUS, today, g.user["id"], today))
+    if cur.rowcount:
+        flash(f"Claimed your daily {DAILY_BONUS:.0f} {CURRENCY}!", "success")
+    else:
+        flash("You already claimed today's bonus. Come back tomorrow.", "error")
+    return redirect(request.referrer or url_for("index"))
+
+
+# ---------------------------------------------------------------- routes: markets
+
+@app.route("/")
+def index():
+    db = get_db()
+    status = request.args.get("status", "open")
+    cat = request.args.get("cat", "")
+    markets = [bundle(db, m) for m in db.execute("SELECT * FROM markets ORDER BY closes_at").fetchall()]
+    if status in ("open", "closed", "resolved", "cancelled"):
+        markets = [b for b in markets if b["state"] == status]
+    if cat:
+        markets = [b for b in markets if b["m"]["category"] == cat]
+    if status == "open":
+        markets.sort(key=lambda b: -b["volume"])
+    elif status in ("resolved", "cancelled"):
+        markets.sort(key=lambda b: b["m"]["resolved_at"] or "", reverse=True)
+    return render_template("index.html", markets=markets, status=status, cat=cat)
+
+
+@app.route("/market/<int:mid>")
+def market(mid):
+    db = get_db()
+    m = db.execute("SELECT * FROM markets WHERE id = ?", (mid,)).fetchone()
+    if m is None:
+        abort(404)
+    b = bundle(db, m)
+    history = [{"t": r["created_at"], "p": json.loads(r["prices"])}
+               for r in db.execute("SELECT * FROM price_history WHERE market_id = ? ORDER BY id", (mid,))]
+    trades = db.execute(
+        "SELECT t.*, u.username, o.label FROM trades t JOIN users u ON u.id = t.user_id "
+        "JOIN outcomes o ON o.id = t.outcome_id WHERE t.market_id = ? ORDER BY t.id DESC LIMIT 25", (mid,)).fetchall()
+    comments = db.execute(
+        "SELECT c.*, u.username FROM comments c JOIN users u ON u.id = c.user_id "
+        "WHERE c.market_id = ? ORDER BY c.id DESC", (mid,)).fetchall()
+    my_positions = []
+    if g.user:
+        by_id = {o["id"]: o for o in b["outcomes"]}
+        for p in db.execute(
+                "SELECT p.* FROM positions p JOIN outcomes o ON o.id = p.outcome_id "
+                "WHERE p.user_id = ? AND o.market_id = ? ORDER BY o.position", (g.user["id"], mid)):
+            o = by_id[p["outcome_id"]]
+            my_positions.append({"outcome": o, "shares": p["shares"], "cost": p["cost"],
+                                 "value": p["shares"] * o["price"]})
+    return render_template("market.html", b=b, history=history, trades=trades,
+                           comments=comments, my_positions=my_positions)
+
+
+@app.post("/market/<int:mid>/trade")
+@login_required
+def trade(mid):
+    try:
+        outcome_id = int(request.form["outcome_id"])
+        value = float(request.form.get("value", ""))
+        if not math.isfinite(value):
+            raise ValueError
+    except (KeyError, ValueError):
+        flash("Pick an outcome and enter a valid number.", "error")
+        return redirect(url_for("market", mid=mid))
+    try:
+        flash(execute_trade(get_db(), g.user["id"], mid, outcome_id, request.form.get("action"), value), "success")
+    except TradeError as e:
+        flash(str(e), "error")
+    return redirect(url_for("market", mid=mid))
+
+
+@app.post("/market/<int:mid>/comment")
+@login_required
+def comment(mid):
+    body = request.form.get("body", "").strip()
+    if not body:
+        flash("Comment can't be empty.", "error")
+    elif len(body) > 500:
+        flash("Keep comments under 500 characters.", "error")
+    elif get_db().execute("SELECT 1 FROM markets WHERE id = ?", (mid,)).fetchone():
+        get_db().execute("INSERT INTO comments (market_id, user_id, body, created_at) VALUES (?, ?, ?, ?)",
+                         (mid, g.user["id"], body, now_str()))
+    return redirect(url_for("market", mid=mid) + "#discussion")
+
+
+@app.get("/api/quote")
+def quote():
+    """Preview a trade without making it."""
+    db = get_db()
+    try:
+        mid = int(request.args["market"])
+        oid = int(request.args["outcome"])
+        value = float(request.args["value"])
+        action = request.args["action"]
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError
+    except (KeyError, ValueError):
+        return jsonify(ok=False)
+    m = db.execute("SELECT * FROM markets WHERE id = ?", (mid,)).fetchone()
+    if m is None or market_state(m) != "open":
+        return jsonify(ok=False)
+    outs = get_outcomes(db, mid)
+    ids = [o["id"] for o in outs]
+    if oid not in ids:
+        return jsonify(ok=False)
+    i = ids.index(oid)
+    q = [o["shares"] for o in outs]
+    if action == "buy":
+        shares = lmsr.shares_for_amount(q, m["b"], i, value)
+        coins = value
+        q[i] += shares
+    elif action == "sell":
+        shares = value
+        coins = math.floor(lmsr.sell_value(q, m["b"], i, shares) * 100) / 100
+        q[i] -= shares
+    else:
+        return jsonify(ok=False)
+    return jsonify(ok=True, shares=round(shares, 4), coins=coins,
+                   avg_price=coins / shares if shares else 0,
+                   new_price=lmsr.prices(q, m["b"])[i])
+
+
+# ---------------------------------------------------------------- routes: people
+
+@app.route("/portfolio")
+@login_required
+def portfolio():
+    db = get_db()
+    uid = g.user["id"]
+    rows = db.execute(
+        "SELECT p.*, o.label, o.market_id, m.question FROM positions p "
+        "JOIN outcomes o ON o.id = p.outcome_id JOIN markets m ON m.id = o.market_id "
+        "WHERE p.user_id = ? ORDER BY m.closes_at", (uid,)).fetchall()
+    bundles = {}
+    active, settled = [], []
+    for r in rows:
+        if r["market_id"] not in bundles:
+            m = db.execute("SELECT * FROM markets WHERE id = ?", (r["market_id"],)).fetchone()
+            bundles[r["market_id"]] = bundle(db, m)
+        b = bundles[r["market_id"]]
+        price = next(o["price"] for o in b["outcomes"] if o["id"] == r["outcome_id"])
+        item = {"r": r, "b": b, "price": price, "value": r["shares"] * price}
+        (active if b["state"] in ("open", "closed") else settled).append(item)
+    trades = db.execute(
+        "SELECT t.*, o.label, m.question FROM trades t JOIN outcomes o ON o.id = t.outcome_id "
+        "JOIN markets m ON m.id = t.market_id WHERE t.user_id = ? ORDER BY t.id DESC LIMIT 30", (uid,)).fetchall()
+    worth = net_worths(db)[uid]
+    return render_template("portfolio.html", active=active, settled=settled, trades=trades, worth=worth,
+                           invested=sum(i["value"] for i in active))
+
+
+@app.route("/leaderboard")
+def leaderboard():
+    db = get_db()
+    worth = net_worths(db)
+    counts = {r["user_id"]: r["n"] for r in db.execute("SELECT user_id, COUNT(*) AS n FROM trades GROUP BY user_id")}
+    users = db.execute("SELECT id, username, balance FROM users").fetchall()
+    board = sorted(({"username": u["username"], "worth": worth[u["id"]], "balance": u["balance"],
+                     "trades": counts.get(u["id"], 0), "is_me": g.user is not None and g.user["id"] == u["id"]}
+                    for u in users), key=lambda x: -x["worth"])
+    return render_template("leaderboard.html", board=board)
+
+
+# ---------------------------------------------------------------- routes: admin
+
+@app.route("/admin")
+@admin_required
+def admin():
+    db = get_db()
+    markets = [bundle(db, m) for m in db.execute("SELECT * FROM markets WHERE status = 'open' ORDER BY closes_at")]
+    settled = [bundle(db, m) for m in db.execute(
+        "SELECT * FROM markets WHERE status != 'open' ORDER BY resolved_at DESC")]
+    users = db.execute("SELECT * FROM users ORDER BY username").fetchall()
+    default_close = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M")
+    return render_template("admin.html", markets=markets, settled=settled, users=users, default_close=default_close)
+
+
+@app.post("/admin/markets")
+@admin_required
+def admin_create():
+    f = request.form
+    question = f.get("question", "").strip()
+    labels = []
+    for line in f.get("outcomes", "").splitlines():
+        line = line.strip()
+        if line and line.lower() not in [x.lower() for x in labels]:
+            labels.append(line[:60])
+    try:
+        closes_at = datetime.fromisoformat(f.get("closes_at", ""))
+    except ValueError:
+        closes_at = None
+    if not question or len(question) > 200:
+        flash("Question is required (max 200 characters).", "error")
+    elif not 2 <= len(labels) <= 8:
+        flash("Give 2–8 distinct outcomes, one per line.", "error")
+    elif closes_at is None or closes_at <= datetime.now():
+        flash("Pick a closing time in the future.", "error")
+    else:
+        mid = create_market(get_db(), question, f.get("description", "").strip()[:2000],
+                            f.get("category") if f.get("category") in CATEGORIES else "Other",
+                            closes_at.strftime("%Y-%m-%d %H:%M:%S"), labels,
+                            LIQUIDITY.get(f.get("liquidity"), LIQUIDITY["medium"]), g.user["id"])
+        flash("Market created.", "success")
+        return redirect(url_for("market", mid=mid))
+    return redirect(url_for("admin"))
+
+
+@app.post("/admin/markets/<int:mid>/resolve")
+@admin_required
+def admin_resolve(mid):
+    try:
+        n = resolve_market(get_db(), mid, int(request.form.get("outcome_id", 0)))
+        flash(f"Market resolved. Paid out {n} winning position(s).", "success")
+    except (TradeError, ValueError) as e:
+        flash(str(e) or "Pick a winning outcome.", "error")
+    return redirect(request.referrer or url_for("admin"))
+
+
+@app.post("/admin/markets/<int:mid>/cancel")
+@admin_required
+def admin_cancel(mid):
+    try:
+        cancel_market(get_db(), mid)
+        flash("Market cancelled and bets refunded.", "success")
+    except TradeError as e:
+        flash(str(e), "error")
+    return redirect(request.referrer or url_for("admin"))
+
+
+def parse_outcome_lines(text):
+    labels = []
+    for line in text.splitlines():
+        line = line.strip()[:60]
+        if line and line.lower() not in [x.lower() for x in labels]:
+            labels.append(line)
+    return labels
+
+
+@app.route("/admin/markets/<int:mid>/edit", methods=["GET", "POST"])
+@admin_required
+def admin_edit(mid):
+    """Edit a market. Text, category and closing time can always change. Once anyone has bet,
+    outcomes can only be renamed (not added/removed) and liquidity is locked, so prices and payouts stay fair."""
+    db = get_db()
+    m = db.execute("SELECT * FROM markets WHERE id = ?", (mid,)).fetchone()
+    if m is None:
+        abort(404)
+    outs = get_outcomes(db, mid)
+    has_trades = db.execute("SELECT 1 FROM trades WHERE market_id = ? LIMIT 1", (mid,)).fetchone() is not None
+
+    if request.method == "POST":
+        f = request.form
+        question = f.get("question", "").strip()
+        try:
+            closes_at = datetime.fromisoformat(f.get("closes_at", "")).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            closes_at = None
+        if has_trades:
+            renames = {o["id"]: f.get(f"label_{o['id']}", "").strip()[:60] for o in outs}
+            labels = list(renames.values())
+        else:
+            labels = parse_outcome_lines(f.get("outcomes", ""))
+        error = None
+        if not question or len(question) > 200:
+            error = "Question is required (max 200 characters)."
+        elif closes_at is None:
+            error = "Pick a valid closing time."
+        elif not all(labels) or len({x.lower() for x in labels}) != len(labels):
+            error = "Outcome names must be filled in and different from each other."
+        elif not 2 <= len(labels) <= 8:
+            error = "Give 2–8 distinct outcomes, one per line."
+        if error:
+            flash(error, "error")
+            return redirect(url_for("admin_edit", mid=mid))
+
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            db.execute("UPDATE markets SET question = ?, description = ?, category = ?, closes_at = ? WHERE id = ?",
+                       (question, f.get("description", "").strip()[:2000],
+                        f.get("category") if f.get("category") in CATEGORIES else "Other", closes_at, mid))
+            if has_trades:
+                for oid, label in renames.items():
+                    db.execute("UPDATE outcomes SET label = ? WHERE id = ?", (label, oid))
+            else:
+                b = LIQUIDITY.get(f.get("liquidity"), m["b"])
+                db.execute("UPDATE markets SET b = ? WHERE id = ?", (b, mid))
+                if [o["label"] for o in outs] != labels:
+                    db.execute("DELETE FROM outcomes WHERE market_id = ?", (mid,))
+                    for i, label in enumerate(labels):
+                        db.execute("INSERT INTO outcomes (market_id, label, position) VALUES (?, ?, ?)", (mid, label, i))
+                if b != m["b"] or [o["label"] for o in outs] != labels:
+                    db.execute("DELETE FROM price_history WHERE market_id = ?", (mid,))
+                    snapshot_prices(db, mid, b)
+            db.execute("COMMIT")
+        except Exception:
+            db.execute("ROLLBACK")
+            raise
+        flash("Market updated.", "success")
+        return redirect(url_for("market", mid=mid))
+
+    liquidity = next((k for k, v in LIQUIDITY.items() if v == m["b"]), "medium")
+    return render_template("edit_market.html", m=m, outcomes=outs, has_trades=has_trades, liquidity=liquidity,
+                           closes_value=parse_dt(m["closes_at"]).strftime("%Y-%m-%dT%H:%M"))
+
+
+@app.post("/admin/markets/<int:mid>/delete")
+@admin_required
+def admin_delete(mid):
+    try:
+        delete_market(get_db(), mid)
+        flash("Market deleted.", "success")
+    except TradeError as e:
+        flash(str(e), "error")
+    return redirect(url_for("admin"))
+
+
+@app.post("/admin/users/<int:uid>/grant")
+@admin_required
+def admin_grant(uid):
+    try:
+        amount = cents(float(request.form.get("amount", "")))
+        if not math.isfinite(amount) or amount == 0 or abs(amount) > 100000:
+            raise ValueError
+    except ValueError:
+        flash("Enter an amount between -100,000 and 100,000.", "error")
+        return redirect(url_for("admin"))
+    get_db().execute("UPDATE users SET balance = MAX(0, ROUND(balance + ?, 2)) WHERE id = ?", (amount, uid))
+    flash(f"Adjusted balance by {amount:,.2f}.", "success")
+    return redirect(url_for("admin") + "#users")
+
+
+@app.post("/admin/users/<int:uid>/toggle-admin")
+@admin_required
+def admin_toggle(uid):
+    if uid == g.user["id"]:
+        flash("You can't remove your own admin access.", "error")
+    else:
+        get_db().execute("UPDATE users SET is_admin = 1 - is_admin WHERE id = ?", (uid,))
+    return redirect(url_for("admin") + "#users")
+
+
+@app.errorhandler(400)
+@app.errorhandler(403)
+@app.errorhandler(404)
+def error_page(e):
+    return render_template("error.html", error=e), e.code
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), debug=os.environ.get("FLASK_DEBUG") == "1")
