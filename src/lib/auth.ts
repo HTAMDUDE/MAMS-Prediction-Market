@@ -32,7 +32,11 @@ export const auth = betterAuth({
     enabled: true, // also in dev; serverless functions don't share memory, so keep counters in Postgres
     storage: "database",
     customRules: {
-      "/sign-up/email": { window: 60 * 60, max: 40 }, // a whole school can share one IP, so this is generous
+      // better-auth defaults every /sign-in*, /sign-up* and /change-password to 3 requests per 10 s per IP, which would
+      // lock out a whole school behind one public IP. Brute force is covered by the per-username lockout below.
+      "/sign-up/email": { window: 60 * 60, max: 40 },
+      "/sign-in/username": { window: 60, max: 120 },
+      "/change-password": { window: 60, max: 30 },
     },
   },
   databaseHooks: {

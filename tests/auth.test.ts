@@ -39,7 +39,17 @@ describe("better-auth integration", () => {
     expect((await signIn("LockMe", "secret1")).user.id).toBeTruthy();
     for (let i = 0; i < LOGIN_FAIL_LIMIT; i++) await expect(signIn("lockme", "wrong")).rejects.toThrow();
     await expect(signIn("lockme", "secret1")).rejects.toThrow(/Too many wrong passwords/);
+    // attempts rejected by the lockout itself must not keep extending it
+    await expect(signIn("lockme", "wrong")).rejects.toThrow(/Too many wrong passwords/);
+    expect(await prisma.loginFailure.count({ where: { username: "lockme" } })).toBe(LOGIN_FAIL_LIMIT);
     await prisma.loginFailure.deleteMany();
     expect((await signIn("lockme", "secret1")).user.id).toBeTruthy();
+  });
+
+  it("overrides better-auth's 3-requests-per-10-seconds sign-in limit (a school can share one IP)", () => {
+    const rules = (auth.options.rateLimit?.customRules ?? {}) as Record<string, { window: number; max: number } | undefined>;
+    for (const path of ["/sign-in/username", "/sign-up/email", "/change-password"]) {
+      expect(rules[path]?.max ?? 0).toBeGreaterThanOrEqual(30); // better-auth's default is 3
+    }
   });
 });

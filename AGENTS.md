@@ -87,8 +87,9 @@ tests/                       Vitest suites (helpers.ts has the test fixtures)
 - **Usernames:** stored lowercase in `user.username`, original casing in `displayUsername` (better-auth username plugin). Show `displayUsername`; compare lowercase.
 - **Sign-up/sign-in run from the browser** (`authClient`), because better-auth does not rate-limit server-side `auth.api` calls. Sign-up sends a synthetic `<username>@users.mams.invalid` email, enforced by a hook in `auth.ts`.
 - **Finalizing results:** `ensureFinalized()` is awaited at the top of every page, the quote route and every action (not the layout, which doesn't re-render on navigation). A daily Vercel Cron (`vercel.json`) is a backup.
-- **Pages don't prerender:** don't re-enable `cacheComponents`. Server components must not pass functions to client components (pass plain data).
+- **Pages don't prerender:** don't re-enable `cacheComponents`. Server components must not pass functions to client components (pass plain data); that includes `ActionForm` render-prop children, which are only allowed inside client components.
 - shadcn's Base UI `Button` is patched to default to `type="submit"` like a native button; pass `type="button"` for non-submit buttons.
+- Redirecting actions hand a toast to the next page through the `mams_flash` cookie (`setFlash` in `src/server/actions/util.ts`); the server layout passes the raw cookie to `<Flash/>`, so it works even when redirecting to the same URL. Actions that don't redirect return `{ok, message}` to `ActionForm`, which toasts it.
 - Forms use `ActionForm` + `ConfirmButton` (`src/components/action-form.tsx`); confirmations are AlertDialogs, not `confirm()`.
 - Use Context7 (library docs) before using a library API from memory; versions here are newer than most training data.
 
@@ -107,7 +108,7 @@ tests/                       Vitest suites (helpers.ts has the test fixtures)
 ## Differences from the Flask app (`main`)
 
 - No CSRF tokens: Server Actions and better-auth check the request origin.
-- Rate limits live in Postgres (serverless functions don't share memory): sign-up 40/hour per IP (better-auth `rateLimit`), plus the per-username login lockout (10 failures / 5 min, `LoginFailure` table).
+- Rate limits live in Postgres (serverless functions don't share memory). better-auth defaults `/sign-in*`, `/sign-up*` and `/change-password` to 3 requests per 10 s per IP, which would lock out a school sharing one IP, so `auth.ts` overrides them (sign-up 40/hour, sign-in 120/min, change-password 30/min per IP). Brute force is covered by the per-username lockout (10 failures / 5 min, `LoginFailure` table; attempts rejected by the lockout aren't counted).
 - New: password reset (CLI + Admin → Users → Reset) and a change-password form on Portfolio, because imported accounts have no usable password.
 - Forbidden admin pages render a 403 view with HTTP status 200 (Next's `forbidden()` is still experimental).
 - Deleting a market now also removes its disputes and clarifications (the old app left them, which broke deletes in that case).
@@ -119,6 +120,14 @@ tests/                       Vitest suites (helpers.ts has the test fixtures)
 ## Change log
 
 Newest first. One entry per change; see rule 2 above.
+
+### 2026-11-20: Review fixes after browser testing
+
+- Fixed a 500 on closed/proposed/disputed markets for admins (render-prop child inside the server component `market-admin-panel.tsx`).
+- `ConfirmButton` now closes its dialog on confirm; the flash toast now also shows after a redirect to the same URL (layout passes the cookie to `<Flash raw=…/>`, messages carry a unique id).
+- Overrode better-auth's default 3-requests/10 s limits on sign-in, sign-up and change-password (a school can share one IP); added tests that the lockout isn't extended by rejected attempts and that the overrides exist.
+- Daily bonus claim is now a single atomic SQL statement. Also fixed: submit buttons (shadcn Base UI `Button` defaulted to `type="button"`), mobile header wrapping, chart axis ticks for short time ranges, Vercel preview origins in `trustedOrigins`.
+- Files: `src/components/{market-admin-panel,action-form,flash,nav-links,header,price-chart}.tsx`, `src/components/ui/button.tsx`, `src/lib/{auth,flash}.ts`, `src/server/actions/{account,util}.ts`, `src/app/layout.tsx`, `tests/auth.test.ts`.
 
 ### 2026-11-20: Port from Flask/SQLite to Next.js (branch `port`)
 

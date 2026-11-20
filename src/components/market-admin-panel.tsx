@@ -19,8 +19,7 @@ export function MarketAdminPanel({ b, blocked, allUsers }: { b: Bundle; blocked:
         <p className="text-sm text-muted-foreground">You can propose a result once betting closes.</p>
       ) : (
         <ActionForm action={proposeResultAction} className="space-y-2">
-          {({ pending }) => (
-            <>
+          <>
               <input type="hidden" name="market_id" value={b.m.id} />
               <label className="text-sm font-medium">{proposedLike ? "Change the proposed result" : "Winning outcome"}
                 <NativeSelect name="outcome_id" required className="mt-1.5 font-normal" defaultValue="">
@@ -28,11 +27,10 @@ export function MarketAdminPanel({ b, blocked, allUsers }: { b: Bundle; blocked:
                   {b.outcomes.filter((o) => o.id !== b.m.proposedOutcomeId).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
                 </NativeSelect>
               </label>
-              <ConfirmButton className="w-full" disabled={pending} title="Propose this result?" message="Traders get 24 hours to dispute it before winners are paid." confirmLabel="Propose result">
+              <ConfirmButton className="w-full" title="Propose this result?" message="Traders get 24 hours to dispute it before winners are paid." confirmLabel="Propose result">
                 {proposedLike ? "Propose this instead" : "Propose result"}
               </ConfirmButton>
-            </>
-          )}
+          </>
         </ActionForm>
       )}
 

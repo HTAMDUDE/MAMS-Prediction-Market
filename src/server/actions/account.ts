@@ -11,13 +11,9 @@ export async function claimBonus(): Promise<ActionState> {
   return run(async () => {
     const user = await requireUser();
     const today = todayInSchoolTz();
-    // Atomic: only one concurrent claim per day can match the where clause.
-    const { count } = await prisma.user.updateMany({
-      where: { id: user.id, OR: [{ lastBonus: null }, { lastBonus: { not: today } }] },
-      data: { lastBonus: today },
-    });
+    // One atomic statement: only one concurrent claim per day can match the WHERE clause.
+    const count = await prisma.$executeRaw`UPDATE "user" SET balance = ROUND((balance + ${DAILY_BONUS}::float8)::numeric, 2)::float8, "lastBonus" = ${today} WHERE id = ${user.id} AND ("lastBonus" IS NULL OR "lastBonus" <> ${today})`;
     if (!count) throw new TradeError("You already claimed today's bonus. Come back tomorrow.");
-    await prisma.$executeRaw`UPDATE "user" SET balance = ROUND((balance + ${DAILY_BONUS}::float8)::numeric, 2)::float8 WHERE id = ${user.id}`;
     return `Claimed your daily ${DAILY_BONUS.toFixed(0)} ${CURRENCY}!`;
   });
 }

@@ -1,25 +1,23 @@
 "use client";
 
 import { useEffect } from "react";
-import { usePathname, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
+import { FLASH_COOKIE } from "@/lib/flash";
 
-const COOKIE = "mams_flash";
-
-/** Shows (once) the message an action stored in a cookie before redirecting. */
-export function Flash() {
-  const pathname = usePathname();
-  const search = useSearchParams();
+/**
+ * Shows (once) the message an action stored in a cookie before redirecting. The server layout passes the raw cookie
+ * value, so this fires after every redirect, even back to the same URL (each message carries a unique id).
+ */
+export function Flash({ raw }: { raw: string | null }) {
   useEffect(() => {
-    const match = document.cookie.split("; ").find((c) => c.startsWith(`${COOKIE}=`));
-    if (!match) return;
-    document.cookie = `${COOKIE}=; path=/; max-age=0`;
+    if (!raw) return;
+    document.cookie = `${FLASH_COOKIE}=; path=/; max-age=0`;
     try {
-      const { type, message } = JSON.parse(decodeURIComponent(match.slice(COOKIE.length + 1)));
+      const { type, message } = JSON.parse(raw);
       (type === "error" ? toast.error : toast.success)(message);
     } catch {
       /* ignore a malformed cookie */
     }
-  }, [pathname, search]);
+  }, [raw]);
   return null;
 }

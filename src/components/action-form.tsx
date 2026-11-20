@@ -70,7 +70,7 @@ export function ConfirmButton({
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={() => submitter.current?.click()}>{confirmLabel}</AlertDialogAction>
+            <AlertDialogAction type="button" onClick={() => { setOpen(false); submitter.current?.click(); }}>{confirmLabel}</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

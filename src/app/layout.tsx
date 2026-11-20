@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
-import { Suspense } from "react";
+import { cookies } from "next/headers";
 import { CURRENCY } from "@/lib/constants";
+import { FLASH_COOKIE } from "@/lib/flash";
 import { Flash } from "@/components/flash";
 import { Header } from "@/components/header";
 import { ThemeProvider } from "@/components/theme-provider";
@@ -18,7 +19,8 @@ export const metadata: Metadata = {
   },
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const flash = (await cookies()).get(FLASH_COOKIE)?.value ?? null;
   return (
     <html lang="en" className={inter.variable} suppressHydrationWarning>
       <body className="flex min-h-screen flex-col">
@@ -29,7 +31,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             Play money only — {CURRENCY} have no cash value. Prices are the crowd&apos;s estimate of how likely each outcome is.
           </footer>
           <Toaster richColors closeButton />
-          <Suspense fallback={null}><Flash /></Suspense>
+          <Flash raw={flash} />
         </ThemeProvider>
       </body>
     </html>

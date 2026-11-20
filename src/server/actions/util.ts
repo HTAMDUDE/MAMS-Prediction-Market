@@ -1,19 +1,19 @@
 import "server-only";
+import { randomUUID } from "node:crypto";
 import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
 import { ZodError, type ZodType } from "zod";
 import type { ActionState } from "@/lib/action-state";
+import { FLASH_COOKIE } from "@/lib/flash";
 import { firstError, formRecord } from "@/lib/validation";
 import { ensureFinalized } from "@/server/finalize";
 import { TradeError } from "@/server/services/permissions";
 
 export type { ActionState };
 
-export const FLASH_COOKIE = "mams_flash";
-
 /** A message to show after a redirect. Read (and cleared) by the <Flash/> component. */
 export async function setFlash(type: "success" | "error", message: string) {
-  (await cookies()).set(FLASH_COOKIE, JSON.stringify({ type, message }), { path: "/", maxAge: 60, sameSite: "lax" });
+  (await cookies()).set(FLASH_COOKIE, JSON.stringify({ type, message, id: randomUUID() }), { path: "/", maxAge: 60, sameSite: "lax" });
 }
 
 /**
