@@ -100,7 +100,7 @@
     {% for u in users %}
       {% set manageable = is_owner or (u.id != owner_id and not u.is_admin) %}
       <tr>
-        <td><strong>{{ u.username }}</strong>{% if u.id == user.id %} <span class="muted small">(you)</span>{% endif %}</td>
+        <td><a href="{{ url_for('balance_history', user=u.username) }}" title="View balance history"><strong>{{ u.username }}</strong></a>{% if u.id == user.id %} <span class="muted small">(you)</span>{% endif %}</td>
         <td class="num">Ⓜ{{ u.balance|money }}</td>
         <td>
           {% if manageable %}

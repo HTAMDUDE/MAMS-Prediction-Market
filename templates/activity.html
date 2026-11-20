@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Activity · MAMS Prediction Market{% endblock %}
+{% block content %}
+<div class="activity-head">
+  <div>
+    <h1>Activity</h1>
+    <p class="muted">Every trade made on the site so far, newest first.</p>
+  </div>
+  {% if user %}<a class="btn btn-small btn-ghost" href="{{ url_for('balance_history') }}">Your balance history →</a>{% endif %}
+</div>
+
+<div class="kpis">
+  <div class="kpi"><span>Trades</span><strong>{{ '{:,}'.format(totals.n) }}</strong></div>
+  <div class="kpi"><span>Money traded</span><strong>Ⓜ{{ totals.volume|money }}</strong></div>
+  <div class="kpi"><span>Traders</span><strong>{{ totals.traders }}</strong></div>
+</div>
+
+<div class="tabs">
+  {% for key, label in [('', 'All trades'), ('buys', 'Buys'), ('sells', 'Sells')] %}
+    <a href="{{ url_for('activity', show=key or None, trader=trader or None, market=market_id) }}" class="tab {{ 'active' if show == key }}">{{ label }}</a>
+  {% endfor %}
+</div>
+
+{% if trader or market_id %}
+<div class="chips filters">
+  <span class="muted small">Showing only:</span>
+  {% if trader %}<a class="chip active" href="{{ url_for('activity', show=show or None, market=market_id) }}" title="Remove filter">{{ trader }} ✕</a>{% endif %}
+  {% if market_id %}<a class="chip active" href="{{ url_for('activity', show=show or None, trader=trader or None) }}" title="Remove filter">{{ market_title }} ✕</a>{% endif %}
+</div>
+{% endif %}
+
+<div class="card activity-card">
+  {% if rows %}
+  <div class="table-scroll">
+  <table class="table activity">
+    <thead><tr><th>When</th><th>Trader</th><th>Trade</th><th class="num">Amount</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td class="muted small nowrap" title="{{ r.created_at|when }}">{{ r.created_at|ago }}</td>
+        <td><a href="{{ url_for('activity', trader=r.username, show=show or None, market=market_id) }}" title="Only {{ r.username }}'s trades"><strong>{{ r.username }}</strong></a></td>
+        <td>
+          <span class="kind kind-{{ r.kind }}">{{ 'Bought' if r.kind == 'buy' else 'Sold' }}</span>
+          {{ r.detail[7:] if r.kind == 'buy' and r.detail.startswith('Bought ') else (r.detail[5:] if r.detail.startswith('Sold ') else r.detail) }}
+          <div class="muted small">
+            {% if r.market_exists %}<a href="{{ url_for('market', mid=r.market_id) }}">{{ r.market_title }}</a>
+            {% else %}{{ r.market_title }} (deleted){% endif %}
+            {% if not market_id and r.market_id %} · <a href="{{ url_for('activity', market=r.market_id, show=show or None, trader=trader or None) }}">only this market</a>{% endif %}
+          </div>
+        </td>
+        <td class="num {{ 'down' if r.kind == 'buy' else 'up' }}" title="{{ 'Paid' if r.kind == 'buy' else 'Received' }}">
+          {{ 'paid' if r.kind == 'buy' else 'got' }} Ⓜ{{ r.amount|abs|money }}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% if older %}
+    <p class="center"><a class="btn btn-small btn-ghost" href="{{ url_for('activity', before=older, show=show or None, trader=trader or None, market=market_id) }}">Older trades →</a></p>
+  {% endif %}
+  {% else %}
+    <p class="muted">No trades yet.</p>
+  {% endif %}
+</div>
+{% endblock %}

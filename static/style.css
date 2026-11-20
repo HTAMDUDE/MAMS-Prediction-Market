@@ -54,7 +54,7 @@ h3 { font-size: 1.02rem; margin: .4em 0 .7em; line-height: 1.35; }
 .logo { width: 32px; height: 32px; border-radius: 8px; background: var(--brand); color: var(--brand-ink);
         display: grid; place-items: center; font-weight: 700; }
 .nav { display: flex; gap: 4px; flex: 1; }
-.nav a { color: var(--muted); padding: 6px 10px; border-radius: 8px; font-weight: 500; }
+.nav a { color: var(--muted); padding: 6px 8px; border-radius: 8px; font-weight: 500; white-space: nowrap; }
 .nav a:hover { background: var(--surface-2); text-decoration: none; }
 .nav a.active { color: var(--text); background: var(--surface-2); }
 .account { display: flex; align-items: center; gap: 8px; }
@@ -292,3 +292,21 @@ main { padding-top: 8px; padding-bottom: 32px; }
 /* over/under */
 .ou-line { display: inline-block; font-size: .85rem; font-weight: 600; color: var(--muted); background: var(--surface-2);
            border-radius: 999px; padding: 2px 10px; margin: -2px 0 8px; font-variant-numeric: tabular-nums; align-self: flex-start; }
+
+/* activity log */
+.activity-card { margin-top: 16px; }
+.nowrap { white-space: nowrap; }
+.kind { display: inline-block; font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+        padding: 1px 7px; border-radius: 999px; margin-right: 6px; background: var(--surface-2); color: var(--muted); }
+.kind-buy { background: color-mix(in srgb, var(--down) 12%, transparent); color: var(--down); }
+.kind-sell, .kind-payout, .kind-refund, .kind-bonus, .kind-signup {
+        background: color-mix(in srgb, var(--up) 14%, transparent); color: var(--up); }
+
+/* trade preview totals */
+.preview .total { font-size: 1.05rem; padding: 2px 0 8px; margin-bottom: 4px; border-bottom: 1px solid var(--border); }
+.preview .total b { font-size: 1.25rem; }
+.preview .up b { color: var(--up); }
+.preview .down b { color: var(--down); }
+.activity-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+.activity-head p { margin-top: 0; }
+.filters { margin-top: 12px; align-items: center; }

@@ -91,18 +91,24 @@ function setupTradeForm(form) {
   const selected = () => form.querySelector('input[name=outcome_id]:checked');
   const outcomeName = () => selected().dataset.label;
   const held = () => parseFloat(selected().dataset.held) || 0;
+  const paid = () => parseFloat(selected().dataset.paid) || 0;  // what you spent on the shares you still hold
+  const row = (label, value, cls = '') => `<div class="${cls}"><span>${label}</span><b>${value}</b></div>`;
+  const money = n => `Ⓜ${fmt(n)}`;
+  const signed = n => `${n >= 0 ? '+' : '−'}${money(Math.abs(n))}`;
+  const defaultButton = () => `${isBuy() ? 'Buy' : 'Sell'} “${outcomeName()}”`;
   const isBuy = () => actionInput.value === 'buy';
 
   function refresh() {
-    valueLabel.textContent = isBuy() ? 'Amount (Ⓜ)' : `Shares to sell (you own ${fmt(held())})`;
+    valueLabel.textContent = isBuy() ? 'Amount to spend (Ⓜ)' : `Shares to sell (you own ${fmt(held())})`;
     quick.hidden = !isBuy();
-    submit.textContent = `${isBuy() ? 'Buy' : 'Sell'} “${outcomeName()}”`;
+    submit.textContent = defaultButton();
     requestQuote();
   }
 
-  function setPreview(html, canSubmit) {
+  function setPreview(html, canSubmit, buttonText) {
     preview.innerHTML = html;
     submit.disabled = !canSubmit;
+    submit.textContent = buttonText || defaultButton();
   }
 
   function requestQuote() {
@@ -125,19 +131,29 @@ function setupTradeForm(form) {
         const res = await (await fetch(`${form.dataset.quote}?${params}`)).json();
         if (my !== seq) return;
         if (!res.ok) { setPreview(`<span class="down">${res.error || 'Can\'t quote that trade.'}</span>`, false); return; }
-        const newPct = (res.new_price * 100).toFixed(1);
-        const avg = `Ⓜ${res.avg_price.toFixed(2)}`;
+        const newPct = `${(res.new_price * 100).toFixed(1)}%`;
+        const name = outcomeName();
         if (isBuy()) {
           setPreview(
-            `<div><span>Shares</span><b>${fmt(res.shares)}</b></div>
-             <div><span>Avg price</span><b>${avg}</b></div>
-             <div><span>Pays if right</span><b class="up">Ⓜ${fmt(res.shares)} (+${fmt(res.shares - res.coins)})</b></div>
-             <div><span>New price</span><b>${newPct}%</b></div>`, true);
+            row('You pay', money(res.coins), 'total down') +
+            row('You get', `${fmt(res.shares)} shares`) +
+            row('Avg price per share', money(res.avg_price)) +
+            row('If it wins', `you get ${money(res.shares)} (${signed(res.shares - res.coins)})`, 'up') +
+            row('If it loses', `you lose ${money(res.coins)}`, 'down') +
+            row('Balance after', money(balance - res.coins)) +
+            row('New price', newPct),
+            true, `Pay ${money(res.coins)} for “${name}”`);
         } else {
+          const costOfThese = held() > 0 ? paid() * Math.min(res.shares / held(), 1) : 0;
           setPreview(
-            `<div><span>You receive</span><b class="up">Ⓜ${fmt(res.coins)}</b></div>
-             <div><span>Avg price</span><b>${avg}</b></div>
-             <div><span>New price</span><b>${newPct}%</b></div>`, true);
+            row('You receive', money(res.coins), 'total up') +
+            row('You sell', `${fmt(res.shares)} of your ${fmt(held())} shares`) +
+            row('Avg price per share', money(res.avg_price)) +
+            row('You paid for these', money(costOfThese)) +
+            row('Profit / loss', signed(res.coins - costOfThese), res.coins >= costOfThese ? 'up' : 'down') +
+            row('Balance after', money(balance + res.coins)) +
+            row('New price', newPct),
+            true, `Sell for ${money(res.coins)}`);
         }
       } catch { if (my === seq) setPreview('<span class="muted">Quote unavailable.</span>', false); }
     }, 150);

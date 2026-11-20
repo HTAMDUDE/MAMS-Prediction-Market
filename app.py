@@ -151,12 +151,26 @@ def deepen_liquidity(db):
         raise
 
 
+def backfill_activity(db):
+    """The first time the activity log exists, fill it with past trades so nobody's history starts empty."""
+    if db.execute("SELECT 1 FROM activity LIMIT 1").fetchone():
+        return
+    db.execute(
+        "INSERT INTO activity (user_id, kind, amount, balance_after, market_id, market_title, detail, created_at) "
+        "SELECT t.user_id, CASE WHEN t.shares > 0 THEN 'buy' ELSE 'sell' END, ROUND(-t.amount, 2), NULL, "
+        "t.market_id, m.question, "
+        "(CASE WHEN t.shares > 0 THEN 'Bought ' ELSE 'Sold ' END) || printf('%.2f', ABS(t.shares)) "
+        "|| ' shares of “' || o.label || '”', t.created_at "
+        "FROM trades t JOIN markets m ON m.id = t.market_id JOIN outcomes o ON o.id = t.outcome_id ORDER BY t.id")
+
+
 def init_db():
     db = connect()
     with open(os.path.join(BASE_DIR, "schema.sql")) as f:
         db.executescript(f.read())
     migrate(db)
     deepen_liquidity(db)
+    backfill_activity(db)
     db.close()
 
 
@@ -296,6 +310,16 @@ class TradeError(Exception):
     pass
 
 
+def log_activity(db, user_id, kind, amount, market=None, detail=""):
+    """Record a balance change in the activity log. Call it right after the balance UPDATE, inside the same
+    transaction, so balance_after is exact."""
+    row = db.execute("SELECT balance FROM users WHERE id = ?", (user_id,)).fetchone()
+    db.execute("INSERT INTO activity (user_id, kind, amount, balance_after, market_id, market_title, detail, created_at) "
+               "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+               (user_id, kind, round(amount, 2), row["balance"] if row else None,
+                market["id"] if market else None, market["question"] if market else "", detail, now_str()))
+
+
 def trade_block_reason(db, user_id, market_id):
     """Why this user can't trade in this market, or None if they can."""
     if db.execute("SELECT 1 FROM trade_bans WHERE user_id = ?", (user_id,)).fetchone():
@@ -306,7 +330,7 @@ def trade_block_reason(db, user_id, market_id):
     return None
 
 
-def refund_user_in_market(db, user_id, market_id):
+def refund_user_in_market(db, user_id, market_id, reason="Refund"):
     """Undo a user's bets in an unresolved market: give back what they net-spent, remove their shares
     from the market (reversing their effect on prices) and erase their trades. Must run inside a
     transaction. Returns the amount refunded."""
@@ -328,6 +352,7 @@ def refund_user_in_market(db, user_id, market_id):
     refund = cents(max(net, 0.0))  # if they already sold at a profit, there's nothing to give back
     if refund > 0:
         db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (refund, user_id))
+    log_activity(db, user_id, "refund", refund, m, f"{reason}: your bets here were removed")
     snapshot_prices(db, market_id, m["b"])
     return refund
 
@@ -337,7 +362,7 @@ def block_user_in_market(db, user_id, market_id):
     try:
         db.execute("INSERT OR IGNORE INTO market_blocks (market_id, user_id, created_at) VALUES (?, ?, ?)",
                    (market_id, user_id, now_str()))
-        refund = refund_user_in_market(db, user_id, market_id)
+        refund = refund_user_in_market(db, user_id, market_id, "Refund (blocked from this market)")
         db.execute("COMMIT")
         return refund
     except Exception:
@@ -352,7 +377,7 @@ def ban_user_from_trading(db, user_id):
         db.execute("INSERT OR IGNORE INTO trade_bans (user_id, created_at) VALUES (?, ?)", (user_id, now_str()))
         refund = 0.0
         for r in db.execute("SELECT DISTINCT market_id FROM trades WHERE user_id = ?", (user_id,)).fetchall():
-            refund += refund_user_in_market(db, user_id, r["market_id"])
+            refund += refund_user_in_market(db, user_id, r["market_id"], "Refund (trading turned off)")
         db.execute("COMMIT")
         return refund
     except Exception:
@@ -416,15 +441,20 @@ def execute_trade(db, user_id, market_id, outcome_id, action, value):
         if action == "buy":
             d_shares, d_cash = shares, -coins
             new_shares, new_cost = held + shares, held_cost + coins
-            msg = f"Bought {shares:.2f} shares of “{label}” for {coins:.2f} {CURRENCY} — now {now_pct:.0f}%."
+            msg = (f"You paid Ⓜ{coins:,.2f} for {shares:,.2f} shares of “{label}”. If it wins they pay "
+                   f"Ⓜ{new_shares:,.2f} in total. Price now {now_pct:.0f}%.")
+            detail = f"Bought {shares:,.2f} shares of “{label}”"
         else:
             d_shares, d_cash = -shares, coins
             new_shares = held - shares
             new_cost = held_cost * (new_shares / held) if held > 0 else 0.0
-            msg = f"Sold {shares:.2f} shares of “{label}” for {coins:.2f} {CURRENCY} — now {now_pct:.0f}%."
+            msg = f"You received Ⓜ{coins:,.2f} for {shares:,.2f} shares of “{label}”. Price now {now_pct:.0f}%."
+            detail = f"Sold {shares:,.2f} shares of “{label}”"
 
         db.execute("UPDATE outcomes SET shares = shares + ? WHERE id = ?", (d_shares, outcome_id))
         db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (d_cash, user_id))
+        log_activity(db, user_id, action, d_cash, m, detail)
+        msg += f" Balance: Ⓜ{db.execute('SELECT balance FROM users WHERE id = ?', (user_id,)).fetchone()[0]:,.2f}."
         if new_shares <= 1e-9:
             db.execute("DELETE FROM positions WHERE user_id = ? AND outcome_id = ?", (user_id, outcome_id))
         else:
@@ -457,9 +487,17 @@ def resolve_market(db, market_id, outcome_id, resolved_by=None, automatic=False)
                     or db.execute("SELECT 1 FROM disputes WHERE market_id = ? AND handled_at IS NULL",
                                   (market_id,)).fetchone()):
                 raise TradeError("Not ready to finalize.")
+        outs = {o["id"]: o["label"] for o in get_outcomes(db, market_id)}
         winners = db.execute("SELECT user_id, shares FROM positions WHERE outcome_id = ?", (outcome_id,)).fetchall()
         for w in winners:
             db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (w["shares"], w["user_id"]))
+            log_activity(db, w["user_id"], "payout", w["shares"], m,
+                         f"Won: {w['shares']:,.2f} “{outs[outcome_id]}” shares paid Ⓜ1 each")
+        for p in db.execute("SELECT p.user_id, p.shares, p.outcome_id FROM positions p JOIN outcomes o "
+                            "ON o.id = p.outcome_id WHERE o.market_id = ? AND p.outcome_id != ? AND p.shares > 1e-9",
+                            (market_id, outcome_id)).fetchall():
+            log_activity(db, p["user_id"], "loss", 0, m,
+                         f"Lost: {p['shares']:,.2f} “{outs[p['outcome_id']]}” shares paid nothing")
         db.execute("UPDATE markets SET status = 'resolved', resolved_outcome_id = ?, resolved_at = ?, "
                    "resolved_by = ? WHERE id = ?", (outcome_id, now_str(), resolved_by, market_id))
         db.execute("UPDATE disputes SET handled_at = ? WHERE market_id = ? AND handled_at IS NULL",
@@ -552,6 +590,7 @@ def cancel_market(db, market_id):
         for r in rows:
             if r["net"] > 0:
                 db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (r["net"], r["user_id"]))
+            log_activity(db, r["user_id"], "refund", max(r["net"], 0), m, "Refund: market cancelled")
         db.execute("UPDATE markets SET status = 'cancelled', resolved_at = ? WHERE id = ?", (now_str(), market_id))
         db.execute("COMMIT")
     except Exception:
@@ -573,6 +612,7 @@ def delete_market(db, market_id):
                 if r["net"] > 0:
                     db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?",
                                (r["net"], r["user_id"]))
+                log_activity(db, r["user_id"], "refund", max(r["net"], 0), m, "Refund: market deleted")
         db.execute("DELETE FROM positions WHERE outcome_id IN (SELECT id FROM outcomes WHERE market_id = ?)",
                    (market_id,))
         db.execute("UPDATE proposals SET market_id = NULL WHERE market_id = ?", (market_id,))
@@ -750,10 +790,14 @@ def register():
             is_admin = int((first_user and not OWNER_USERNAME) or username.lower() == OWNER_USERNAME
                            or username.lower() in ADMIN_USERNAMES)
             try:
+                db.execute("BEGIN IMMEDIATE")
                 cur = db.execute(
                     "INSERT INTO users (username, password_hash, balance, is_admin, created_at) VALUES (?, ?, ?, ?, ?)",
                     (username, generate_password_hash(password), STARTING_BALANCE, is_admin, now_str()))
+                log_activity(db, cur.lastrowid, "signup", STARTING_BALANCE, None, "Starting balance")
+                db.execute("COMMIT")
             except sqlite3.IntegrityError:
+                db.execute("ROLLBACK")
                 flash("That username is taken.", "error")
             else:
                 session.clear()
@@ -797,10 +841,15 @@ def logout():
 @login_required
 def bonus():
     today = date.today().isoformat()
-    cur = get_db().execute(
+    db = get_db()
+    db.execute("BEGIN IMMEDIATE")
+    cur = db.execute(
         "UPDATE users SET balance = ROUND(balance + ?, 2), last_bonus = ? "
         "WHERE id = ? AND (last_bonus IS NULL OR last_bonus != ?)",
         (DAILY_BONUS, today, g.user["id"], today))
+    if cur.rowcount:
+        log_activity(db, g.user["id"], "bonus", DAILY_BONUS, None, "Daily bonus")
+    db.execute("COMMIT")
     if cur.rowcount:
         flash(f"Claimed your daily {DAILY_BONUS:.0f} {CURRENCY}!", "success")
     else:
@@ -1005,6 +1054,86 @@ def portfolio():
     invested = sum(open_book_values(db).get(uid, {}).values())
     return render_template("portfolio.html", active=active, settled=settled, trades=trades, worth=worth,
                            invested=invested, rows_total=sum(i["value"] for i in active))
+
+
+ACTIVITY_FILTERS = {
+    "": None,
+    "trades": ("buy", "sell"),
+    "results": ("payout", "loss", "refund"),
+    "other": ("signup", "bonus", "admin"),
+}
+
+
+FEED_PAGE = 100
+
+
+@app.route("/activity")
+def activity():
+    """Every trade anyone has made, newest first. Filter with ?show=buys|sells, ?trader=name, ?market=id;
+    page back with ?before=<id>."""
+    db = get_db()
+    show = request.args.get("show", "")
+    trader = request.args.get("trader", "").strip()
+    try:
+        market_id = int(request.args.get("market", "") or 0) or None
+        before = int(request.args.get("before", "") or 0) or None
+    except ValueError:
+        abort(404)
+    where, args = ["a.kind IN ('buy', 'sell')"], []
+    if show in ("buys", "sells"):
+        where.append("a.kind = ?")
+        args.append(show[:-1])
+    if trader:
+        where.append("u.username = ?")
+        args.append(trader)
+    if market_id:
+        where.append("a.market_id = ?")
+        args.append(market_id)
+    totals = db.execute(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(ABS(a.amount)), 0) AS volume, COUNT(DISTINCT a.user_id) AS traders "
+        f"FROM activity a JOIN users u ON u.id = a.user_id WHERE {' AND '.join(where)}", args).fetchone()
+    if before:
+        where.append("a.id < ?")
+        args.append(before)
+    rows = db.execute(
+        "SELECT a.*, u.username, (m.id IS NOT NULL) AS market_exists FROM activity a "
+        "JOIN users u ON u.id = a.user_id LEFT JOIN markets m ON m.id = a.market_id "
+        f"WHERE {' AND '.join(where)} ORDER BY a.id DESC LIMIT ?", args + [FEED_PAGE + 1]).fetchall()
+    more = len(rows) > FEED_PAGE
+    rows = rows[:FEED_PAGE]
+    market_title = None
+    if market_id:
+        hit = db.execute("SELECT market_title FROM activity WHERE market_id = ? LIMIT 1", (market_id,)).fetchone()
+        market_title = hit["market_title"] if hit else f"market #{market_id}"
+    return render_template("activity.html", rows=rows, totals=totals, show=show, trader=trader,
+                           market_id=market_id, market_title=market_title,
+                           older=rows[-1]["id"] if more and rows else None)
+
+
+@app.route("/activity/mine")
+@login_required
+def balance_history():
+    """Everything that changed a user's balance, newest first. Admins can view anyone's with ?user=name."""
+    db = get_db()
+    target = g.user
+    name = request.args.get("user", "").strip()
+    if name and g.user["is_admin"]:
+        target = db.execute("SELECT * FROM users WHERE username = ?", (name,)).fetchone()
+        if target is None:
+            abort(404)
+    show = request.args.get("show", "")
+    kinds = ACTIVITY_FILTERS.get(show)
+    where, args = "a.user_id = ?", [target["id"]]
+    if kinds:
+        where += f" AND a.kind IN ({','.join('?' * len(kinds))})"
+        args += list(kinds)
+    rows = db.execute(
+        "SELECT a.*, (m.id IS NOT NULL) AS market_exists FROM activity a LEFT JOIN markets m ON m.id = a.market_id "
+        f"WHERE {where} ORDER BY a.id DESC LIMIT 300", args).fetchall()
+    totals = {r["kind"]: r["total"] for r in db.execute(
+        "SELECT kind, SUM(amount) AS total FROM activity WHERE user_id = ? GROUP BY kind", (target["id"],))}
+    return render_template("balance_history.html", rows=rows, target=target, show=show, totals=totals,
+                           viewing_other=target["id"] != g.user["id"])
 
 
 @app.route("/leaderboard")
@@ -1485,8 +1614,18 @@ def admin_grant(uid):
     if not can_manage(uid):
         flash(NOT_ALLOWED, "error")
         return redirect(url_for("admin") + "#users")
-    get_db().execute("UPDATE users SET balance = MAX(0, ROUND(balance + ?, 2)) WHERE id = ?", (amount, uid))
-    flash(f"Adjusted balance by {amount:,.2f}.", "success")
+    db = get_db()
+    db.execute("BEGIN IMMEDIATE")
+    before = db.execute("SELECT balance FROM users WHERE id = ?", (uid,)).fetchone()
+    if before is None:
+        db.execute("ROLLBACK")
+        abort(404)
+    db.execute("UPDATE users SET balance = MAX(0, ROUND(balance + ?, 2)) WHERE id = ?", (amount, uid))
+    after = db.execute("SELECT balance FROM users WHERE id = ?", (uid,)).fetchone()[0]
+    change = cents(after - before["balance"])  # can be less than asked if it would have gone below zero
+    log_activity(db, uid, "admin", change, None, f"Balance adjusted by an admin ({g.user['username']})")
+    db.execute("COMMIT")
+    flash(f"Adjusted balance by {change:,.2f}.", "success")
     return redirect(url_for("admin") + "#users")
 
 

@@ -12,6 +12,11 @@ assemblies, and anything else the admins post.
   school's estimated probability.
 - You can sell shares back at the current price any time before the market closes.
 - Anyone can **propose a market** from the Propose page. It goes live once an admin approves it.
+- The **Activity** page lists every trade made on the site (who, what, which market, how much), with filters by
+  buys/sells, trader and market. **Your balance history** (linked from it) logs every change to your own balance
+  (buys, sells, payouts, losses, refunds, bonuses, admin adjustments) with your balance after each one. Admins can
+  open anyone's balance history from the Users table.
+- The bet form shows exactly what you pay (or receive), what you'd win or lose, and your balance afterwards.
 - Three market types: **Yes/No**, **Over/Under** (bet whether a number lands above or below a line, like a class
   average over/under 85%) and **multiple choice**.
 - Results are **proposed** by an admin and can be **disputed** for 24 hours before winners are paid.

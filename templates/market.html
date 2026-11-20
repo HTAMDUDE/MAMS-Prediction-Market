@@ -128,14 +128,15 @@
         <div class="outcome-pick {{ 'binary' if b.binary }}">
           {% for o in b.outcomes %}
             {% set held = (my_positions|selectattr('outcome.id', 'equalto', o.id)|map(attribute='shares')|first) or 0 %}
+            {% set paid = (my_positions|selectattr('outcome.id', 'equalto', o.id)|map(attribute='cost')|first) or 0 %}
             <label>
-              <input type="radio" name="outcome_id" value="{{ o.id }}" data-held="{{ held }}" data-label="{{ o.label }}" {{ 'checked' if loop.first }}>
+              <input type="radio" name="outcome_id" value="{{ o.id }}" data-held="{{ held }}" data-paid="{{ paid }}" data-label="{{ o.label }}" {{ 'checked' if loop.first }}>
               <span><i style="background: var(--c{{ loop.index0 }})"></i>{{ o.label }}<b>{% if b.binary %}{{ (o.price * 100)|round|int }}¢{% else %}Ⓜ{{ '%.2f'|format(o.price) }}{% endif %}</b></span>
             </label>
           {% endfor %}
         </div>
         <label class="field">
-          <span id="value-label">Amount (Ⓜ)</span>
+          <span id="value-label">Amount to spend (Ⓜ)</span>
           <div class="input-row">
             <input type="number" name="value" id="value" min="0.01" step="0.01" required placeholder="0.00" autocomplete="off">
             <button type="button" class="btn btn-small btn-ghost" id="max-btn" data-balance="{{ user.balance }}">Max</button>

@@ -93,7 +93,7 @@ def test_full_flow():
     tok = csrf(bob.get(f"/market/{mid}"))
     r = bob.post(f"/market/{mid}/trade", data={"csrf_token": tok, "action": "buy", "outcome_id": yes, "value": 100},
                  follow_redirects=True)
-    assert "Bought" in r.get_data(as_text=True)
+    assert "You paid" in r.get_data(as_text=True)
     bal = db.execute("SELECT balance FROM users WHERE username='bob'").fetchone()[0]
     assert bal == pytest.approx(900)
     shares = db.execute("SELECT shares FROM positions WHERE outcome_id=?", (yes,)).fetchone()[0]
@@ -982,5 +982,168 @@ def test_convert_yes_no_to_over_under_keeps_bets(yes_means):
         r = admin.post(f"/admin/markets/{multi}/convert-ou", data={
             "csrf_token": csrf(admin.get(f"/market/{multi}")), "ou_line": "1", "yes_means": "over"}, follow_redirects=True)
         assert "Only Yes/No markets" in r.get_data(as_text=True)
+    finally:
+        appmod.DB_PATH = old
+
+
+# ---------------------------------------------------------------- activity log
+
+def test_activity_log_records_every_balance_change():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        admin, ann, ben = (appmod.app.test_client() for _ in range(3))
+        signup(admin, "logboss")
+        signup(ann, "ann")
+        signup(ben, "ben")
+        uid = lambda n: db.execute("SELECT id FROM users WHERE username=?", (n,)).fetchone()[0]
+        bal = lambda n: db.execute("SELECT balance FROM users WHERE username=?", (n,)).fetchone()[0]
+        log = lambda n: db.execute("SELECT kind, amount, balance_after, detail FROM activity WHERE user_id=? ORDER BY id",
+                                   (uid(n),)).fetchall()
+        closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+
+        assert [tuple(r)[:3] for r in log("ann")] == [("signup", 1000, 1000)]
+        ann.post("/bonus", data={"csrf_token": csrf(ann.get("/"))})
+        assert log("ann")[-1]["kind"] == "bonus" and log("ann")[-1]["balance_after"] == 1100
+
+        # buy / sell
+        m1 = appmod.create_market(db, "Win?", RULES, "Other", closes, ["Yes", "No"], 1000)
+        yes, no = appmod.get_outcomes(db, m1)
+        appmod.execute_trade(db, uid("ann"), m1, yes["id"], "buy", 200)
+        appmod.execute_trade(db, uid("ben"), m1, no["id"], "buy", 50)
+        buy = log("ann")[-1]
+        assert buy["kind"] == "buy" and buy["amount"] == -200 and buy["balance_after"] == 900
+        assert "Bought" in buy["detail"] and "“Yes”" in buy["detail"]
+        held = db.execute("SELECT shares FROM positions WHERE user_id=?", (uid("ann"),)).fetchone()[0]
+        msg = appmod.execute_trade(db, uid("ann"), m1, yes["id"], "sell", held / 4)
+        sell = log("ann")[-1]
+        assert sell["kind"] == "sell" and sell["amount"] > 0 and sell["balance_after"] == pytest.approx(bal("ann"))
+        assert "You received" in msg and "Balance:" in msg
+
+        # resolution: winner paid, loser told they got nothing
+        db.execute("UPDATE markets SET closes_at = ? WHERE id = ?",
+                   ((datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S"), m1))
+        appmod.resolve_market(db, m1, yes["id"])
+        payout = log("ann")[-1]
+        assert payout["kind"] == "payout" and payout["amount"] == pytest.approx(held * 0.75, abs=0.01)
+        assert payout["balance_after"] == pytest.approx(bal("ann"))
+        loss = log("ben")[-1]
+        assert loss["kind"] == "loss" and loss["amount"] == 0 and "“No”" in loss["detail"]
+
+        # refunds: cancelled market, and being blocked
+        m2 = appmod.create_market(db, "Cancel?", RULES, "Other", closes, ["Yes", "No"], 1000)
+        appmod.execute_trade(db, uid("ben"), m2, appmod.get_outcomes(db, m2)[0]["id"], "buy", 40)
+        appmod.cancel_market(db, m2)
+        assert tuple(log("ben")[-1])[:2] == ("refund", 40) and "cancelled" in log("ben")[-1]["detail"]
+        m3 = appmod.create_market(db, "Block?", RULES, "Other", closes, ["Yes", "No"], 1000)
+        appmod.execute_trade(db, uid("ben"), m3, appmod.get_outcomes(db, m3)[0]["id"], "buy", 30)
+        appmod.block_user_in_market(db, uid("ben"), m3)
+        assert tuple(log("ben")[-1])[:2] == ("refund", 30) and "blocked" in log("ben")[-1]["detail"]
+
+        # admin adjustment records what actually changed (can't go below zero)
+        admin.post(f"/admin/users/{uid('ben')}/grant", data={"csrf_token": csrf(admin.get("/admin")), "amount": -99999})
+        adj = log("ben")[-1]
+        assert adj["kind"] == "admin" and adj["balance_after"] == 0 and adj["amount"] < 0 and "logboss" in adj["detail"]
+
+        # every balance_after matches a running total of the amounts
+        for name in ("ann", "ben"):
+            running = 0
+            for r in log(name):
+                running = round(running + r["amount"], 2)
+                assert r["balance_after"] == pytest.approx(running, abs=0.02), (name, tuple(r))
+
+        # pages: own log, admin can view others, non-admins can't
+        page = ann.get("/activity/mine").get_data(as_text=True)
+        assert "Your balance history" in page and "Daily bonus" in page and "Win?" in page
+        assert "Your balance history" in ann.get("/activity/mine?user=ben").get_data(as_text=True)   # ignored for non-admins
+        other = admin.get("/activity/mine?user=ben").get_data(as_text=True)
+        assert "ben&#39;s balance history" in other and "Refund: market cancelled" in other
+        assert admin.get("/activity/mine?user=nobody").status_code == 404
+        assert "Bought" in ann.get("/activity/mine?show=trades").get_data(as_text=True)
+        assert "Daily bonus" not in ann.get("/activity/mine?show=trades").get_data(as_text=True)
+
+        # deleting a market keeps the history
+        appmod.delete_market(db, m3)
+        assert "Block? (deleted)" in admin.get("/activity/mine?user=ben").get_data(as_text=True)
+    finally:
+        appmod.DB_PATH = old
+
+
+def test_activity_backfilled_from_old_trades():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        uid = db.execute("INSERT INTO users (username, password_hash, balance, created_at) VALUES ('vet', 'x', 1000, ?)",
+                         (appmod.now_str(),)).lastrowid
+        closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+        mid = appmod.create_market(db, "Old trades?", RULES, "Other", closes, ["Yes", "No"], 1000)
+        appmod.execute_trade(db, uid, mid, appmod.get_outcomes(db, mid)[0]["id"], "buy", 25)
+        db.execute("DELETE FROM activity")           # simulate a database from before the log existed
+        appmod.backfill_activity(db)
+        rows = db.execute("SELECT kind, amount, balance_after, detail FROM activity WHERE user_id=?", (uid,)).fetchall()
+        assert [(r["kind"], r["amount"], r["balance_after"]) for r in rows] == [("buy", -25, None)]
+        assert rows[0]["detail"].startswith("Bought ")
+        appmod.backfill_activity(db)                 # only runs once
+        assert db.execute("SELECT COUNT(*) FROM activity").fetchone()[0] == 1
+    finally:
+        appmod.DB_PATH = old
+
+
+def test_activity_feed_shows_every_trade():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        ann, ben, visitor = (appmod.app.test_client() for _ in range(3))
+        signup(ann, "feedann")
+        signup(ben, "feedben")
+        uid = lambda n: db.execute("SELECT id FROM users WHERE username=?", (n,)).fetchone()[0]
+        closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+        m1 = appmod.create_market(db, "Feed market one?", RULES, "Other", closes, ["Yes", "No"], 1000)
+        m2 = appmod.create_market(db, "Feed market two?", RULES, "Other", closes, ["Yes", "No"], 1000)
+        y1, y2 = appmod.get_outcomes(db, m1)[0]["id"], appmod.get_outcomes(db, m2)[0]["id"]
+        appmod.execute_trade(db, uid("feedann"), m1, y1, "buy", 60)
+        appmod.execute_trade(db, uid("feedben"), m2, y2, "buy", 40)
+        held = db.execute("SELECT shares FROM positions WHERE user_id=?", (uid("feedann"),)).fetchone()[0]
+        appmod.execute_trade(db, uid("feedann"), m1, y1, "sell", held / 2)
+        ann.post("/bonus", data={"csrf_token": csrf(ann.get("/"))})   # not a trade: must not appear
+
+        page = visitor.get("/activity").get_data(as_text=True)          # public, no login needed
+        assert page.count('class="kind kind-') == 3
+        assert "feedann" in page and "feedben" in page and "Feed market two?" in page
+        assert "Daily bonus" not in page and "Starting balance" not in page
+        assert ">3<" in page                                              # trade count
+
+        only_ann = visitor.get("/activity?trader=feedann").get_data(as_text=True)
+        assert only_ann.count('class="kind kind-') == 2 and "Feed market two?" not in only_ann.split("Showing only")[1]
+        only_m2 = visitor.get(f"/activity?market={m2}").get_data(as_text=True)
+        assert only_m2.count('class="kind kind-') == 1
+        assert visitor.get("/activity?show=sells").get_data(as_text=True).count('class="kind kind-sell"') == 1
+        assert visitor.get("/activity?show=buys").get_data(as_text=True).count('class="kind kind-') == 2
+
+        # trades stay in the feed after their market is deleted
+        appmod.delete_market(db, m2)
+        assert "Feed market two? (deleted)" in visitor.get("/activity").get_data(as_text=True)
+        assert visitor.get("/activity?market=abc").status_code == 404
+    finally:
+        appmod.DB_PATH = old
+
+
+def test_activity_feed_pages_back_through_history():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        uid = db.execute("INSERT INTO users (username, password_hash, balance, created_at) VALUES ('pager', 'x', 100000, ?)",
+                         (appmod.now_str(),)).lastrowid
+        closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+        mid = appmod.create_market(db, "Busy?", RULES, "Other", closes, ["Yes", "No"], 1000)
+        yes = appmod.get_outcomes(db, mid)[0]["id"]
+        for _ in range(appmod.FEED_PAGE + 5):
+            appmod.execute_trade(db, uid, mid, yes, "buy", 1)
+        client = appmod.app.test_client()
+        first = client.get("/activity").get_data(as_text=True)
+        assert first.count('class="kind kind-') == appmod.FEED_PAGE and "Older trades" in first
+        before = re.search(r"before=(\d+)", first).group(1)
+        second = client.get(f"/activity?before={before}").get_data(as_text=True)
+        assert second.count('class="kind kind-') == 5 and "Older trades" not in second
     finally:
         appmod.DB_PATH = old

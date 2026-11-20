@@ -61,7 +61,7 @@
 {% endif %}
 
 <div class="card">
-  <h2>Trade history</h2>
+  <h2>Trade history <a class="small" href="{{ url_for('balance_history') }}">Full balance history →</a></h2>
   {% if trades %}
   <div class="table-scroll">
   <table class="table">

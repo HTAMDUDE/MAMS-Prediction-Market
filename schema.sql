@@ -127,6 +127,21 @@ CREATE TABLE IF NOT EXISTS trade_bans (
     created_at TEXT NOT NULL
 );
 
+-- Every change to a user's balance, newest last: the activity log.
+-- market_id has no foreign key so the log survives a market being deleted; market_title keeps its name.
+CREATE TABLE IF NOT EXISTS activity (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       INTEGER NOT NULL REFERENCES users(id),
+    kind          TEXT NOT NULL,      -- signup | bonus | buy | sell | payout | loss | refund | admin
+    amount        REAL NOT NULL,      -- + money in, - money out
+    balance_after REAL,               -- NULL for entries backfilled from before the log existed
+    market_id     INTEGER,
+    market_title  TEXT NOT NULL DEFAULT '',
+    detail        TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_user ON activity(user_id, id);
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
 CREATE INDEX IF NOT EXISTS idx_outcomes_market ON outcomes(market_id);
 CREATE INDEX IF NOT EXISTS idx_trades_market   ON trades(market_id);
