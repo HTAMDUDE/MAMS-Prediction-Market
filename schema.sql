@@ -21,7 +21,16 @@ CREATE TABLE IF NOT EXISTS markets (
     resolved_outcome_id INTEGER,
     resolved_at         TEXT,
     created_by          INTEGER REFERENCES users(id),
-    created_at          TEXT NOT NULL
+    created_at          TEXT NOT NULL,
+    -- `description` is "Resolves YES if..."; these two finish the written rules.
+    rules_source        TEXT NOT NULL DEFAULT '',
+    rules_otherwise     TEXT NOT NULL DEFAULT '',
+    -- Optimistic resolution: an admin proposes a result, then it finalizes after a challenge window.
+    proposed_outcome_id INTEGER,
+    proposed_by         INTEGER,
+    proposed_at         TEXT,
+    finalizes_at        TEXT,
+    resolved_by         INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS outcomes (
@@ -80,7 +89,28 @@ CREATE TABLE IF NOT EXISTS proposals (
     reviewed_by INTEGER REFERENCES users(id),
     reviewed_at TEXT,
     market_id   INTEGER REFERENCES markets(id),
-    created_at  TEXT NOT NULL
+    created_at  TEXT NOT NULL,
+    rules_source    TEXT NOT NULL DEFAULT '',
+    rules_otherwise TEXT NOT NULL DEFAULT ''
+);
+
+-- Traders challenging a proposed result. An unhandled dispute stops it finalizing by itself.
+CREATE TABLE IF NOT EXISTS disputes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id  INTEGER NOT NULL REFERENCES markets(id),
+    user_id    INTEGER NOT NULL REFERENCES users(id),
+    reason     TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    handled_at TEXT
+);
+
+-- Admin notes added to a market's rules after betting started (the rules themselves are then locked).
+CREATE TABLE IF NOT EXISTS clarifications (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id  INTEGER NOT NULL REFERENCES markets(id),
+    admin_id   INTEGER NOT NULL REFERENCES users(id),
+    body       TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 
 -- Users an admin has barred from trading in one market (e.g. people who know the answer).
@@ -103,3 +133,5 @@ CREATE INDEX IF NOT EXISTS idx_trades_market   ON trades(market_id);
 CREATE INDEX IF NOT EXISTS idx_trades_user     ON trades(user_id);
 CREATE INDEX IF NOT EXISTS idx_history_market  ON price_history(market_id);
 CREATE INDEX IF NOT EXISTS idx_comments_market ON comments(market_id);
+CREATE INDEX IF NOT EXISTS idx_disputes_market ON disputes(market_id);
+CREATE INDEX IF NOT EXISTS idx_clarifications_market ON clarifications(market_id);

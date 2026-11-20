@@ -10,7 +10,7 @@
   {% if p.status != 'pending' %}
     <p class="flash flash-error">This proposal was already {{ p.status }}.</p>
   {% else %}
-  <form method="post" class="stack">
+  <form method="post" class="stack" data-market-form>
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     {% set default_close = '' %}
     {% set show_liquidity = true %}

@@ -8,7 +8,7 @@
      school thinks will happen.</p>
   <div class="hero-actions">
     <a class="btn" href="{{ url_for('register') }}">Get started</a>
-    <a class="btn btn-ghost" href="#how">How it works</a>
+    <a class="btn btn-ghost" href="{{ url_for('how_it_works') }}">How it works</a>
   </div>
 </section>
 {% endif %}
@@ -35,10 +35,18 @@
         <span class="tag">{{ b.m.category }}</span>
         {% if b.state == 'open' %}<span class="muted">{{ b.m.closes_at|until }}</span>
         {% elif b.state == 'closed' %}<span class="status status-closed">Awaiting result</span>
+        {% elif b.state == 'proposed' %}<span class="status status-pending">Result proposed</span>
+        {% elif b.state == 'disputed' %}<span class="status status-rejected">Disputed</span>
         {% elif b.state == 'resolved' %}<span class="status status-resolved">Resolved</span>
         {% else %}<span class="status status-cancelled">Cancelled</span>{% endif %}
       </div>
       <h3>{{ b.m.question }}</h3>
+      {% if b.binary and b.state in ('open', 'closed', 'proposed', 'disputed') %}
+      <div class="chance-row">
+        <div class="chance"><span class="chance-pct">{{ b.outcomes[0].price|pct }}</span> <span class="muted">chance</span></div>
+        <div class="yn"><span class="yn-yes">Yes {{ (b.outcomes[0].price * 100)|round|int }}¢</span><span class="yn-no">No {{ (b.outcomes[1].price * 100)|round|int }}¢</span></div>
+      </div>
+      {% else %}
       <ul class="odds">
         {% for o in b.outcomes[:4] %}
           <li class="{{ 'winner' if b.state == 'resolved' and o.id == b.m.resolved_outcome_id }}">
@@ -49,6 +57,7 @@
         {% endfor %}
         {% if b.outcomes|length > 4 %}<li class="muted small">+{{ b.outcomes|length - 4 }} more</li>{% endif %}
       </ul>
+      {% endif %}
       <div class="card-foot muted small">Ⓜ{{ b.volume|money }} traded · {{ b.traders }} trader{{ '' if b.traders == 1 else 's' }}</div>
     </a>
   {% endfor %}
@@ -66,7 +75,7 @@
     <div><span class="step">1</span><h4>Pick a market</h4><p>Each market is a question about a Mass Academy event with two or more possible outcomes.</p></div>
     <div><span class="step">2</span><h4>Buy shares</h4><p>A share at 30% costs about Ⓜ0.30. If that outcome happens, every share pays Ⓜ1. Buying pushes the price up.</p></div>
     <div><span class="step">3</span><h4>Sell any time</h4><p>Changed your mind? Sell shares back before the market closes at the current price.</p></div>
-    <div><span class="step">4</span><h4>Climb the board</h4><p>When the result is known an admin resolves the market and winners get paid. Top net worth leads.</p></div>
+    <div><span class="step">4</span><h4>Climb the board</h4><p>After a result is announced, an admin proposes it and everyone has 24 hours to dispute it. Then winners are paid. <a href="{{ url_for('how_it_works') }}">Read the full guide</a>.</p></div>
   </div>
 </section>
 {% endblock %}

@@ -5,15 +5,30 @@
   <div class="card">
     <h1>Propose a market</h1>
     <p class="muted">Got a question about something happening at Mass Academy? Suggest it here. An admin will review it,
-      may tweak the wording, and then put it live or explain why not.</p>
-    <form method="post" class="stack">
+      may tweak the wording, and then put it live or explain why not. New to this?
+      <a href="{{ url_for('how_it_works') }}">How markets work</a>.</p>
+    <form method="post" class="stack" data-market-form>
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       {% set default_close = '' %}
       {% include "_market_fields.html" %}
-      <p class="muted small">Tips: ask about something with a clear, checkable answer and a known date. Avoid questions
-        about individual people's grades or anything private.</p>
+      <div class="checklist">
+        <strong>A good market has…</strong>
+        <ul>
+          <li>A <b>clear, checkable answer</b>. Anyone reading the rules should reach the same result.</li>
+          <li>A <b>named source</b> for the answer, such as a results page or an announcement.</li>
+          <li>A <b>date</b>, and a rule for what happens if the event is postponed.</li>
+          <li><b>Nothing private</b>: no grades, health or questions about individual people.</li>
+        </ul>
+      </div>
       <button class="btn">Send for approval</button>
     </form>
+  </div>
+
+  <div class="propose-side">
+  <div class="card" id="market-preview" aria-live="polite">
+    <h2>Preview</h2>
+    <p class="muted small">This is roughly how your market will look.</p>
+    <div class="preview-body"></div>
   </div>
 
   <div class="card">
@@ -39,6 +54,7 @@
     {% else %}
       <p class="muted">You haven't proposed anything yet.</p>
     {% endfor %}
+  </div>
   </div>
 </div>
 {% endblock %}

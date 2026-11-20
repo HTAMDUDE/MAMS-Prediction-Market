@@ -4,14 +4,16 @@ A website where students can bet virtual **MAMS Bucks** on Mass Academy events: 
 assemblies, and anything else the admins post.
 
 - Everyone starts with **Ⓜ1,000** and can claim **Ⓜ100 free each day**.
-- Each market asks a question with 2–8 possible outcomes. You buy shares in an outcome, and each share pays **Ⓜ1**
+- Most markets are **Yes/No**; some are multiple choice with 2–8 outcomes. Every market has written rules (what counts
+  as YES, the source, edge cases). You buy shares in an outcome, and each share pays **Ⓜ1**
   if that outcome happens.
 - Prices are set by an automated market maker (LMSR, see `lmsr.py`), so you never need someone to bet against.
   Buying an outcome raises its price, and all prices in a market add up to 100%, so you can read them as the
   school's estimated probability.
 - You can sell shares back at the current price any time before the market closes.
 - Anyone can **propose a market** from the Propose page. It goes live once an admin approves it.
-- Admins create, edit, resolve, cancel and delete markets (see [Admin guide](#admin-guide)).
+- Results are **proposed** by an admin and can be **disputed** for 24 hours before winners are paid.
+- Admins create, edit, cancel and delete markets, and propose results (see [Admin guide](#admin-guide)).
 - The site also has a leaderboard (ranked by net worth), a portfolio page, a price-history chart and comments on
   each market.
 
@@ -54,16 +56,21 @@ Admins see an **Admin** link in the top bar.
 | Action | Where | What happens |
 |---|---|---|
 | **Review proposals** | Admin page → "Proposals waiting for approval" (the Admin link shows a count) | Open a proposal, fix anything you want, then **Approve & publish** (it goes live immediately, credited to the proposer) or **Reject**. You can leave a note the proposer will see. One admin's decision is final. |
-| **Create** | Admin page | Set the question, resolution criteria, 2–8 outcomes, category, closing time and liquidity. |
-| **Edit** | Admin page or the market's page | Question, criteria, category and closing time can always change. Before anyone bets, outcomes and liquidity can change too. After the first bet, outcomes can only be renamed, so earlier bets stay fair. Moving the closing time later reopens a closed market. |
-| **Resolve** | Admin page or the market's page | Pick the winning outcome. Each winning share pays Ⓜ1 immediately. This can't be undone. |
+| **Create** | Admin page | Choose Yes/No (the default) or multiple choice, then write the rules (“Resolves YES if…”, source, edge cases), category, closing time and liquidity. |
+| **Edit** | Admin page or the market's page | Question, category and closing time can always change. Before anyone bets, the written rules, outcomes and liquidity can change too. After the first bet the rules are **locked**; use **Clarify the rules** on the market's page to add a dated note instead. After the first bet, outcomes can only be renamed, so earlier bets stay fair. Moving the closing time later reopens a closed market. |
+| **Propose result** | Admin page or the market's page, after betting closes | Pick the winning outcome. Nobody is paid yet: traders get 24 hours to dispute it. With no dispute, the result finalizes by itself and each winning share pays Ⓜ1. Until then you can **withdraw** it or **propose a different outcome** (which restarts the 24 hours). |
+| **Review a dispute** | The market's page (a “Disputed” badge appears on the Admin page) | A dispute pauses finalizing. **Confirm result & pay out** settles it immediately, or propose a different outcome. Once a market is finalized it can't be undone. |
 | **Cancel & refund** | The market's page | Stops the market and refunds everyone's net spend. The market stays visible under "All". |
 | **Delete** | Admin page or the market's page | Removes the market completely. Unresolved markets refund bets first; payouts from resolved markets are kept. |
 | **Block from one market** | The market's page → Admin → "Blocked from this market" | Stops that person betting on this market (e.g. someone who already knows the answer). Any bets they placed here are refunded and removed, which also undoes their effect on the price. Can be undone with Unblock. |
 | **Ban from trading** | Admin page → Users → Trading | Stops someone betting anywhere. Their bets in every unresolved market are refunded and removed. Already-resolved markets are not changed. Click **Allow** to lift the ban. |
 | **Adjust balance / Make admin** (admins: owner only) | Admin page → Users | Add or remove MAMS Bucks, or promote/demote other users. |
 
-When betting closes, a market moves to **Awaiting result** until an admin resolves it.
+When betting closes, a market moves to **Awaiting result**. An admin proposes the result, there is a 24-hour challenge window (anyone who traded in the market can dispute it), and then winners are paid automatically. Finalizing happens on the next page load after the window ends, so no background job is needed.
+
+Trades by admins and by the market's creator are labelled on the market page so everyone can see them. Block someone from a market if they know the answer ahead of time. The site also has a **How it works** page (`/how-it-works`) that explains prices, the market maker, rules and disputes to users.
+
+**Upgrading an existing site:** just pull the new code and reload. The database gets its new columns automatically on start-up and nothing needs to be run by hand.
 
 Users can have up to 5 proposals waiting at once, and can withdraw a proposal until it's reviewed.
 

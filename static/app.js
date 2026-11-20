@@ -12,8 +12,10 @@ function svg(tag, attrs, parent) {
 }
 
 // Price-over-time chart: one stepped line per outcome.
-function drawChart(el, history, labels, endTime) {
+// `lines` limits how many outcomes are drawn (a Yes/No market only needs its Yes line).
+function drawChart(el, history, allLabels, endTime, lines) {
   if (!el || !history.length) return;
+  const labels = allLabels.slice(0, lines || allLabels.length);
   const W = 640, H = 220, L = 36, R = 8, T = 10, B = 24;
   const pts = history.map(h => ({ t: parseTime(h.t), p: h.p }));
   const end = endTime ? parseTime(endTime) : Date.now();
@@ -161,3 +163,79 @@ function setupTradeForm(form) {
   }));
   refresh();
 }
+
+// Market form (propose / review / admin create): Yes/No vs multiple-choice toggle and a live preview card.
+function setupMarketForm(form) {
+  const kindInputs = form.querySelectorAll('input[name=kind]');
+  const multiOnly = form.querySelector('[data-multi-only]');
+  const outcomes = form.querySelector('textarea[name=outcomes]');
+  const rulesLabel = form.querySelector('[data-rules-label]');
+  const rules = form.querySelector('textarea[name=description]');
+  const preview = document.querySelector('#market-preview .preview-body');
+  const field = name => (form.querySelector(`[name=${name}]`) || {}).value || '';
+  const kind = () => (form.querySelector('input[name=kind]:checked') || {}).value || 'multi';
+
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  function render() {
+    const yesno = kind() === 'yesno';
+    if (multiOnly) multiOnly.hidden = yesno;
+    if (outcomes) {
+      outcomes.disabled = yesno;
+      outcomes.required = !yesno;
+      if (!yesno && /^\s*yes\s*\n\s*no\s*$/i.test(outcomes.value)) outcomes.value = 'Option A\nOption B';
+    }
+    if (rulesLabel) rulesLabel.textContent = yesno ? 'Resolves YES if…' : 'How the winner is decided';
+    if (rules) rules.placeholder = yesno ? rules.dataset.yesnoPlaceholder : rules.dataset.multiPlaceholder;
+    if (!preview) return;
+
+    preview.replaceChildren();
+    const card = el('div', 'preview-market');
+    card.append(el('h3', '', field('question').trim() || 'Your question will show up here'));
+    if (yesno) {
+      const row = el('div', 'chance-row');
+      const chance = el('div', 'chance');
+      chance.append(el('span', 'chance-pct', '50%'), document.createTextNode(' '), el('span', 'muted', 'chance'));
+      const yn = el('div', 'yn');
+      yn.append(el('span', 'yn-yes', 'Yes 50¢'), el('span', 'yn-no', 'No 50¢'));
+      row.append(chance, yn);
+      card.append(row);
+    } else {
+      const labels = field('outcomes').split('\n').map(x => x.trim()).filter(Boolean).slice(0, 8);
+      const list = el('ul', 'odds');
+      labels.forEach((name, i) => {
+        const li = el('li');
+        const bar = el('span', 'bar'), fill = el('span');
+        fill.style.width = `${100 / Math.max(labels.length, 1)}%`;
+        fill.style.background = `var(--c${i})`;
+        bar.append(fill);
+        li.append(el('span', 'odds-label', name), bar, el('span', 'odds-pct', `${Math.round(100 / labels.length)}%`));
+        list.append(li);
+      });
+      card.append(list);
+    }
+    const box = el('div', 'rules');
+    box.append(el('h4', '', yesno ? 'Resolves YES if' : 'How the winner is decided'),
+               el('p', '', field('description').trim() || '…'));
+    if (field('rules_source').trim()) box.append(el('h4', '', 'Source'), el('p', '', field('rules_source').trim()));
+    if (field('rules_otherwise').trim()) box.append(el('h4', '', 'Otherwise'), el('p', '', field('rules_otherwise').trim()));
+    const closes = field('closes_at');
+    if (closes && !isNaN(new Date(closes))) {
+      box.append(el('h4', '', 'Betting closes'), el('p', '', new Date(closes).toLocaleString(undefined,
+        { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })));
+    }
+    card.append(box);
+    preview.append(card);
+  }
+
+  form.addEventListener('input', render);
+  form.addEventListener('change', render);
+  render();
+}
+
+document.querySelectorAll('form[data-market-form]').forEach(setupMarketForm);

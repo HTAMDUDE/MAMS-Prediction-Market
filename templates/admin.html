@@ -31,33 +31,11 @@
 <div class="admin-layout">
   <div class="card">
     <h2>Create a market</h2>
-    <form method="post" action="{{ url_for('admin_create') }}" class="stack">
+    <form method="post" action="{{ url_for('admin_create') }}" class="stack" data-market-form>
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-      <label class="field"><span>Question</span>
-        <input name="question" maxlength="200" required placeholder="Will MAMS win the regional Science Bowl?">
-      </label>
-      <label class="field"><span>Resolution criteria <em class="muted">(how will we know the answer?)</em></span>
-        <textarea name="description" rows="3" placeholder="Resolves Yes if the official results list MAMS in first place."></textarea>
-      </label>
-      <label class="field"><span>Outcomes <em class="muted">(one per line, 2–8)</em></span>
-        <textarea name="outcomes" rows="3" required>Yes
-No</textarea>
-      </label>
-      <div class="row">
-        <label class="field"><span>Category</span>
-          <select name="category">{% for c in CATEGORIES %}<option>{{ c }}</option>{% endfor %}</select>
-        </label>
-        <label class="field"><span>Betting closes</span>
-          <input type="datetime-local" name="closes_at" value="{{ default_close }}" required>
-        </label>
-        <label class="field"><span>Liquidity</span>
-          <select name="liquidity" title="Higher liquidity = prices move less per bet">
-            <option value="low">Low (prices swing fast)</option>
-            <option value="medium" selected>Medium</option>
-            <option value="high">High (prices steady)</option>
-          </select>
-        </label>
-      </div>
+      {% set form = {} %}
+      {% set show_liquidity = true %}
+      {% include "_market_fields.html" %}
       <button class="btn">Create market</button>
     </form>
   </div>
@@ -69,19 +47,27 @@ No</textarea>
         <div>
           <a href="{{ url_for('market', mid=b.m.id) }}">{{ b.m.question }}</a>
           <div class="muted small">
-            {% if b.state == 'closed' %}<span class="status status-closed">needs result</span>{% else %}{{ b.m.closes_at|until }}{% endif %}
+            {% if b.state == 'closed' %}<span class="status status-closed">needs a result</span>
+            {% elif b.state == 'proposed' %}<span class="status status-pending">result proposed</span>
+              {% for o in b.outcomes if o.id == b.m.proposed_outcome_id %}{{ o.label }}{% endfor %} · finalizes {{ b.m.finalizes_at|until }}
+            {% elif b.state == 'disputed' %}<span class="status status-rejected">disputed — needs review</span>
+            {% else %}{{ b.m.closes_at|until }}{% endif %}
             · Ⓜ{{ b.volume|money }} traded
           </div>
         </div>
-        <form method="post" action="{{ url_for('admin_resolve', mid=b.m.id) }}" class="inline"
-              onsubmit="return confirm('Resolve? Winners are paid immediately and this cannot be undone.')">
+        {% if b.state == 'closed' %}
+        <form method="post" action="{{ url_for('admin_propose_result', mid=b.m.id) }}" class="inline"
+              onsubmit="return confirm('Propose this result? Traders get 24 hours to dispute it before winners are paid.')">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <select name="outcome_id" required>
             <option value="">Winner…</option>
             {% for o in b.outcomes %}<option value="{{ o.id }}">{{ o.label }}</option>{% endfor %}
           </select>
-          <button class="btn btn-small">Resolve</button>
+          <button class="btn btn-small">Propose</button>
         </form>
+        {% elif b.state in ('proposed', 'disputed') %}
+        <a class="btn btn-small" href="{{ url_for('market', mid=b.m.id) }}#admin">{{ 'Review' if b.state == 'disputed' else 'Open' }}</a>
+        {% endif %}
         {{ delete_button(b) }}
       </div>
     {% else %}

@@ -35,7 +35,20 @@ DAILY_BONUS = 100.0
 MIN_BET = 1.0
 CURRENCY = "MAMS Bucks"
 ADMIN_USERNAMES = {u.strip().lower() for u in os.environ.get("MAMS_ADMINS", "").split(",") if u.strip()}
-LIQUIDITY = {"low": 50.0, "medium": 100.0, "high": 250.0}
+# Liquidity presets are for a yes/no market; markets with more outcomes scale up (see market_b)
+# so a bet moves an 8-way market about as much as it moves a 2-way one.
+LIQUIDITY = {"low": 150.0, "medium": 300.0, "high": 600.0}
+
+
+def market_b(preset, n_outcomes):
+    return LIQUIDITY.get(preset, LIQUIDITY["medium"]) * math.log2(max(n_outcomes, 2))
+
+
+def preset_for(b, n_outcomes):
+    """The preset whose scaled liquidity is closest to a market's stored b (old markets may not match exactly)."""
+    return min(LIQUIDITY, key=lambda k: abs(market_b(k, n_outcomes) - b))
+MIN_RULES_LENGTH = 20
+DISPUTE_WINDOW = timedelta(hours=24)  # how long traders can challenge a proposed result
 CATEGORIES = ["Academics", "Competitions", "Sports", "Events", "Campus Life", "Weather", "Other"]
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,20}$")
 EPS = 1e-9
@@ -100,10 +113,30 @@ def close_db(_exc):
         db.close()
 
 
+# Columns added after the first release. schema.sql only creates missing tables, so databases
+# created earlier get these through ALTER TABLE (see migrate).
+NEW_COLUMNS = {
+    "markets": [("rules_source", "TEXT NOT NULL DEFAULT ''"), ("rules_otherwise", "TEXT NOT NULL DEFAULT ''"),
+                ("proposed_outcome_id", "INTEGER"), ("proposed_by", "INTEGER"), ("proposed_at", "TEXT"),
+                ("finalizes_at", "TEXT"), ("resolved_by", "INTEGER")],
+    "proposals": [("rules_source", "TEXT NOT NULL DEFAULT ''"), ("rules_otherwise", "TEXT NOT NULL DEFAULT ''")],
+}
+
+
+def migrate(db):
+    """Add any columns an older database is missing. Safe to run repeatedly."""
+    for table, columns in NEW_COLUMNS.items():
+        have = {r["name"] for r in db.execute(f"PRAGMA table_info({table})")}
+        for name, decl in columns:
+            if name not in have:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+
 def init_db():
     db = connect()
     with open(os.path.join(BASE_DIR, "schema.sql")) as f:
         db.executescript(f.read())
+    migrate(db)
     db.close()
 
 
@@ -125,10 +158,22 @@ def cents(x):
 
 
 def market_state(m):
-    """open | closed (past close date, awaiting resolution) | resolved | cancelled"""
+    """open | closed (past close date, awaiting a proposed result) | proposed (result proposed, challenge window
+    running) | resolved | cancelled. `bundle` upgrades proposed to disputed when a challenge is waiting."""
     if m["status"] in ("resolved", "cancelled"):
         return m["status"]
+    if m["proposed_outcome_id"] is not None:
+        return "proposed"
     return "closed" if datetime.now() >= parse_dt(m["closes_at"]) else "open"
+
+
+def is_binary(labels):
+    return [x.lower() for x in labels] == ["yes", "no"]
+
+
+def open_disputes(db, market_id):
+    return db.execute("SELECT d.*, u.username FROM disputes d JOIN users u ON u.id = d.user_id "
+                      "WHERE d.market_id = ? AND d.handled_at IS NULL ORDER BY d.id", (market_id,)).fetchall()
 
 
 def get_outcomes(db, market_id):
@@ -145,9 +190,13 @@ def bundle(db, m):
     stats = db.execute(
         "SELECT COALESCE(SUM(ABS(amount)), 0) AS volume, COUNT(DISTINCT user_id) AS traders "
         "FROM trades WHERE market_id = ?", (m["id"],)).fetchone()
+    state = market_state(m)
+    if state == "proposed" and open_disputes(db, m["id"]):
+        state = "disputed"
     return {
         "m": m,
-        "state": market_state(m),
+        "state": state,
+        "binary": is_binary([o["label"] for o in outs]),
         "outcomes": [{"id": o["id"], "label": o["label"], "shares": o["shares"], "price": p}
                      for o, p in zip(outs, ps)],
         "volume": stats["volume"],
@@ -339,7 +388,9 @@ def execute_trade(db, user_id, market_id, outcome_id, action, value):
         raise
 
 
-def resolve_market(db, market_id, outcome_id):
+def resolve_market(db, market_id, outcome_id, resolved_by=None, automatic=False):
+    """Pay out a market. `automatic` is used when a challenge window ends: it only goes ahead if the proposed
+    result is still the same, the window is over and nobody has an unhandled dispute."""
     db.execute("BEGIN IMMEDIATE")
     try:
         m = db.execute("SELECT * FROM markets WHERE id = ?", (market_id,)).fetchone()
@@ -347,16 +398,92 @@ def resolve_market(db, market_id, outcome_id):
             raise TradeError("Only unresolved markets can be resolved.")
         if outcome_id not in [o["id"] for o in get_outcomes(db, market_id)]:
             raise TradeError("Unknown outcome.")
+        if automatic:
+            if (m["proposed_outcome_id"] != outcome_id or not m["finalizes_at"] or m["finalizes_at"] > now_str()
+                    or db.execute("SELECT 1 FROM disputes WHERE market_id = ? AND handled_at IS NULL",
+                                  (market_id,)).fetchone()):
+                raise TradeError("Not ready to finalize.")
         winners = db.execute("SELECT user_id, shares FROM positions WHERE outcome_id = ?", (outcome_id,)).fetchall()
         for w in winners:
             db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (w["shares"], w["user_id"]))
-        db.execute("UPDATE markets SET status = 'resolved', resolved_outcome_id = ?, resolved_at = ? WHERE id = ?",
-                   (outcome_id, now_str(), market_id))
+        db.execute("UPDATE markets SET status = 'resolved', resolved_outcome_id = ?, resolved_at = ?, "
+                   "resolved_by = ? WHERE id = ?", (outcome_id, now_str(), resolved_by, market_id))
+        db.execute("UPDATE disputes SET handled_at = ? WHERE market_id = ? AND handled_at IS NULL",
+                   (now_str(), market_id))
         db.execute("COMMIT")
         return len(winners)
     except Exception:
         db.execute("ROLLBACK")
         raise
+
+
+def propose_result(db, market_id, outcome_id, admin_id):
+    """An admin names the winner. Nobody is paid yet: the result finalizes after the challenge window.
+    Proposing again (e.g. after a dispute) replaces the proposal, restarts the window and clears disputes."""
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        m = db.execute("SELECT * FROM markets WHERE id = ?", (market_id,)).fetchone()
+        if m is None or m["status"] != "open":
+            raise TradeError("Only unresolved markets can have a result proposed.")
+        if datetime.now() < parse_dt(m["closes_at"]):
+            raise TradeError("Betting hasn't closed yet. Propose a result once it has.")
+        if outcome_id not in [o["id"] for o in get_outcomes(db, market_id)]:
+            raise TradeError("Unknown outcome.")
+        now = datetime.now()
+        db.execute("UPDATE markets SET proposed_outcome_id = ?, proposed_by = ?, proposed_at = ?, finalizes_at = ? "
+                   "WHERE id = ?", (outcome_id, admin_id, now.strftime("%Y-%m-%d %H:%M:%S"),
+                                    (now + DISPUTE_WINDOW).strftime("%Y-%m-%d %H:%M:%S"), market_id))
+        db.execute("UPDATE disputes SET handled_at = ? WHERE market_id = ? AND handled_at IS NULL",
+                   (now_str(), market_id))
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+
+
+def retract_result(db, market_id):
+    """Take back a proposed result before it finalizes."""
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        m = db.execute("SELECT * FROM markets WHERE id = ?", (market_id,)).fetchone()
+        if m is None or m["status"] != "open" or m["proposed_outcome_id"] is None:
+            raise TradeError("There's no proposed result to withdraw.")
+        db.execute("UPDATE markets SET proposed_outcome_id = NULL, proposed_by = NULL, proposed_at = NULL, "
+                   "finalizes_at = NULL WHERE id = ?", (market_id,))
+        db.execute("UPDATE disputes SET handled_at = ? WHERE market_id = ? AND handled_at IS NULL",
+                   (now_str(), market_id))
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+
+
+def finalize_due(db):
+    """Pay out every market whose challenge window ended with no unhandled dispute. Called on each request,
+    so results settle on time without a background job."""
+    due = db.execute("SELECT id, proposed_outcome_id, proposed_by FROM markets WHERE status = 'open' "
+                     "AND proposed_outcome_id IS NOT NULL AND finalizes_at <= ?", (now_str(),)).fetchall()
+    for m in due:
+        try:
+            resolve_market(db, m["id"], m["proposed_outcome_id"], m["proposed_by"], automatic=True)
+        except TradeError:
+            pass  # a dispute arrived, or another request already finalized it
+
+
+def add_dispute(db, user_id, market_id, reason):
+    m = db.execute("SELECT * FROM markets WHERE id = ?", (market_id,)).fetchone()
+    if m is None or m["status"] != "open" or m["proposed_outcome_id"] is None:
+        raise TradeError("There's no proposed result to dispute.")
+    if not db.execute("SELECT 1 FROM trades WHERE user_id = ? AND market_id = ? LIMIT 1",
+                      (user_id, market_id)).fetchone():
+        raise TradeError("Only people who traded in this market can dispute its result.")
+    if not 10 <= len(reason) <= 500:
+        raise TradeError("Explain the problem in 10–500 characters.")
+    if db.execute("SELECT 1 FROM disputes WHERE market_id = ? AND user_id = ? AND handled_at IS NULL",
+                  (market_id, user_id)).fetchone():
+        raise TradeError("You already disputed this result.")
+    db.execute("INSERT INTO disputes (market_id, user_id, reason, created_at) VALUES (?, ?, ?, ?)",
+               (market_id, user_id, reason, now_str()))
 
 
 def cancel_market(db, market_id):
@@ -404,13 +531,14 @@ def delete_market(db, market_id):
         raise
 
 
-def create_market(db, question, description, category, closes_at, labels, b, created_by=None):
+def create_market(db, question, description, category, closes_at, labels, b, created_by=None,
+                  rules_source="", rules_otherwise=""):
     db.execute("BEGIN IMMEDIATE")
     try:
         cur = db.execute(
-            "INSERT INTO markets (question, description, category, b, closes_at, created_by, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (question, description, category, b, closes_at, created_by, now_str()))
+            "INSERT INTO markets (question, description, category, b, closes_at, created_by, created_at, "
+            "rules_source, rules_otherwise) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (question, description, category, b, closes_at, created_by, now_str(), rules_source, rules_otherwise))
         mid = cur.lastrowid
         for i, label in enumerate(labels):
             db.execute("INSERT INTO outcomes (market_id, label, position) VALUES (?, ?, ?)", (mid, label, i))
@@ -442,6 +570,8 @@ def load_user_and_check_csrf():
         elif g.user["id"] == g.owner_id and not g.user["is_admin"]:
             db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (g.user["id"],))  # owner is always admin
             g.user = db.execute("SELECT * FROM users WHERE id = ?", (g.user["id"],)).fetchone()
+    if request.endpoint != "static":
+        finalize_due(get_db())
     if request.method == "POST":
         token = request.form.get("csrf_token", "")
         if not token or not secrets.compare_digest(token, session.get("_csrf", "")):
@@ -631,7 +761,9 @@ def index():
     status = request.args.get("status", "open")
     cat = request.args.get("cat", "")
     markets = [bundle(db, m) for m in db.execute("SELECT * FROM markets ORDER BY closes_at").fetchall()]
-    if status in ("open", "closed", "resolved", "cancelled"):
+    if status == "closed":  # "Awaiting result" also covers results that are proposed or disputed
+        markets = [b for b in markets if b["state"] in ("closed", "proposed", "disputed")]
+    elif status in ("open", "resolved", "cancelled"):
         markets = [b for b in markets if b["state"] == status]
     if cat:
         markets = [b for b in markets if b["m"]["category"] == cat]
@@ -652,8 +784,18 @@ def market(mid):
     history = [{"t": r["created_at"], "p": json.loads(r["prices"])}
                for r in db.execute("SELECT * FROM price_history WHERE market_id = ? ORDER BY id", (mid,))]
     trades = db.execute(
-        "SELECT t.*, u.username, o.label FROM trades t JOIN users u ON u.id = t.user_id "
+        "SELECT t.*, u.username, u.is_admin, o.label FROM trades t JOIN users u ON u.id = t.user_id "
         "JOIN outcomes o ON o.id = t.outcome_id WHERE t.market_id = ? ORDER BY t.id DESC LIMIT 25", (mid,)).fetchall()
+    clarifications = db.execute("SELECT * FROM clarifications WHERE market_id = ? ORDER BY id", (mid,)).fetchall()
+    disputes, proposer, can_dispute = [], None, False
+    if m["proposed_outcome_id"] is not None and m["status"] == "open":
+        disputes = open_disputes(db, mid)
+        row = db.execute("SELECT username FROM users WHERE id = ?", (m["proposed_by"],)).fetchone()
+        proposer = row["username"] if row else None
+        if g.user:
+            traded = db.execute("SELECT 1 FROM trades WHERE user_id = ? AND market_id = ? LIMIT 1",
+                                (g.user["id"], mid)).fetchone()
+            can_dispute = bool(traded) and not any(d["user_id"] == g.user["id"] for d in disputes)
     comments = db.execute(
         "SELECT c.*, u.username FROM comments c JOIN users u ON u.id = c.user_id "
         "WHERE c.market_id = ? ORDER BY c.id DESC", (mid,)).fetchall()
@@ -668,6 +810,7 @@ def market(mid):
             o = by_id[p["outcome_id"]]
             # Resolved markets pay 1 per winning share; otherwise show what the shares would sell for now.
             value = (p["shares"] * o["price"] if b["m"]["status"] == "resolved"
+                     else 0.0 if b["m"]["status"] == "cancelled"
                      else lmsr.sell_value(q, b["m"]["b"], index[p["outcome_id"]], p["shares"]))
             my_positions.append({"outcome": o, "shares": p["shares"], "cost": p["cost"], "value": value})
     block_reason = trade_block_reason(db, g.user["id"], mid) if g.user else None
@@ -678,7 +821,24 @@ def market(mid):
         all_users = [r["username"] for r in db.execute("SELECT username FROM users ORDER BY username")]
     return render_template("market.html", b=b, history=history, trades=trades, comments=comments,
                            my_positions=my_positions, block_reason=block_reason,
-                           blocked=blocked, all_users=all_users)
+                           blocked=blocked, all_users=all_users, clarifications=clarifications,
+                           disputes=disputes, proposer=proposer, can_dispute=can_dispute)
+
+
+@app.post("/market/<int:mid>/dispute")
+@login_required
+def dispute(mid):
+    try:
+        add_dispute(get_db(), g.user["id"], mid, request.form.get("reason", "").strip())
+        flash("Dispute sent. The result won't finalize until an admin reviews it.", "success")
+    except TradeError as e:
+        flash(str(e), "error")
+    return redirect(url_for("market", mid=mid))
+
+
+@app.route("/how-it-works")
+def how_it_works():
+    return render_template("how_it_works.html", window_hours=int(DISPUTE_WINDOW.total_seconds() // 3600))
 
 
 @app.post("/market/<int:mid>/trade")
@@ -776,10 +936,12 @@ def portfolio():
         price = outs[i]["price"]
         if b["m"]["status"] == "open":  # open or awaiting result: value = what the shares would sell for now
             value = lmsr.sell_value([o["shares"] for o in outs], b["m"]["b"], i, r["shares"])
+        elif b["m"]["status"] == "cancelled":
+            value = 0.0  # refunded when the market was cancelled
         else:
             value = r["shares"] * price
         item = {"r": r, "b": b, "price": price, "value": value}
-        (active if b["state"] in ("open", "closed") else settled).append(item)
+        (active if b["m"]["status"] == "open" else settled).append(item)
     trades = db.execute(
         "SELECT t.*, o.label, m.question FROM trades t JOIN outcomes o ON o.id = t.outcome_id "
         "JOIN markets m ON m.id = t.market_id WHERE t.user_id = ? ORDER BY t.id DESC LIMIT 30", (uid,)).fetchall()
@@ -824,7 +986,9 @@ def admin():
 def read_market_form(f):
     """Validate a create/propose/review form. Returns (fields, error_message)."""
     question = f.get("question", "").strip()
-    labels = parse_outcome_lines(f.get("outcomes", ""))
+    # "yesno" is the standard market; "multi" (or no kind at all) takes the outcome list as typed.
+    labels = ["Yes", "No"] if f.get("kind") == "yesno" else parse_outcome_lines(f.get("outcomes", ""))
+    description = f.get("description", "").strip()
     try:
         closes_at = datetime.fromisoformat(f.get("closes_at", ""))
     except ValueError:
@@ -833,11 +997,16 @@ def read_market_form(f):
         return None, "Question is required (max 200 characters)."
     if not 2 <= len(labels) <= 8:
         return None, "Give 2–8 distinct outcomes, one per line."
+    if len(description) < MIN_RULES_LENGTH:
+        return None, (f"Say exactly how the result will be decided "
+                      f"(at least {MIN_RULES_LENGTH} characters in the first rules box).")
     if closes_at is None or closes_at <= datetime.now():
         return None, "Pick a closing time in the future."
     return {
         "question": question,
-        "description": f.get("description", "").strip()[:2000],
+        "description": description[:2000],
+        "rules_source": f.get("rules_source", "").strip()[:300],
+        "rules_otherwise": f.get("rules_otherwise", "").strip()[:1000],
         "category": f.get("category") if f.get("category") in CATEGORIES else "Other",
         "closes_at": closes_at.strftime("%Y-%m-%d %H:%M:%S"),
         "labels": labels,
@@ -853,7 +1022,8 @@ def admin_create():
         flash(error, "error")
         return redirect(url_for("admin"))
     mid = create_market(get_db(), fields["question"], fields["description"], fields["category"],
-                        fields["closes_at"], fields["labels"], fields["b"], g.user["id"])
+                        fields["closes_at"], fields["labels"], fields["b"], g.user["id"],
+                        fields["rules_source"], fields["rules_otherwise"])
     flash("Market created.", "success")
     return redirect(url_for("market", mid=mid))
 
@@ -877,10 +1047,11 @@ def propose():
             flash(error, "error")
             return render_template("propose.html", form=request.form, mine=my_proposals(db))
         db.execute(
-            "INSERT INTO proposals (user_id, question, description, category, outcomes, closes_at, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO proposals (user_id, question, description, category, outcomes, closes_at, created_at, "
+            "rules_source, rules_otherwise) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (g.user["id"], fields["question"], fields["description"], fields["category"],
-             json.dumps(fields["labels"]), fields["closes_at"], now_str()))
+             json.dumps(fields["labels"]), fields["closes_at"], now_str(),
+             fields["rules_source"], fields["rules_otherwise"]))
         flash("Thanks! Your market was sent to the admins for approval.", "success")
         return redirect(url_for("propose"))
     return render_template("propose.html", form={}, mine=my_proposals(db))
@@ -931,26 +1102,66 @@ def admin_review(pid):
             flash("This proposal was already reviewed.", "error")
             return redirect(url_for("admin"))
         mid = create_market(db, fields["question"], fields["description"], fields["category"],
-                            fields["closes_at"], fields["labels"], fields["b"], p["user_id"])
+                            fields["closes_at"], fields["labels"], fields["b"], p["user_id"],
+                            fields["rules_source"], fields["rules_otherwise"])
         db.execute("UPDATE proposals SET market_id = ? WHERE id = ?", (mid, pid))
         flash(f"Approved! The market is now live. (Proposed by {p['username']}.)", "success")
         return redirect(url_for("market", mid=mid))
 
     form = {"question": p["question"], "description": p["description"], "category": p["category"],
+            "rules_source": p["rules_source"], "rules_otherwise": p["rules_otherwise"],
             "outcomes": "\n".join(json.loads(p["outcomes"])),
             "closes_at": parse_dt(p["closes_at"]).strftime("%Y-%m-%dT%H:%M"), "liquidity": "medium"}
     return render_template("review_proposal.html", p=p, form=form)
 
 
-@app.post("/admin/markets/<int:mid>/resolve")
+@app.post("/admin/markets/<int:mid>/propose-result")
 @admin_required
-def admin_resolve(mid):
+def admin_propose_result(mid):
     try:
-        n = resolve_market(get_db(), mid, int(request.form.get("outcome_id", 0)))
-        flash(f"Market resolved. Paid out {n} winning position(s).", "success")
+        propose_result(get_db(), mid, int(request.form.get("outcome_id", 0)), g.user["id"])
+        flash("Result proposed. It finalizes in 24 hours unless someone disputes it.", "success")
     except (TradeError, ValueError) as e:
         flash(str(e) or "Pick a winning outcome.", "error")
-    return redirect(request.referrer or url_for("admin"))
+    return redirect(request.referrer or url_for("market", mid=mid))
+
+
+@app.post("/admin/markets/<int:mid>/result-action")
+@admin_required
+def admin_result_action(mid):
+    """Confirm a disputed result right away, or take a proposed result back."""
+    db = get_db()
+    m = db.execute("SELECT * FROM markets WHERE id = ?", (mid,)).fetchone()
+    if m is None:
+        abort(404)
+    try:
+        if request.form.get("decision") == "retract":
+            retract_result(db, mid)
+            flash("Proposed result withdrawn. You can propose a different one.", "success")
+        elif request.form.get("decision") == "confirm":
+            if m["proposed_outcome_id"] is None or not open_disputes(db, mid):
+                raise TradeError("Only a disputed result needs confirming; others finalize on their own.")
+            n = resolve_market(db, mid, m["proposed_outcome_id"], g.user["id"])
+            flash(f"Result confirmed. Paid out {n} winning position(s).", "success")
+    except TradeError as e:
+        flash(str(e), "error")
+    return redirect(url_for("market", mid=mid))
+
+
+@app.post("/admin/markets/<int:mid>/clarify")
+@admin_required
+def admin_clarify(mid):
+    db = get_db()
+    if db.execute("SELECT 1 FROM markets WHERE id = ?", (mid,)).fetchone() is None:
+        abort(404)
+    body = request.form.get("body", "").strip()
+    if not 5 <= len(body) <= 500:
+        flash("A clarification needs 5–500 characters.", "error")
+    else:
+        db.execute("INSERT INTO clarifications (market_id, admin_id, body, created_at) VALUES (?, ?, ?, ?)",
+                   (mid, g.user["id"], body, now_str()))
+        flash("Clarification added to the rules.", "success")
+    return redirect(request.referrer or url_for("market", mid=mid))
 
 
 @app.post("/admin/markets/<int:mid>/cancel")
@@ -1002,6 +1213,9 @@ def admin_edit(mid):
             error = "Question is required (max 200 characters)."
         elif closes_at is None:
             error = "Pick a valid closing time."
+        elif (m["proposed_outcome_id"] is not None and m["status"] == "open"
+              and datetime.fromisoformat(closes_at) > datetime.now()):
+            error = "A result is proposed for this market. Withdraw it before moving the closing time later."
         elif not all(labels) or len({x.lower() for x in labels}) != len(labels):
             error = "Outcome names must be filled in and different from each other."
         elif not 2 <= len(labels) <= 8:
@@ -1012,9 +1226,12 @@ def admin_edit(mid):
 
         db.execute("BEGIN IMMEDIATE")
         try:
-            db.execute("UPDATE markets SET question = ?, description = ?, category = ?, closes_at = ? WHERE id = ?",
-                       (question, f.get("description", "").strip()[:2000],
-                        f.get("category") if f.get("category") in CATEGORIES else "Other", closes_at, mid))
+            db.execute("UPDATE markets SET question = ?, category = ?, closes_at = ? WHERE id = ?",
+                       (question, f.get("category") if f.get("category") in CATEGORIES else "Other", closes_at, mid))
+            if not has_trades:  # once anyone has bet the written rules are locked; use a clarification instead
+                db.execute("UPDATE markets SET description = ?, rules_source = ?, rules_otherwise = ? WHERE id = ?",
+                           (f.get("description", "").strip()[:2000], f.get("rules_source", "").strip()[:300],
+                            f.get("rules_otherwise", "").strip()[:1000], mid))
             if has_trades:
                 for oid, label in renames.items():
                     db.execute("UPDATE outcomes SET label = ? WHERE id = ?", (label, oid))
@@ -1037,7 +1254,9 @@ def admin_edit(mid):
         return redirect(url_for("market", mid=mid))
 
     liquidity = preset_for(m["b"], len(outs))
+    clarifications = db.execute("SELECT * FROM clarifications WHERE market_id = ? ORDER BY id", (mid,)).fetchall()
     return render_template("edit_market.html", m=m, outcomes=outs, has_trades=has_trades, liquidity=liquidity,
+                           clarifications=clarifications,
                            closes_value=parse_dt(m["closes_at"]).strftime("%Y-%m-%dT%H:%M"))
 
 

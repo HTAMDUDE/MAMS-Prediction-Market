@@ -246,3 +246,45 @@ main { padding-top: 8px; padding-bottom: 32px; }
 .blocked-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; }
 .block-form { margin-top: 8px; }
 .block-form input[name=username] { flex: 1; min-width: 0; }
+
+/* market types, rules and result panels */
+.chance { display: flex; align-items: baseline; gap: 6px; margin: 4px 0 8px; }
+.chance-pct { font-size: 2rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.chance-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex: 1; margin-bottom: 12px; }
+.chance-row .chance { margin: 0; }
+.chance-row .chance-pct { font-size: 1.6rem; }
+.yn { display: flex; gap: 6px; font-size: .85rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.yn span { padding: 5px 10px; border-radius: 8px; }
+.yn-yes { background: color-mix(in srgb, var(--up) 16%, transparent); color: var(--up); }
+.yn-no { background: color-mix(in srgb, var(--down) 14%, transparent); color: var(--down); }
+.rules { background: var(--surface-2); border-radius: var(--radius); padding: 12px 16px; margin: 12px 0; }
+.rules h2 { font-size: 1rem; margin: 0 0 4px; }
+.rules h4 { margin: 10px 0 2px; font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.rules p { margin: 0; white-space: pre-wrap; }
+.rules p.muted { margin-top: 12px; }
+.rules .clarification { margin-top: 10px; padding-left: 10px; border-left: 3px solid var(--gold); }
+.outcome-pick.binary { flex-direction: row; }
+.outcome-pick.binary label { flex: 1; }
+.outcome-pick.binary span { justify-content: center; gap: 8px; padding: 12px; font-weight: 700; }
+.outcome-pick.binary i { display: none; }
+.outcome-pick.binary b { margin-left: 0; }
+.outcome-pick.binary label:first-child span { color: var(--up); }
+.outcome-pick.binary label:last-child span { color: var(--down); }
+.outcome-pick.binary label:first-child input:checked + span { border-color: var(--up); box-shadow: inset 0 0 0 1px var(--up); background: color-mix(in srgb, var(--up) 12%, var(--surface)); }
+.outcome-pick.binary label:last-child input:checked + span { border-color: var(--down); box-shadow: inset 0 0 0 1px var(--down); background: color-mix(in srgb, var(--down) 12%, var(--surface)); }
+.kind-seg label { display: block; }
+.kind-seg input { position: absolute; opacity: 0; width: 0; }
+.kind-seg span { display: block; text-align: center; font-weight: 600; color: var(--muted); padding: 7px; border-radius: 8px; cursor: pointer; }
+.kind-seg input:checked + span { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.1); }
+.kind-seg input:focus-visible + span { outline: 2px solid var(--brand); }
+[hidden] { display: none !important; }
+.propose-side { display: flex; flex-direction: column; gap: 16px; }
+.preview-market h3 { margin: 0 0 10px; }
+.preview-market .rules { margin-bottom: 0; }
+.checklist { background: var(--surface-2); border-radius: 10px; padding: 10px 14px; font-size: .9rem; }
+.checklist ul { margin: 6px 0 0; padding-left: 18px; }
+.guide { max-width: 760px; margin: 24px auto; }
+.guide h2 { margin-top: 1.6em; }
+.guide .lead { font-size: 1.05rem; color: var(--muted); }
+.guide .example { background: var(--surface-2); border-radius: 10px; padding: 10px 14px; }
+.tag + .tag { margin-left: 2px; }
