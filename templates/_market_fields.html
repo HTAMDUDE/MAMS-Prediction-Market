@@ -1,4 +1,4 @@
-{# Shared market fields. Expects `form` (dict-like) and optional `show_liquidity`. #}
+{# Shared market fields. Expects `form` (dict-like). #}
 {% set typed = (form.outcomes or 'Yes\nNo').splitlines()|map('trim')|map('lower')|list %}
 {% set kind = form.kind or ('yesno' if typed == ['yes', 'no'] else 'multi') %}
 <div class="field">
@@ -38,13 +38,4 @@
   <label class="field"><span>Betting closes</span>
     <input type="datetime-local" name="closes_at" value="{{ form.closes_at or default_close }}" required>
   </label>
-  {% if show_liquidity %}
-  <label class="field"><span>Liquidity</span>
-    <select name="liquidity" title="Higher liquidity = prices move less per bet">
-      {% for key, label in [('low', 'Low (prices swing fast)'), ('medium', 'Medium'), ('high', 'High (prices steady)')] %}
-        <option value="{{ key }}" {{ 'selected' if key == (form.liquidity or 'medium') }}>{{ label }}</option>
-      {% endfor %}
-    </select>
-  </label>
-  {% endif %}
 </div>

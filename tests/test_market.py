@@ -191,7 +191,7 @@ def test_admin_edit():
         assert "Market updated." in r.get_data(as_text=True)
         m = db.execute("SELECT * FROM markets WHERE id=?", (mid,)).fetchone()
         assert (m["question"], m["category"]) == ("New?", "Sports")
-        assert m["b"] == pytest.approx(600 * 1.5849625007)  # "high", 3 outcomes
+        assert m["b"] == pytest.approx(1000 * 1.5849625007)  # 3 outcomes
         labels = [o["label"] for o in appmod.get_outcomes(db, mid)]
         assert labels == ["A", "B", "C"]
 
@@ -205,7 +205,7 @@ def test_admin_edit():
         data.update({f"label_{o['id']}": l for o, l in zip(outs, ["Alpha", "B", "C"])})
         admin.post(f"/admin/markets/{mid}/edit", data=data)
         assert [o["label"] for o in appmod.get_outcomes(db, mid)] == ["Alpha", "B", "C"]
-        assert db.execute("SELECT b FROM markets WHERE id=?", (mid,)).fetchone()[0] == pytest.approx(600 * 1.5849625007)
+        assert db.execute("SELECT b FROM markets WHERE id=?", (mid,)).fetchone()[0] == pytest.approx(1000 * 1.5849625007)
         assert db.execute("SELECT COUNT(*) FROM positions WHERE user_id=?", (uid,)).fetchone()[0] == 1
         assert admin.get(f"/market/{mid}").status_code == 200
         assert admin.get("/admin").status_code == 200
@@ -271,7 +271,7 @@ def test_proposals_flow():
         p = db.execute("SELECT * FROM proposals WHERE id=?", (pid,)).fetchone()
         assert p["status"] == "approved" and p["market_id"]
         m = db.execute("SELECT * FROM markets WHERE id=?", (p["market_id"],)).fetchone()
-        assert m["question"] == "Will the pep rally have a live band?" and m["b"] == 600
+        assert m["question"] == "Will the pep rally have a live band?" and m["b"] == 1000
         assert "Clarified wording" in sam.get("/propose").get_data(as_text=True)
 
         # approving twice does nothing
@@ -430,11 +430,9 @@ def test_holding_both_sides_is_worth_its_cost():
 
 
 def test_market_b_scales_with_outcomes():
-    assert appmod.market_b("medium", 2) == 300
-    assert appmod.market_b("medium", 8) == 900
-    assert appmod.market_b("bogus", 2) == 300
-    assert appmod.preset_for(900, 8) == "medium"
-    assert appmod.preset_for(50, 2) == "low"  # old-style markets map to the nearest preset
+    assert appmod.market_b(2) == 1000
+    assert appmod.market_b(8) == 3000
+    assert appmod.market_b(1) == 1000  # never below the yes/no level
 
 
 def test_form_market_stores_scaled_b():
@@ -450,9 +448,9 @@ def test_form_market_stores_scaled_b():
                                            "closes_at": closes, "liquidity": "medium"})
         db = appmod.connect()
         mid, b = db.execute("SELECT id, b FROM markets WHERE question='Eight?'").fetchone()
-        assert b == pytest.approx(900)
+        assert b == pytest.approx(3000)
         page = admin.get(f"/admin/markets/{mid}/edit").get_data(as_text=True)
-        assert re.search(r'<option value="medium"\s+selected', page)
+        assert 'name="liquidity"' not in page  # no liquidity setting any more
     finally:
         appmod.DB_PATH = old
 
@@ -535,7 +533,7 @@ def test_market_form_kinds_and_required_rules():
     base = {"question": "Q?", "description": RULES, "closes_at": (datetime.now() + timedelta(days=2)).isoformat(),
             "category": "Events"}
     fields, err = appmod.read_market_form({**base, "kind": "yesno", "outcomes": "ignored\nme"})
-    assert err is None and fields["labels"] == ["Yes", "No"] and fields["b"] == 300
+    assert err is None and fields["labels"] == ["Yes", "No"] and fields["b"] == 1000
     fields, err = appmod.read_market_form({**base, "kind": "multi", "outcomes": "A\nB\nC"})
     assert err is None and fields["labels"] == ["A", "B", "C"]
     _, err = appmod.read_market_form({**base, "kind": "multi", "outcomes": "Only"})
@@ -793,5 +791,43 @@ def test_owner_from_env_var(monkeypatch):
         assert admin_flag("earlybird") == 0
         assert admin_flag("RealOwner") == 1
         assert ">Owner<" in real.get("/admin").get_data(as_text=True)
+    finally:
+        appmod.DB_PATH = old
+
+
+def test_existing_markets_upgraded_to_deeper_liquidity_without_moving_prices():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        uid = db.execute("INSERT INTO users (username, password_hash, balance, created_at) VALUES ('olduser', 'x', 1000, ?)",
+                         (appmod.now_str(),)).lastrowid
+        closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+        mid = appmod.create_market(db, "Old shallow?", "Resolves YES if the old market says so.", "Other",
+                                   closes, ["Yes", "No", "Maybe"], 300)  # created under the old "medium" setting
+        done = appmod.create_market(db, "Already settled?", "Resolves YES if the old market says so.", "Other",
+                                    closes, ["Yes", "No"], 300)
+        db.execute("UPDATE markets SET status = 'resolved' WHERE id = ?", (done,))
+        yes = appmod.get_outcomes(db, mid)[0]["id"]
+        appmod.execute_trade(db, uid, mid, yes, "buy", 200)
+        q_before = [o["shares"] for o in appmod.get_outcomes(db, mid)]
+        prices_before = appmod.lmsr.prices(q_before, 300)
+        held = db.execute("SELECT shares FROM positions WHERE user_id=?", (uid,)).fetchone()[0]
+        bal = db.execute("SELECT balance FROM users WHERE id=?", (uid,)).fetchone()[0]
+
+        appmod.deepen_liquidity(db)
+        appmod.deepen_liquidity(db)  # running again changes nothing
+
+        b = db.execute("SELECT b FROM markets WHERE id=?", (mid,)).fetchone()[0]
+        assert b == pytest.approx(appmod.market_b(3))
+        q_after = [o["shares"] for o in appmod.get_outcomes(db, mid)]
+        assert appmod.lmsr.prices(q_after, b) == pytest.approx(prices_before)          # prices unchanged
+        assert db.execute("SELECT shares FROM positions WHERE user_id=?", (uid,)).fetchone()[0] == held
+        assert db.execute("SELECT balance FROM users WHERE id=?", (uid,)).fetchone()[0] == bal
+        assert db.execute("SELECT b FROM markets WHERE id=?", (done,)).fetchone()[0] == 300  # settled: untouched
+
+        # the same bet now moves the price less than it would have before
+        shallow = appmod.lmsr.prices([q_before[0] + appmod.lmsr.shares_for_amount(q_before, 300, 0, 100)] + q_before[1:], 300)[0]
+        deep = appmod.lmsr.prices([q_after[0] + appmod.lmsr.shares_for_amount(q_after, b, 0, 100)] + q_after[1:], b)[0]
+        assert deep - prices_before[0] < (shallow - prices_before[0]) / 2
     finally:
         appmod.DB_PATH = old

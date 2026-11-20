@@ -34,7 +34,6 @@
     <form method="post" action="{{ url_for('admin_create') }}" class="stack" data-market-form>
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       {% set form = {} %}
-      {% set show_liquidity = true %}
       {% include "_market_fields.html" %}
       <button class="btn">Create market</button>
     </form>

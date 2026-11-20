@@ -45,6 +45,6 @@ if __name__ == "__main__":
             continue
         closes = (datetime.now() + timedelta(days=days)).replace(hour=15, minute=0, second=0, microsecond=0)
         create_market(db, question, description, category, closes.strftime("%Y-%m-%d %H:%M:%S"),
-                      outcomes, market_b("medium", len(outcomes)), None, source, otherwise)
+                      outcomes, market_b(len(outcomes)), None, source, otherwise)
         added += 1
     print(f"Added {added} sample market(s).")

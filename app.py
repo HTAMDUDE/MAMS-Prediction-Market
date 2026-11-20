@@ -35,18 +35,15 @@ DAILY_BONUS = 100.0
 MIN_BET = 1.0
 CURRENCY = "MAMS Bucks"
 ADMIN_USERNAMES = {u.strip().lower() for u in os.environ.get("MAMS_ADMINS", "").split(",") if u.strip()}
-# Liquidity presets are for a yes/no market; markets with more outcomes scale up (see market_b)
-# so a bet moves an 8-way market about as much as it moves a 2-way one.
-LIQUIDITY = {"low": 150.0, "medium": 300.0, "high": 600.0}
+# LMSR liquidity ("b") for a yes/no market. Higher = prices swing less per bet. At 1000, on a 50/50 market:
+#   Ⓜ100 -> 55%,  Ⓜ500 -> 70%,  Ⓜ1000 (a whole starting balance) -> 82%.
+# Markets with more outcomes scale up (see market_b) so a bet moves an 8-way market about as much as a 2-way one.
+# The most the house can lose on a market is b * ln(outcomes), about Ⓜ693 here; fine for play money.
+BASE_LIQUIDITY = 1000.0
 
 
-def market_b(preset, n_outcomes):
-    return LIQUIDITY.get(preset, LIQUIDITY["medium"]) * math.log2(max(n_outcomes, 2))
-
-
-def preset_for(b, n_outcomes):
-    """The preset whose scaled liquidity is closest to a market's stored b (old markets may not match exactly)."""
-    return min(LIQUIDITY, key=lambda k: abs(market_b(k, n_outcomes) - b))
+def market_b(n_outcomes):
+    return BASE_LIQUIDITY * math.log2(max(n_outcomes, 2))
 MIN_RULES_LENGTH = 20
 DISPUTE_WINDOW = timedelta(hours=24)  # how long traders can challenge a proposed result
 CATEGORIES = ["Academics", "Competitions", "Sports", "Events", "Campus Life", "Weather", "Other"]
@@ -132,11 +129,31 @@ def migrate(db):
                 db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
+def deepen_liquidity(db):
+    """Bring unsettled markets created with lower liquidity up to the current setting. Every share count the
+    market maker holds is scaled by the same factor, so each market's prices stay exactly where they are; only
+    future bets move them less. Nobody's shares or balance change. Safe to run repeatedly."""
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        for m in db.execute("SELECT id, b FROM markets WHERE status = 'open'").fetchall():
+            n = db.execute("SELECT COUNT(*) FROM outcomes WHERE market_id = ?", (m["id"],)).fetchone()[0]
+            target = market_b(n)
+            if m["b"] < target - 1e-9:
+                factor = target / m["b"]
+                db.execute("UPDATE outcomes SET shares = shares * ? WHERE market_id = ?", (factor, m["id"]))
+                db.execute("UPDATE markets SET b = ? WHERE id = ?", (target, m["id"]))
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+
+
 def init_db():
     db = connect()
     with open(os.path.join(BASE_DIR, "schema.sql")) as f:
         db.executescript(f.read())
     migrate(db)
+    deepen_liquidity(db)
     db.close()
 
 
@@ -1010,7 +1027,7 @@ def read_market_form(f):
         "category": f.get("category") if f.get("category") in CATEGORIES else "Other",
         "closes_at": closes_at.strftime("%Y-%m-%d %H:%M:%S"),
         "labels": labels,
-        "b": market_b(f.get("liquidity"), len(labels)),
+        "b": market_b(len(labels)),
     }, None
 
 
@@ -1111,7 +1128,7 @@ def admin_review(pid):
     form = {"question": p["question"], "description": p["description"], "category": p["category"],
             "rules_source": p["rules_source"], "rules_otherwise": p["rules_otherwise"],
             "outcomes": "\n".join(json.loads(p["outcomes"])),
-            "closes_at": parse_dt(p["closes_at"]).strftime("%Y-%m-%dT%H:%M"), "liquidity": "medium"}
+            "closes_at": parse_dt(p["closes_at"]).strftime("%Y-%m-%dT%H:%M")}
     return render_template("review_proposal.html", p=p, form=form)
 
 
@@ -1236,8 +1253,7 @@ def admin_edit(mid):
                 for oid, label in renames.items():
                     db.execute("UPDATE outcomes SET label = ? WHERE id = ?", (label, oid))
             else:
-                preset = f.get("liquidity")
-                b = market_b(preset, len(labels)) if preset in LIQUIDITY else m["b"]
+                b = market_b(len(labels))  # outcome count may have changed
                 db.execute("UPDATE markets SET b = ? WHERE id = ?", (b, mid))
                 if [o["label"] for o in outs] != labels:
                     db.execute("DELETE FROM outcomes WHERE market_id = ?", (mid,))
@@ -1253,9 +1269,8 @@ def admin_edit(mid):
         flash("Market updated.", "success")
         return redirect(url_for("market", mid=mid))
 
-    liquidity = preset_for(m["b"], len(outs))
     clarifications = db.execute("SELECT * FROM clarifications WHERE market_id = ? ORDER BY id", (mid,)).fetchall()
-    return render_template("edit_market.html", m=m, outcomes=outs, has_trades=has_trades, liquidity=liquidity,
+    return render_template("edit_market.html", m=m, outcomes=outs, has_trades=has_trades,
                            clarifications=clarifications,
                            closes_value=parse_dt(m["closes_at"]).strftime("%Y-%m-%dT%H:%M"))
 

@@ -48,14 +48,6 @@
       <label class="field"><span>Betting closes</span>
         <input type="datetime-local" name="closes_at" value="{{ closes_value }}" required>
       </label>
-      <label class="field"><span>Liquidity</span>
-        <select name="liquidity" {{ 'disabled' if has_trades }}
-                title="{{ 'Locked once people have bet' if has_trades else 'Higher liquidity = prices move less per bet' }}">
-          {% for key, label in [('low', 'Low (prices swing fast)'), ('medium', 'Medium'), ('high', 'High (prices steady)')] %}
-            <option value="{{ key }}" {{ 'selected' if key == liquidity }}>{{ label }}</option>
-          {% endfor %}
-        </select>
-      </label>
     </div>
     {% if m.status == 'open' %}
       <p class="muted small">Moving the closing time later reopens betting on a market that has already closed.</p>

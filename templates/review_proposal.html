@@ -13,7 +13,6 @@
   <form method="post" class="stack" data-market-form>
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     {% set default_close = '' %}
-    {% set show_liquidity = true %}
     {% include "_market_fields.html" %}
     <label class="field"><span>Note to {{ p.username }} <em class="muted">(optional, they'll see it)</em></span>
       <input name="review_note" maxlength="500" value="{{ form.review_note or '' }}"

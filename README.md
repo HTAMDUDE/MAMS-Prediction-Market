@@ -56,8 +56,8 @@ Admins see an **Admin** link in the top bar.
 | Action | Where | What happens |
 |---|---|---|
 | **Review proposals** | Admin page → "Proposals waiting for approval" (the Admin link shows a count) | Open a proposal, fix anything you want, then **Approve & publish** (it goes live immediately, credited to the proposer) or **Reject**. You can leave a note the proposer will see. One admin's decision is final. |
-| **Create** | Admin page | Choose Yes/No (the default) or multiple choice, then write the rules (“Resolves YES if…”, source, edge cases), category, closing time and liquidity. |
-| **Edit** | Admin page or the market's page | Question, category and closing time can always change. Before anyone bets, the written rules, outcomes and liquidity can change too. After the first bet the rules are **locked**; use **Clarify the rules** on the market's page to add a dated note instead. After the first bet, outcomes can only be renamed, so earlier bets stay fair. Moving the closing time later reopens a closed market. |
+| **Create** | Admin page | Choose Yes/No (the default) or multiple choice, then write the rules (“Resolves YES if…”, source, edge cases), category and closing time. |
+| **Edit** | Admin page or the market's page | Question, category and closing time can always change. Before anyone bets, the written rules and outcomes can change too. After the first bet the rules are **locked**; use **Clarify the rules** on the market's page to add a dated note instead. After the first bet, outcomes can only be renamed, so earlier bets stay fair. Moving the closing time later reopens a closed market. |
 | **Propose result** | Admin page or the market's page, after betting closes | Pick the winning outcome. Nobody is paid yet: traders get 24 hours to dispute it. With no dispute, the result finalizes by itself and each winning share pays Ⓜ1. Until then you can **withdraw** it or **propose a different outcome** (which restarts the 24 hours). |
 | **Review a dispute** | The market's page (a “Disputed” badge appears on the Admin page) | A dispute pauses finalizing. **Confirm result & pay out** settles it immediately, or propose a different outcome. Once a market is finalized it can't be undone. |
 | **Cancel & refund** | The market's page | Stops the market and refunds everyone's net spend. The market stays visible under "All". |
@@ -174,9 +174,10 @@ cost(q)  = b · ln Σ exp(q_i / b)
 price_i  = exp(q_i / b) / Σ exp(q_j / b)
 ```
 
-Buying Δ shares costs `cost(q + Δ) − cost(q)`. Larger `b` (the "Liquidity" setting when creating a market) means
-prices move less per bet. The presets are Low/Medium/High = 150/300/600 for a yes/no market and scale with
-`log2(number of outcomes)`, so a bet moves an 8-way market about as much as a 2-way one (a Ⓜ100 bet moves a fresh
-Medium yes/no market from 50% to about 64%). Open bets are valued at what they would *sell* for right now (not
-shares × price, which a trader's own buy would inflate), so net worth can't be gamed by buying. The house can lose at most `b · ln(number of outcomes)` per market, which is fine
-because the money isn't real.
+Buying Δ shares costs `cost(q + Δ) − cost(q)`. Larger `b` means prices move less per bet. Every market uses
+`b = 1000 × log₂(number of outcomes)` (set by `BASE_LIQUIDITY` in `app.py`), so on a 50/50 yes/no market a Ⓜ100 bet
+moves the price to about 55% and an all-in Ⓜ1,000 bet to about 82%. The house can lose at most `b · ln(outcomes)` per
+market, which is fine because the money isn't real.
+
+When the app starts, any unsettled market created with a lower `b` is upgraded: the market maker's share counts are
+scaled up by the same factor, so current prices don't change, but future bets move them less.
