@@ -5,10 +5,10 @@ import { nextCookies } from "better-auth/next-js";
 import { username } from "better-auth/plugins";
 import { STARTING_BALANCE, USERNAME_RE } from "./constants";
 import { prisma } from "./db";
+import { syntheticEmail } from "./username";
 import { startsAsAdmin } from "@/server/services/permissions";
 
-/** The app has no emails: every account gets this placeholder address (usernames are the real identity). */
-export const syntheticEmail = (name: string) => `${name.trim().toLowerCase()}@users.mams.invalid`;
+export { syntheticEmail };
 
 export const LOGIN_FAIL_LIMIT = 10;
 export const LOGIN_FAIL_WINDOW_MS = 5 * 60 * 1000;

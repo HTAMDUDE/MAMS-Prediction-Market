@@ -23,3 +23,8 @@ export function parseSchoolLocal(value: string): Date | null {
 export function toSchoolLocal(d: Date): string {
   return format(inSchool(d), "yyyy-MM-dd'T'HH:mm");
 }
+
+/** A `datetime-local` value this many days from now, in school time (for form defaults). */
+export function schoolLocalInDays(days: number): string {
+  return toSchoolLocal(new Date(Date.now() + days * 86400000));
+}
