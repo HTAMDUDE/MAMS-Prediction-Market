@@ -1,0 +1,277 @@
+// MAMS Prediction Market database schema (PostgreSQL).
+// The auth tables (User, Session, Account, Verification, RateLimit) follow better-auth's schema; User is extended
+// with the app's own fields. Everything below "Domain" mirrors the old SQLite schema.sql.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ------------------------------------------------------------------ auth
+
+model User {
+  id            String    @id
+  name          String
+  email         String    @unique
+  emailVerified Boolean   @default(false)
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  // username plugin: `username` is lowercased, `displayUsername` keeps the original casing
+  username        String?  @unique
+  displayUsername String?
+  // app fields
+  balance   Float   @default(1000)
+  isAdmin   Boolean @default(false)
+  lastBonus String? // school-time date (YYYY-MM-DD) of the last daily bonus claim
+
+  sessions     Session[]
+  accounts     Account[]
+  positions    Position[]
+  trades       Trade[]
+  comments     Comment[]
+  proposals    Proposal[]
+  disputes     Dispute[]
+  clarifications Clarification[]
+  blocks       MarketBlock[]
+  tradeBan     TradeBan?
+
+  @@map("user")
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+  @@map("verification")
+}
+
+// better-auth's database-backed rate limiter (serverless functions don't share memory).
+model RateLimit {
+  id          String @id
+  key         String @unique
+  count       Int
+  lastRequest BigInt
+
+  @@map("rateLimit")
+}
+
+// Wrong-password attempts per username, for the "10 failures in 5 minutes" lockout.
+model LoginFailure {
+  id        Int      @id @default(autoincrement())
+  username  String
+  createdAt DateTime @default(now())
+
+  @@index([username, createdAt])
+}
+
+// ------------------------------------------------------------------ Domain
+
+model Market {
+  id          Int      @id @default(autoincrement())
+  question    String
+  description String   @default("") // "Resolves YES if..." / how the winner is decided
+  category    String   @default("Other")
+  b           Float // LMSR liquidity
+  status      String   @default("open") // open | resolved | cancelled
+  closesAt    DateTime
+  resolvedOutcomeId Int?
+  resolvedAt  DateTime?
+  createdById String?
+  createdAt   DateTime @default(now())
+  rulesSource    String @default("")
+  rulesOtherwise String @default("")
+  // Optimistic resolution: an admin proposes a result, then it finalizes after a challenge window.
+  proposedOutcomeId Int?
+  proposedById      String?
+  proposedAt        DateTime?
+  finalizesAt       DateTime?
+  resolvedById      String?
+
+  outcomes       Outcome[]
+  trades         Trade[]
+  priceHistory   PriceHistory[]
+  comments       Comment[]
+  disputes       Dispute[]
+  clarifications Clarification[]
+  blocks         MarketBlock[]
+  proposals      Proposal[]
+
+  @@index([status])
+}
+
+model Outcome {
+  id       Int    @id @default(autoincrement())
+  marketId Int
+  market   Market @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  label    String
+  shares   Float  @default(0)
+  position Int
+
+  positions Position[]
+  trades    Trade[]
+
+  @@index([marketId])
+}
+
+model Position {
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  outcomeId Int
+  outcome   Outcome @relation(fields: [outcomeId], references: [id], onDelete: Cascade)
+  shares    Float   @default(0)
+  cost      Float   @default(0)
+
+  @@id([userId, outcomeId])
+}
+
+// shares > 0 for a buy, < 0 for a sell. amount = coins spent (negative when received).
+model Trade {
+  id        Int      @id @default(autoincrement())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  marketId  Int
+  market    Market   @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  outcomeId Int
+  outcome   Outcome  @relation(fields: [outcomeId], references: [id], onDelete: Cascade)
+  shares    Float
+  amount    Float
+  createdAt DateTime @default(now())
+
+  @@index([marketId])
+  @@index([userId])
+}
+
+model PriceHistory {
+  id        Int      @id @default(autoincrement())
+  marketId  Int
+  market    Market   @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  prices    Float[] // same order as Outcome.position
+  createdAt DateTime @default(now())
+
+  @@index([marketId])
+}
+
+model Comment {
+  id        Int      @id @default(autoincrement())
+  marketId  Int
+  market    Market   @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  body      String
+  createdAt DateTime @default(now())
+
+  @@index([marketId])
+}
+
+// Markets suggested by users, waiting for an admin to approve or reject.
+model Proposal {
+  id          Int      @id @default(autoincrement())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  question    String
+  description String   @default("")
+  category    String   @default("Other")
+  outcomes    String[]
+  closesAt    DateTime
+  status      String   @default("pending") // pending | approved | rejected
+  reviewNote  String   @default("")
+  reviewedById String?
+  reviewedAt  DateTime?
+  marketId    Int?
+  market      Market?  @relation(fields: [marketId], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+  rulesSource    String @default("")
+  rulesOtherwise String @default("")
+
+  @@index([status])
+}
+
+// Traders challenging a proposed result. An unhandled dispute stops it finalizing by itself.
+model Dispute {
+  id        Int       @id @default(autoincrement())
+  marketId  Int
+  market    Market    @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  reason    String
+  createdAt DateTime  @default(now())
+  handledAt DateTime?
+
+  @@index([marketId])
+}
+
+// Admin notes added to a market's rules after betting started (the rules themselves are then locked).
+model Clarification {
+  id        Int      @id @default(autoincrement())
+  marketId  Int
+  market    Market   @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  adminId   String
+  admin     User     @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  body      String
+  createdAt DateTime @default(now())
+
+  @@index([marketId])
+}
+
+// Users an admin has barred from trading in one market (e.g. people who know the answer).
+model MarketBlock {
+  marketId  Int
+  market    Market   @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@id([marketId, userId])
+}
+
+// Users an admin has barred from trading anywhere on the site.
+model TradeBan {
+  userId    String   @id
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+}

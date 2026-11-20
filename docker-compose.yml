@@ -1,0 +1,14 @@
+# Local Postgres for development and tests only. Production uses a Railway database.
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: mams
+      POSTGRES_PASSWORD: mams
+      POSTGRES_DB: mams
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+volumes:
+  pgdata:
