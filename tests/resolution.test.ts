@@ -3,7 +3,7 @@ import { prisma } from "@/lib/db";
 import { marketState } from "@/server/services/markets";
 import { cancelMarket } from "@/server/services/markets";
 import { deleteUser } from "@/server/services/accounts";
-import { addDispute, confirmResult, finalizeDue, proposeResult, retractResult } from "@/server/services/resolution";
+import { addDispute, confirmResult, finalizeDue, finalizeDueWithNext, proposeResult, retractResult } from "@/server/services/resolution";
 import { executeTrade } from "@/server/services/trading";
 import { balanceOf, closeMarket, hours, makeActor, makeMarket, makeUser, resetDb, RULES, sharesHeld } from "./helpers";
 
@@ -45,6 +45,16 @@ describe("optimistic resolution", () => {
     expect([m.status, m.resolvedOutcomeId]).toEqual(["resolved", yes]);
     expect(m.resolvedById).toBe(admin.id);
     expect(Math.abs((await balanceOf(bob.id)) - (900 + shares))).toBeLessThan(0.01);
+  });
+
+  it("finalizeDueWithNext reports when the next window ends, so callers can skip checking until then", async () => {
+    const { admin, id, yes } = await closedMarketWithBet();
+    expect(await finalizeDueWithNext()).toEqual({ done: 0, next: null });
+    await proposeResult(admin.actor, id, yes);
+    const m = await prisma.market.findUniqueOrThrow({ where: { id } });
+    expect(await finalizeDueWithNext()).toEqual({ done: 0, next: m.finalizesAt });
+    await pastWindow(id);
+    expect(await finalizeDueWithNext()).toEqual({ done: 1, next: null });
   });
 
   it("a dispute pauses finalizing; admin can change the outcome or confirm", async () => {

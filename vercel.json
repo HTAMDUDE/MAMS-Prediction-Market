@@ -1,3 +1,4 @@
 {
+  "regions": ["iad1"],
   "crons": [{ "path": "/api/cron/finalize", "schedule": "0 9 * * *" }]
 }

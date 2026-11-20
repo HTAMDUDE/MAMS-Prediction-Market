@@ -46,7 +46,7 @@ If you find this file out of date, fix it. Don't leave it for the next agent. Ne
 | Charts | Recharts through shadcn's `chart` component |
 | Validation | zod 4 (`src/lib/validation.ts`) |
 | Tests | Vitest against a real Postgres test database |
-| Hosting | App on **Vercel**, database on **Railway** |
+| Hosting | App on **Vercel** (functions pinned to `iad1` in `vercel.json`), database on **Railway**. Keep both in the same region: every query is a network round trip. |
 
 ## Commands
 
@@ -94,7 +94,7 @@ tests/                       Vitest suites (helpers.ts has the test fixtures)
 - **Email verification is required** (`requireEmailVerification`): sign-up emails a link and goes to `/check-email` (Resend button with a 60 s cooldown); logging in before verifying re-sends a link (`sendOnSignIn`) and the form shows a notice. Every link is rewritten in `auth.ts` to land on `/?verified=1`, which shows a toast (`VerifyToast`) and signs the user in. Only wrong-password attempts count toward the login lockout (not `EMAIL_NOT_VERIFIED`). With verification on, better-auth answers a repeated email like a normal sign-up (no account enumeration) and creates nothing.
 - **Sending mail:** always go through `sendEmail()` (`src/lib/email.ts`). No `RESEND_API_KEY`: printed to the console in development, an error in production. Tests call `setEmailTransport()` to capture mail. Mail failures are logged, never thrown into sign-up/sign-in.
 - **Legacy accounts** imported from Flask have a placeholder `@users.mams.invalid` email and `emailVerified = true`; real sign-ups with that domain are rejected.
-- **Finalizing results:** `ensureFinalized()` is awaited at the top of every page, the quote route and every action (not the layout, which doesn't re-render on navigation). A daily Vercel Cron (`vercel.json`) is a backup.
+- **Finalizing results:** `ensureFinalized()` is awaited at the top of every page, the quote route and every action (not the layout, which doesn't re-render on navigation). Pages call it plainly: it skips the query while no window can have ended (next `finalizesAt` known, rechecked at least every 60 s per instance). Actions and the quote route pass `{ force: true }`, so money paths always see settled results. A daily Vercel Cron (`vercel.json`) is a backup.
 - **Pages don't prerender:** don't re-enable `cacheComponents`. Server components must not pass functions to client components (pass plain data); that includes `ActionForm` render-prop children, which are only allowed inside client components.
 - shadcn's Base UI `Button` is patched to default to `type="submit"` like a native button; pass `type="button"` for non-submit buttons.
 - Redirecting actions hand a toast to the next page through the `mams_flash` cookie (`setFlash` in `src/server/actions/util.ts`); the server layout passes the raw cookie to `<Flash/>`, so it works even when redirecting to the same URL. Actions that don't redirect return `{ok, message}` to `ActionForm`, which toasts it.
@@ -131,6 +131,11 @@ tests/                       Vitest suites (helpers.ts has the test fixtures)
 ## Change log
 
 Newest first. One entry per change; see rule 2 above.
+
+### 2026-11-20: Fewer database round trips
+
+- Slow pages (~410 ms) were mostly latency: Railway Postgres was in San Francisco, Vercel in `iad1`, and a page made 4–5 sequential queries. Moved the DB to Railway US East (dashboard step), pinned Vercel to `iad1`, and cut queries: the owner is detected from the session's username (no lookup; memoized first-account id only when `MAMS_OWNER` is empty), better-auth `advanced.database.joins` loads session+user in one query, and `ensureFinalized()` skips its query until the next window can end (`finalizeDueWithNext()` returns the next `finalizesAt`; `force: true` for actions/quote). Pool `idleTimeoutMillis` 30 s.
+- Files: `vercel.json`, `src/lib/{session,auth,db}.ts`, `src/server/finalize.ts`, `src/server/services/resolution.ts`, `src/server/actions/util.ts`, `src/app/api/quote/route.ts`, `tests/resolution.test.ts`.
 
 ### 2026-11-20: Fix Vercel install (broken pnpm 11.12.0)
 

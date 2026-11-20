@@ -82,11 +82,15 @@ export async function confirmResult(actor: Actor, marketId: number): Promise<num
 }
 
 /** Pay out every market whose challenge window ended with no unhandled dispute. Called on page loads and by cron. */
-export async function finalizeDue(): Promise<number> {
-  const due = await prisma.market.findMany({
-    where: { status: "open", proposedOutcomeId: { not: null }, finalizesAt: { lte: new Date() } },
-    select: { id: true, proposedOutcomeId: true, proposedById: true },
+/** Pay out every proposed result whose window has ended. Also reports when the next window ends (null if none). */
+export async function finalizeDueWithNext(): Promise<{ done: number; next: Date | null }> {
+  const now = new Date();
+  const proposed = await prisma.market.findMany({
+    where: { status: "open", proposedOutcomeId: { not: null }, finalizesAt: { not: null } },
+    select: { id: true, proposedOutcomeId: true, proposedById: true, finalizesAt: true },
   });
+  const due = proposed.filter((m) => m.finalizesAt! <= now);
+  const upcoming = proposed.filter((m) => m.finalizesAt! > now).map((m) => m.finalizesAt!.getTime());
   let done = 0;
   for (const m of due) {
     try {
@@ -96,7 +100,11 @@ export async function finalizeDue(): Promise<number> {
       if (!(e instanceof TradeError)) throw e; // a dispute arrived, or another request already finalized it
     }
   }
-  return done;
+  return { done, next: upcoming.length ? new Date(Math.min(...upcoming)) : null };
+}
+
+export async function finalizeDue(): Promise<number> {
+  return (await finalizeDueWithNext()).done;
 }
 
 export async function addDispute(userId: string, marketId: number, reason: string) {

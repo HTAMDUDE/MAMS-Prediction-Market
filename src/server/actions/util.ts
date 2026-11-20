@@ -22,7 +22,7 @@ export async function setFlash(type: "success" | "error", message: string) {
  */
 export async function run(body: () => Promise<string | { message: string; persist?: boolean }>): Promise<ActionState> {
   try {
-    await ensureFinalized();
+    await ensureFinalized({ force: true });
     const result = await body();
     revalidatePath("/", "layout");
     return typeof result === "string" ? { ok: true, message: result } : { ok: true, ...result };

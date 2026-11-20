@@ -36,6 +36,7 @@ export const auth = betterAuth({
     },
   },
   session: { expiresIn: 60 * 60 * 24 * 30 },
+  advanced: { database: { joins: true } }, // load session + user in one query (saves a database round trip per request)
   // BETTER_AUTH_URL is trusted automatically; also accept Vercel preview/production hostnames.
   trustedOrigins: [process.env.VERCEL_URL, process.env.VERCEL_BRANCH_URL, process.env.VERCEL_PROJECT_PRODUCTION_URL]
     .filter((h): h is string => Boolean(h))

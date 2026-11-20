@@ -10,7 +10,7 @@ export async function GET(req: NextRequest) {
   const parsed = quoteSchema.safeParse(Object.fromEntries(req.nextUrl.searchParams));
   if (!parsed.success) return NextResponse.json({ ok: false, error: "Enter a valid amount." });
   const { market, outcome, action, value } = parsed.data;
-  await ensureFinalized();
+  await ensureFinalized({ force: true });
   const user = await getCurrentUser();
   try {
     const q = await quoteTrade(user?.id ?? null, market, outcome, action, value);
