@@ -132,6 +132,11 @@ tests/                       Vitest suites (helpers.ts has the test fixtures)
 
 Newest first. One entry per change; see rule 2 above.
 
+### 2026-11-20: Home page filters on the client
+
+- The home page used to re-render on the server for every status tab or topic click (a full RSC request plus its database queries). It now loads every market once and `MarketBrowser` (`src/components/market-browser.tsx`, client) filters and sorts in memory; clicks update the URL with `history.replaceState` (still shareable/deep-linkable via `?status=&cat=`) and make no request. Cards take a slim plain-data `CardData` (`toCard()` in `market-card.tsx`), not a full `Bundle`. When the market list grows large, paginate or filter server-side again.
+- Files: `src/app/page.tsx`, `src/components/{market-browser,market-card}.tsx`.
+
 ### 2026-11-20: Fewer database round trips
 
 - Slow pages (~410 ms) were mostly latency: Railway Postgres was in San Francisco, Vercel in `iad1`, and a page made 4–5 sequential queries. Moved the DB to Railway US East (dashboard step), pinned Vercel to `iad1`, and cut queries: the owner is detected from the session's username (no lookup; memoized first-account id only when `MAMS_OWNER` is empty), better-auth `advanced.database.joins` loads session+user in one query, and `ensureFinalized()` skips its query until the next window can end (`finalizeDueWithNext()` returns the next `finalizesAt`; `force: true` for actions/quote). Pool `idleTimeoutMillis` 30 s.
