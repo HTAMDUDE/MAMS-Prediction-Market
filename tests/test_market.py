@@ -187,3 +187,25 @@ def test_admin_edit():
         assert admin.get("/admin").status_code == 200
     finally:
         appmod.DB_PATH = old
+
+
+def test_login_lockout_after_repeated_failures():
+    client = appmod.app.test_client()
+    signup(client, "lockme")
+    client = appmod.app.test_client()
+    for _ in range(10):
+        r = client.post("/login", data={"csrf_token": csrf(client.get("/login")), "username": "lockme",
+                                        "password": "wrong"})
+        assert "Wrong username or password." in r.get_data(as_text=True)
+    r = client.post("/login", data={"csrf_token": csrf(client.get("/login")), "username": "lockme",
+                                    "password": "secret1"})
+    assert "Too many wrong passwords" in r.get_data(as_text=True)
+    appmod._hits.clear()
+    r = client.post("/login", data={"csrf_token": csrf(client.get("/login")), "username": "lockme",
+                                    "password": "secret1"})
+    assert r.status_code == 302
+
+
+def test_uses_school_timezone():
+    import time as _time
+    assert _time.tzname[0] in ("EST", "EDT")

@@ -53,6 +53,65 @@ Admins see an **Admin** link in the top bar.
 
 When betting closes, a market moves to **Awaiting result** until an admin resolves it.
 
+## Deploying on PythonAnywhere (free)
+
+Replace `USERNAME` below with your PythonAnywhere username.
+
+**1. Get the code.** On pythonanywhere.com, open **Consoles → Bash** and run:
+
+```bash
+git clone https://github.com/TheSuperiorCoder/MAMS-Prediction-Market.git
+cd MAMS-Prediction-Market
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python seed.py      # optional example markets
+```
+
+The repo is private, so `git clone` asks for a username and password. Enter your GitHub username, and for the
+password paste a **personal access token** (GitHub → Settings → Developer settings → Personal access tokens →
+Fine-grained → read-only access to this repo's contents). Your normal GitHub password won't work.
+
+**2. Create the web app.** Go to the **Web** tab → **Add a new web app** → **Manual configuration** (not "Flask")
+→ **Python 3.12**.
+
+**3. Configure it** on the same Web tab:
+
+- **Virtualenv:** `/home/USERNAME/MAMS-Prediction-Market/.venv`
+- **Static files:** URL `/static/` → directory `/home/USERNAME/MAMS-Prediction-Market/static`
+- **Force HTTPS:** turn it on.
+- **WSGI configuration file:** click the link, delete everything in it, and paste:
+
+  ```python
+  import os
+  import sys
+
+  path = "/home/USERNAME/MAMS-Prediction-Market"
+  if path not in sys.path:
+      sys.path.insert(0, path)
+
+  os.environ["MAMS_PRODUCTION"] = "1"   # secure cookies + correct visitor IPs behind PythonAnywhere's proxy
+  # os.environ["MAMS_ADMINS"] = "yourname"  # optional: usernames that become admins on sign-up
+
+  from app import app as application
+  ```
+
+**4. Click the green Reload button** and open `https://USERNAME.pythonanywhere.com`. Register your account
+right away, because the first account becomes the admin.
+
+**Updating after you push changes to GitHub:**
+
+```bash
+cd ~/MAMS-Prediction-Market && git pull && .venv/bin/pip install -r requirements.txt
+```
+
+Then click **Reload** on the Web tab. The database (`instance/mams.db`) isn't in git, so pulling never touches
+accounts or bets.
+
+**Keeping it running:** free web apps switch off after 3 months unless you log in and click
+**"Run until 3 months from today"** on the Web tab. PythonAnywhere emails you a reminder before that.
+
+**Backups:** download `instance/mams.db` from the **Files** tab now and then.
+
 ## Settings (environment variables)
 
 | Variable      | Default              | Purpose                                             |
@@ -61,6 +120,8 @@ When betting closes, a market moves to **Awaiting result** until an admin resolv
 | `MAMS_DB`     | `instance/mams.db`   | SQLite database file                                |
 | `MAMS_ADMINS` | (empty)              | Comma-separated usernames that become admins        |
 | `SECRET_KEY`  | auto-generated       | Session signing key (saved to `instance/secret_key`)|
+| `MAMS_PRODUCTION` | (off)            | Set to `1` when hosted on HTTPS: secure cookies, trust proxy IPs |
+| `MAMS_TZ`     | `America/New_York`   | Time zone for closing times and the daily bonus     |
 
 Starting balance, daily bonus and the category list are constants at the top of `app.py`.
 

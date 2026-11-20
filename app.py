@@ -6,14 +6,24 @@ import os
 import re
 import secrets
 import sqlite3
+import time
 from datetime import date, datetime, timedelta
 from functools import wraps
 
 from flask import (Flask, abort, flash, g, jsonify, redirect, render_template,
                    request, session, url_for)
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
 import lmsr
+
+# All times (closing times, daily bonus reset) use school time, even on servers that run in UTC.
+os.environ["TZ"] = os.environ.get("MAMS_TZ", "America/New_York")
+if hasattr(time, "tzset"):
+    time.tzset()
+
+# Set MAMS_PRODUCTION=1 when hosted on HTTPS behind a proxy (e.g. PythonAnywhere).
+PRODUCTION = os.environ.get("MAMS_PRODUCTION") == "1"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INSTANCE_DIR = os.path.join(BASE_DIR, "instance")
@@ -43,7 +53,28 @@ def _secret_key():
 
 
 app = Flask(__name__)
-app.config.update(SECRET_KEY=_secret_key(), PERMANENT_SESSION_LIFETIME=timedelta(days=30))
+app.config.update(SECRET_KEY=_secret_key(), PERMANENT_SESSION_LIFETIME=timedelta(days=30),
+                  SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
+                  SESSION_COOKIE_SECURE=PRODUCTION)
+if PRODUCTION:
+    # Trust the hosting proxy's X-Forwarded-For / -Proto so we see real visitor IPs and HTTPS.
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
+
+# Simple in-memory rate limiting (one server process is plenty for a school site).
+# Limits are generous because a whole school can share one public IP address.
+_hits = {}
+
+
+def rate_limited(key, limit, window_seconds):
+    now = time.time()
+    recent = [t for t in _hits.get(key, []) if now - t < window_seconds]
+    limited = len(recent) >= limit
+    if not limited:
+        recent.append(now)
+    _hits[key] = recent
+    if len(_hits) > 10000:
+        _hits.clear()
+    return limited
 
 
 # ---------------------------------------------------------------- database
@@ -403,6 +434,8 @@ def register():
             flash("Password must be at least 6 characters.", "error")
         elif password != request.form.get("confirm", ""):
             flash("Passwords don't match.", "error")
+        elif rate_limited(("register", request.remote_addr), 40, 3600):
+            flash("Too many new accounts from this network. Try again in a while.", "error")
         else:
             db = get_db()
             first_user = db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
@@ -426,14 +459,21 @@ def register():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        u = get_db().execute("SELECT * FROM users WHERE username = ?",
-                             (request.form.get("username", "").strip(),)).fetchone()
+        name = request.form.get("username", "").strip()
+        fail_key = ("login-fail", name.lower())
+        recent_fails = [t for t in _hits.get(fail_key, []) if time.time() - t < 300]
+        if len(recent_fails) >= 10:
+            flash("Too many wrong passwords for this account. Wait 5 minutes and try again.", "error")
+            return render_template("login.html")
+        u = get_db().execute("SELECT * FROM users WHERE username = ?", (name,)).fetchone()
         if u and check_password_hash(u["password_hash"], request.form.get("password", "")):
+            _hits.pop(fail_key, None)
             session.clear()
             session.permanent = True
             session["uid"] = u["id"]
             nxt = request.args.get("next", "")
             return redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else url_for("index"))
+        rate_limited(fail_key, 10, 300)  # record the failure
         flash("Wrong username or password.", "error")
     return render_template("login.html")
 
