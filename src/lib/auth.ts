@@ -17,6 +17,10 @@ export const auth = betterAuth({
   database: prismaAdapter(prisma, { provider: "postgresql" }),
   emailAndPassword: { enabled: true, minPasswordLength: 6, autoSignIn: true },
   session: { expiresIn: 60 * 60 * 24 * 30 },
+  // BETTER_AUTH_URL is trusted automatically; also accept Vercel preview/production hostnames.
+  trustedOrigins: [process.env.VERCEL_URL, process.env.VERCEL_BRANCH_URL, process.env.VERCEL_PROJECT_PRODUCTION_URL]
+    .filter((h): h is string => Boolean(h))
+    .map((h) => `https://${h}`),
   user: {
     additionalFields: {
       balance: { type: "number", required: false, defaultValue: STARTING_BALANCE, input: false },

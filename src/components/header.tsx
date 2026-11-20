@@ -13,14 +13,14 @@ export async function Header() {
   const user = await getCurrentUser();
   const pending = user?.isAdmin ? await prisma.proposal.count({ where: { status: "pending" } }) : 0;
   const items: NavItem[] = [
-    { href: "/", label: "Markets", match: (p) => p === "/" || p.startsWith("/market/") },
-    { href: "/leaderboard", label: "Leaderboard", match: (p) => p === "/leaderboard" },
-    { href: "/how-it-works", label: "How it works", match: (p) => p === "/how-it-works" },
+    { href: "/", label: "Markets", prefixes: ["/market/"] },
+    { href: "/leaderboard", label: "Leaderboard" },
+    { href: "/how-it-works", label: "How it works" },
   ];
   if (user) {
-    items.push({ href: "/portfolio", label: "Portfolio", match: (p) => p === "/portfolio" });
-    items.push({ href: "/propose", label: "Propose", match: (p) => p === "/propose" });
-    if (user.isAdmin) items.push({ href: "/admin", label: "Admin", match: (p) => p.startsWith("/admin"), badge: pending });
+    items.push({ href: "/portfolio", label: "Portfolio" });
+    items.push({ href: "/propose", label: "Propose" });
+    if (user.isAdmin) items.push({ href: "/admin", label: "Admin", prefixes: ["/admin/"], badge: pending });
   }
   const canBonus = Boolean(user) && user!.lastBonus !== todayInSchoolTz();
   return (
@@ -31,7 +31,7 @@ export async function Header() {
           <span>MAMS <strong>Prediction Market</strong></span>
         </Link>
         <NavLinks items={items} />
-        <div className="flex items-center gap-2">
+        <div className="ml-auto flex items-center gap-2 sm:ml-0">
           {user ? (
             <>
               {canBonus && <BonusButton amount={DAILY_BONUS} />}

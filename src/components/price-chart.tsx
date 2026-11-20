@@ -7,6 +7,7 @@ export type HistoryPoint = { t: number; p: number[] };
 
 const DAY = 86400000;
 const fmtDay = (t: number) => new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+const fmtTime = (t: number) => new Date(t).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 const fmtFull = (t: number) => new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 
 /**
@@ -41,8 +42,8 @@ export function PriceChart({ history, labels, endTime, lines }: { history: Histo
         <CartesianGrid vertical={false} />
         <XAxis
           dataKey="t" type="number" scale="time" domain={[t0, t1]} tickLine={false} axisLine={false} tickMargin={6}
-          ticks={t1 - t0 > DAY / 2 ? [t0, t1] : undefined}
-          tickFormatter={(t: number) => (t === t1 && !endTime ? "now" : fmtDay(t))}
+          tickCount={4} minTickGap={48}
+          tickFormatter={(t: number) => (t === t1 && !endTime ? "now" : t1 - t0 < DAY ? fmtTime(t) : fmtDay(t))}
         />
         <YAxis domain={[0, 1]} ticks={[0, 0.25, 0.5, 0.75, 1]} tickFormatter={(v: number) => `${v * 100}%`} tickLine={false} axisLine={false} width={40} />
         <ChartTooltip
