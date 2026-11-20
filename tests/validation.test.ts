@@ -44,11 +44,15 @@ describe("other schemas", () => {
   });
 
   it("validates registration", () => {
-    expect(registerSchema.safeParse({ username: "ok_name", password: "secret1", confirm: "secret1" }).success).toBe(true);
-    expect(registerSchema.safeParse({ username: "no", password: "secret1", confirm: "secret1" }).success).toBe(false);
-    expect(registerSchema.safeParse({ username: "bad name", password: "secret1", confirm: "secret1" }).success).toBe(false);
-    expect(registerSchema.safeParse({ username: "okay", password: "short", confirm: "short" }).success).toBe(false);
-    expect(registerSchema.safeParse({ username: "okay", password: "secret1", confirm: "secret2" }).success).toBe(false);
+    const ok = { username: "ok_name", email: "ok@example.com", password: "secret1", confirm: "secret1" };
+    expect(registerSchema.safeParse(ok).success).toBe(true);
+    expect(registerSchema.safeParse({ ...ok, email: "  Ok@Example.COM " }).data?.email).toBe("ok@example.com"); // trimmed + lowercased
+    expect(registerSchema.safeParse({ ...ok, username: "no" }).success).toBe(false);
+    expect(registerSchema.safeParse({ ...ok, username: "bad name" }).success).toBe(false);
+    expect(registerSchema.safeParse({ ...ok, email: "not-an-email" }).success).toBe(false);
+    expect(registerSchema.safeParse({ ...ok, email: "" }).success).toBe(false);
+    expect(registerSchema.safeParse({ ...ok, password: "short", confirm: "short" }).success).toBe(false);
+    expect(registerSchema.safeParse({ ...ok, confirm: "secret2" }).success).toBe(false);
   });
 
   it("only allows same-site redirects", () => {

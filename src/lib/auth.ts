@@ -5,17 +5,36 @@ import { nextCookies } from "better-auth/next-js";
 import { username } from "better-auth/plugins";
 import { STARTING_BALANCE, USERNAME_RE } from "./constants";
 import { prisma } from "./db";
-import { syntheticEmail } from "./username";
+import { sendEmail } from "./email";
+import { verificationEmail, VERIFICATION_HOURS } from "./email-templates";
+import { LEGACY_EMAIL_DOMAIN } from "./username";
 import { startsAsAdmin } from "@/server/services/permissions";
-
-export { syntheticEmail };
 
 export const LOGIN_FAIL_LIMIT = 10;
 export const LOGIN_FAIL_WINDOW_MS = 5 * 60 * 1000;
 
 export const auth = betterAuth({
   database: prismaAdapter(prisma, { provider: "postgresql" }),
-  emailAndPassword: { enabled: true, minPasswordLength: 6, autoSignIn: true },
+  // New accounts must verify their email before they can log in.
+  emailAndPassword: { enabled: true, minPasswordLength: 6, requireEmailVerification: true },
+  emailVerification: {
+    sendOnSignUp: true,
+    sendOnSignIn: true, // someone who logs in with the right password before verifying gets a fresh link
+    autoSignInAfterVerification: true,
+    expiresIn: 60 * 60 * VERIFICATION_HOURS,
+    sendVerificationEmail: async ({ user, url }) => {
+      const username = (user as { displayUsername?: string | null }).displayUsername ?? user.name;
+      // Every link (sign-up, resend, login-triggered) lands on the home page, which shows the "verified" toast.
+      const link = new URL(url);
+      link.searchParams.set("callbackURL", "/?verified=1");
+      try {
+        await sendEmail(verificationEmail({ to: user.email, username, url: link.toString() }));
+      } catch (e) {
+        // Mail trouble must not break sign-up or sign-in; the user can ask for another link.
+        console.error("Could not send verification email", e);
+      }
+    },
+  },
   session: { expiresIn: 60 * 60 * 24 * 30 },
   // BETTER_AUTH_URL is trusted automatically; also accept Vercel preview/production hostnames.
   trustedOrigins: [process.env.VERCEL_URL, process.env.VERCEL_BRANCH_URL, process.env.VERCEL_PROJECT_PRODUCTION_URL]
@@ -37,6 +56,7 @@ export const auth = betterAuth({
       "/sign-up/email": { window: 60 * 60, max: 40 },
       "/sign-in/username": { window: 60, max: 120 },
       "/change-password": { window: 60, max: 30 },
+      "/send-verification-email": { window: 60, max: 20 }, // default is 3/min per IP
     },
   },
   databaseHooks: {
@@ -59,8 +79,8 @@ export const auth = betterAuth({
         if (!USERNAME_RE.test(name)) {
           throw new APIError("BAD_REQUEST", { message: "Username must be 3–20 characters: letters, numbers, _ . -" });
         }
-        if (body.email !== syntheticEmail(name)) {
-          throw new APIError("BAD_REQUEST", { message: "Invalid sign-up request." });
+        if (String(body.email ?? "").toLowerCase().endsWith(`@${LEGACY_EMAIL_DOMAIN}`)) {
+          throw new APIError("BAD_REQUEST", { message: "Use your real email address." });
         }
       }
       if (ctx.path === "/sign-in/username") {
@@ -80,9 +100,13 @@ export const auth = betterAuth({
       const name = String((ctx.body as { username?: string } | undefined)?.username ?? "").trim().toLowerCase();
       if (ctx.context.newSession) {
         await prisma.loginFailure.deleteMany({ where: { username: name } });
-      } else if (name) {
-        await prisma.loginFailure.create({ data: { username: name } });
+        return;
       }
+      // Only wrong credentials count toward the lockout. An unverified user with the right password is not a failure
+      // (and neither are attempts the lockout itself rejected, which never reach here).
+      const returned = ctx.context.returned;
+      const code = returned instanceof APIError ? (returned.body as { code?: string } | undefined)?.code : undefined;
+      if (name && code === "INVALID_USERNAME_OR_PASSWORD") await prisma.loginFailure.create({ data: { username: name } });
     }),
   },
   plugins: [

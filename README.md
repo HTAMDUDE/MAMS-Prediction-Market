@@ -15,24 +15,31 @@ assemblies, and anything else the admins post.
 - Admins create, edit, cancel and delete markets, and propose results (see [Admin guide](#admin-guide)).
 - The site also has a leaderboard (ranked by net worth), a portfolio page, a price-history chart and comments on
   each market.
+- Accounts use a username and password, and new accounts must **verify their email** (a link sent through
+  [Resend](https://resend.com)) before they can log in. Emails are never shown to other players.
 
 Built with **Next.js** (TypeScript, Tailwind, App Router), **better-auth**, **Prisma + PostgreSQL**, **shadcn/ui**,
-**Recharts** and **zod**. The original Flask + SQLite version is on the `main` branch. AI agents working on this repo
+**Recharts**, **zod** and **Resend**. The original Flask + SQLite version is on the `main` branch. AI agents working on this repo
 should read [`AGENTS.md`](AGENTS.md) first.
 
-## Running it locally
+## Setup
 
-Requires Node 22.13+, pnpm and Docker.
+**→ [SETUP.md](SETUP.md) is the full step-by-step guide** for running it locally and for deploying it (Vercel +
+Railway + Resend), with a troubleshooting table.
+
+Local quick start (Node 22.13+, pnpm, Docker):
 
 ```bash
 pnpm install
-cp .env.example .env                     # then set BETTER_AUTH_SECRET to a long random string
+cp .env.example .env                     # then set BETTER_AUTH_SECRET and MAMS_OWNER
 docker compose up -d db                  # Postgres on localhost:5433
 docker compose exec db createdb -U mams mams_test   # once, for the test suite
 pnpm db:migrate                          # create the tables
 pnpm db:seed                             # optional: adds 5 example markets
 pnpm dev                                 # http://localhost:3000
 ```
+
+Locally, verification emails are **printed in the terminal** running `pnpm dev` (no Resend account needed).
 
 **The owner is the account whose username matches `MAMS_OWNER`** (default `Kaushik`; set it to your username, or leave it
 empty to make the first account the owner). To make more usernames admins when they sign up, set
@@ -73,39 +80,20 @@ from a market if they know the answer ahead of time. The site also has a **How i
 
 Users can have up to 5 proposals waiting at once, and can withdraw a proposal until it's reviewed.
 
-## Deploying: Vercel (app) + Railway (database)
+## Deploying: Vercel (app) + Railway (database) + Resend (email)
 
-**1. Database (Railway).** Create a project → **New → Database → PostgreSQL**. From the database's **Connect** tab copy
-the **public** connection URL (`postgresql://…`). You'll paste it into Vercel as `DATABASE_URL`.
+The short version (details, DNS records for the email domain, the first-run checklist and troubleshooting are in
+**[SETUP.md → Part 2](SETUP.md#part-2-production-vercel--railway--resend)**):
 
-**2. App (Vercel).** Import the repo (branch `port`, or merge it into `main` first) as a Next.js project. The build
-command is already `pnpm build`, which runs `prisma generate`, `prisma migrate deploy` (creates/updates the tables) and
-`next build`. Add these environment variables (Project → Settings → Environment Variables):
+1. **Railway:** provision PostgreSQL and copy its **public** connection URL.
+2. **Resend:** create an API key and verify a sending domain (so you can email anyone, not just yourself).
+3. **Vercel:** import the repo and set the environment variables below. The build command (`pnpm build`) creates the
+   tables with `prisma migrate deploy`.
+4. Sign up with the `MAMS_OWNER` username using a real email, click the link in the email, and you're the owner.
 
-| Variable | Value |
-|---|---|
-| `DATABASE_URL` | Railway's public connection URL |
-| `BETTER_AUTH_SECRET` | a long random string (`openssl rand -base64 32`) |
-| `BETTER_AUTH_URL` | your production URL, e.g. `https://mams-market.vercel.app` (or your custom domain) |
-| `MAMS_OWNER` | the owner's username |
-| `MAMS_ADMINS` | optional, comma-separated usernames |
-| `CRON_SECRET` | a long random string (Vercel then authenticates the daily cron call with it) |
-| `MAMS_TZ` | optional, defaults to `America/New_York` |
-
-Preview deployments on `*.vercel.app` are accepted automatically (via Vercel's `VERCEL_URL` variables). If you use a
-custom domain, set `BETTER_AUTH_URL` to it. Register the owner's account right away.
-
-**3. Moving data from the old Flask site (optional).** Copy `instance/mams.db` from the old server, then, with
-`DATABASE_URL` pointing at the new (empty) database:
-
-```bash
-pnpm import:sqlite path/to/mams.db       # markets, bets, history, comments, proposals, disputes, blocks, bans
-pnpm reset-password <owner username>     # prints a temporary password; sign in and change it
-```
-
-Old password hashes can't be reused, so after importing every user needs a new password: reset them from
-Admin → Users → Reset (or `pnpm reset-password <username>`), then send them the temporary password. Imported markets keep
-their ids and prices, and users keep their balances, positions and history.
+Moving data from the old Flask site is covered in [SETUP.md](SETUP.md#5-optional-move-your-old-flask-data): imported
+users keep balances and history, but need a password reset (`pnpm reset-password <username>` or Admin → Users → Reset).
+They have no real email, so they're marked verified and can log in without verifying.
 
 **Backups:** use Railway's database backups, or `pg_dump "$DATABASE_URL" > backup.sql`.
 
@@ -115,8 +103,10 @@ their ids and prices, and users keep their balances, positions and history.
 |---|---|---|
 | `DATABASE_URL` | (required) | Postgres connection string |
 | `TEST_DATABASE_URL` | local `mams_test` | Database the Vitest suite uses (applies migrations, truncates tables per test; never use real data) |
-| `BETTER_AUTH_SECRET` | (required) | Signs sessions |
-| `BETTER_AUTH_URL` | `http://localhost:3000` | The site's public URL (also the trusted origin for sign-in) |
+| `BETTER_AUTH_SECRET` | (required) | Signs sessions and verification links |
+| `BETTER_AUTH_URL` | `http://localhost:3000` | The site's public URL (https in production; also the trusted origin for sign-in, and the base of verification links) |
+| `RESEND_API_KEY` | (empty) | Resend API key. Empty in development prints emails to the console; in production it's an error |
+| `EMAIL_FROM` | `onboarding@resend.dev` in dev | Sender, on a domain verified in Resend, e.g. `MAMS Prediction Market <noreply@mail.example.com>`. Required in production |
 | `MAMS_OWNER` | `Kaushik` | Username of the site owner; empty = first account |
 | `MAMS_ADMINS` | (empty) | Comma-separated usernames that become admins when they sign up |
 | `MAMS_TZ` | `America/New_York` | Time zone for closing times and the daily bonus |

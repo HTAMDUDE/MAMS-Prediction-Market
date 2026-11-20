@@ -1,11 +1,13 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import { cookies } from "next/headers";
+import { Suspense } from "react";
 import { CURRENCY } from "@/lib/constants";
 import { FLASH_COOKIE } from "@/lib/flash";
 import { Flash } from "@/components/flash";
 import { Header } from "@/components/header";
 import { ThemeProvider } from "@/components/theme-provider";
+import { VerifyToast } from "@/components/verify-toast";
 import { Toaster } from "@/components/ui/sonner";
 import "./globals.css";
 
@@ -32,6 +34,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           </footer>
           <Toaster richColors closeButton />
           <Flash raw={flash} />
+          <Suspense fallback={null}><VerifyToast /></Suspense>
         </ThemeProvider>
       </body>
     </html>

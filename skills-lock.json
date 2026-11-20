@@ -22,6 +22,13 @@
       "skillPath": "better-auth/emailAndPassword/SKILL.md",
       "computedHash": "407c1244202876daa748818ed41dc55afde1b3f7aec48ae3a1f1c8a7ee40465e"
     },
+    "email-best-practices": {
+      "source": "resend/email-best-practices",
+      "commit": "cf5438cf10970d715dd204de721ffc89869d8f6d",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "865ee2b31418846f0076244970d8517c87a605e3b8affa5fd1894a8a7975237c"
+    },
     "find-skills": {
       "source": "vercel-labs/skills",
       "commit": "57217cf86ba38148a57af9e90d14a4c049558330",
@@ -56,6 +63,13 @@
       "sourceType": "github",
       "skillPath": "prisma-postgres/SKILL.md",
       "computedHash": "bc15ea262db09a5372b2308d08d553d1437398b8eaf282d6c811db9b22524d85"
+    },
+    "resend": {
+      "source": "resend/resend-skills",
+      "commit": "063246e39987faebc2608f968ca13a02d994a0d4",
+      "sourceType": "github",
+      "skillPath": "skills/resend/SKILL.md",
+      "computedHash": "5d09dbdf01bc6d640f2340f24069307c53a7b58c6c94c1276932c22c3abc8cb1"
     },
     "shadcn": {
       "source": "shadcn-ui/ui",

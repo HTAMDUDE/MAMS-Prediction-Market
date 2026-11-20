@@ -13,7 +13,7 @@ import type { Prisma } from "../src/generated/prisma/client";
 import { auth } from "../src/lib/auth";
 import { prisma } from "../src/lib/db";
 import { SCHOOL_TZ } from "../src/lib/time";
-import { syntheticEmail } from "../src/lib/username";
+import { legacyEmail } from "../src/lib/username";
 
 type Row = Record<string, string | number | null>;
 
@@ -48,7 +48,8 @@ async function main() {
     userIds.set(u.id as number, id);
     const name = String(u.username);
     newUsers.push({
-      id, name, email: syntheticEmail(name), username: name.toLowerCase(), displayUsername: name,
+      // Old accounts have no email, so they get a placeholder and count as verified (otherwise they could never log in).
+      id, name, email: legacyEmail(name), emailVerified: true, username: name.toLowerCase(), displayUsername: name,
       balance: u.balance as number, isAdmin: u.is_admin === 1, lastBonus: (u.last_bonus as string | null) ?? null, createdAt: need(u.created_at),
     });
     // A hash of a random string nobody knows: the account can't be logged into until a password is reset.

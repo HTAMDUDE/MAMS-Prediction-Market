@@ -152,9 +152,12 @@ export const usernameSchema = z
   .trim()
   .regex(USERNAME_RE, "Username must be 3–20 characters: letters, numbers, _ . -");
 
+export const emailSchema = z.string().trim().toLowerCase().pipe(z.email("Enter a valid email address."));
+
 export const registerSchema = z
   .object({
     username: usernameSchema,
+    email: emailSchema,
     password: z.string().min(6, "Password must be at least 6 characters."),
     confirm: z.string(),
   })

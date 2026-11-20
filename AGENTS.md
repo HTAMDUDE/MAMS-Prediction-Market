@@ -40,7 +40,8 @@ If you find this file out of date, fix it. Don't leave it for the next agent. Ne
 |---|---|
 | Framework | Next.js 16 (App Router, TypeScript, React 19), `cacheComponents` **off** (everything is per-user and live) |
 | Styling / UI | Tailwind CSS v4, shadcn/ui (Base UI flavour, `src/components/ui`), `next-themes` (system light/dark), maroon brand `#7a1f2b` |
-| Auth | better-auth: email+password with the `username` plugin; usernames only, no real emails |
+| Auth | better-auth: username + password (`username` plugin), with a real email that must be **verified** before login |
+| Email | Resend (`src/lib/email.ts`); emails are printed to the console in development when no API key is set |
 | Database | PostgreSQL via Prisma 7 (`prisma-client` generator → `src/generated/prisma`, `@prisma/adapter-pg`) |
 | Charts | Recharts through shadcn's `chart` component |
 | Validation | zod 4 (`src/lib/validation.ts`) |
@@ -69,7 +70,8 @@ pnpm reset-password <username>   # print a temporary password for a user
 prisma/schema.prisma         auth tables (better-auth) + domain tables; migrations in prisma/migrations; seed.ts
 scripts/                     import-sqlite.ts, reset-password.ts (run with tsx)
 src/lib/                     lmsr.ts (market-maker math), constants.ts, time.ts (school timezone), format.ts, validation.ts (zod),
-                             auth.ts / auth-client.ts (better-auth), session.ts (current user, server-only), db.ts (Prisma), username.ts
+                             auth.ts / auth-client.ts (better-auth), session.ts (current user, server-only), db.ts (Prisma), username.ts,
+                             email.ts (Resend sender, swappable transport for tests), email-templates.ts, verify.ts (resend cooldown)
 src/server/services/         ALL business logic: markets, trading, resolution, moderation, proposals, portfolio, permissions
 src/server/actions/          thin "use server" actions: zod-parse → auth → service → toast/redirect
 src/server/finalize.ts       ensureFinalized(): pays out markets whose dispute window ended (cached per request)
@@ -85,7 +87,10 @@ tests/                       Vitest suites (helpers.ts has the test fixtures)
 - **Money:** stored as `Float`, always rounded to cents with `cents()` / `adjustBalance()` (atomic SQL `ROUND(...::numeric, 2)`). Never read-modify-write a balance. Lock the market row first (`lockMarket`) in any transaction that changes outcomes, trades or balances; lock markets in ascending id order.
 - **Time:** timestamps are `timestamptz`. School time (`MAMS_TZ`, default America/New_York) is used for form inputs, the daily bonus and display (`src/lib/time.ts`, `src/lib/format.ts`). Never use the server's local time.
 - **Usernames:** stored lowercase in `user.username`, original casing in `displayUsername` (better-auth username plugin). Show `displayUsername`; compare lowercase.
-- **Sign-up/sign-in run from the browser** (`authClient`), because better-auth does not rate-limit server-side `auth.api` calls. Sign-up sends a synthetic `<username>@users.mams.invalid` email, enforced by a hook in `auth.ts`.
+- **Sign-up/sign-in run from the browser** (`authClient`), because better-auth does not rate-limit server-side `auth.api` calls. 
+- **Email verification is required** (`requireEmailVerification`): sign-up emails a link and goes to `/check-email` (Resend button with a 60 s cooldown); logging in before verifying re-sends a link (`sendOnSignIn`) and the form shows a notice. Every link is rewritten in `auth.ts` to land on `/?verified=1`, which shows a toast (`VerifyToast`) and signs the user in. Only wrong-password attempts count toward the login lockout (not `EMAIL_NOT_VERIFIED`). With verification on, better-auth answers a repeated email like a normal sign-up (no account enumeration) and creates nothing.
+- **Sending mail:** always go through `sendEmail()` (`src/lib/email.ts`). No `RESEND_API_KEY`: printed to the console in development, an error in production. Tests call `setEmailTransport()` to capture mail. Mail failures are logged, never thrown into sign-up/sign-in.
+- **Legacy accounts** imported from Flask have a placeholder `@users.mams.invalid` email and `emailVerified = true`; real sign-ups with that domain are rejected.
 - **Finalizing results:** `ensureFinalized()` is awaited at the top of every page, the quote route and every action (not the layout, which doesn't re-render on navigation). A daily Vercel Cron (`vercel.json`) is a backup.
 - **Pages don't prerender:** don't re-enable `cacheComponents`. Server components must not pass functions to client components (pass plain data); that includes `ActionForm` render-prop children, which are only allowed inside client components.
 - shadcn's Base UI `Button` is patched to default to `type="submit"` like a native button; pass `type="button"` for non-submit buttons.
@@ -103,7 +108,7 @@ tests/                       Vitest suites (helpers.ts has the test fixtures)
 
 ## Environment variables
 
-`DATABASE_URL`, `TEST_DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `MAMS_OWNER` (default `Kaushik`; empty = first account), `MAMS_ADMINS` (comma list), `MAMS_TZ`, `CRON_SECRET`. See `.env.example`.
+`DATABASE_URL`, `TEST_DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL` (must be the https site address in production: verification links use it), `RESEND_API_KEY`, `EMAIL_FROM` (on a Resend-verified domain; both required in production), `MAMS_OWNER` (default `Kaushik`; empty = first account), `MAMS_ADMINS` (comma list), `MAMS_TZ`, `CRON_SECRET`. See `.env.example`.
 
 ## Differences from the Flask app (`main`)
 
@@ -115,11 +120,22 @@ tests/                       Vitest suites (helpers.ts has the test fixtures)
 
 ## Installed skills (`.agents/skills`, tracked in `skills-lock.json`)
 
-`find-skills`, `better-auth-best-practices`, `better-auth-security-best-practices`, `email-and-password-best-practices`, `prisma-cli`, `prisma-client-api`, `prisma-database-setup`, `prisma-postgres`, `shadcn`, `vitest`.
+`find-skills`, `better-auth-best-practices`, `better-auth-security-best-practices`, `email-and-password-best-practices`, `email-best-practices` (Resend), `resend` (Resend), `prisma-cli`, `prisma-client-api`, `prisma-database-setup`, `prisma-postgres`, `shadcn`, `vitest`.
 
 ## Change log
 
 Newest first. One entry per change; see rule 2 above.
+
+### 2026-11-20: Email verification with Resend, and a setup guide
+
+- New accounts now sign up with a real email and must verify it before logging in (better-auth `requireEmailVerification`, `sendOnSignUp`, `sendOnSignIn`, auto sign-in after verifying, 24 h links). Emails are sent with Resend (`src/lib/email.ts`; console fallback in development, hard error in production without `RESEND_API_KEY`/`EMAIL_FROM`).
+- UI: email field on sign-up, `/check-email` page with a 60 s resend cooldown, an "unverified" notice on login, and a toast on the landing page after clicking the link (`VerifyToast`). Verification links always land on `/?verified=1`.
+- Imported Flask accounts now get a placeholder email (`legacyEmail`) and `emailVerified = true`; the old synthetic-email requirement at sign-up is replaced by a rejection of that placeholder domain.
+- Login lockout now counts only wrong-password attempts; rate-limit override added for `/send-verification-email`.
+- Added `SETUP.md` (local + production guide with troubleshooting), updated `README.md` and `.env.example`; installed the Resend skills `email-best-practices` and `resend` via skills.sh.
+- Tests: `tests/auth.test.ts` rewritten around the verification flow with a captured outbox (65 tests total now); the `registerSchema` test covers email.
+- Files: `src/lib/{auth,email,email-templates,verify,username,validation}.ts`, `src/components/{auth-forms,check-email,verify-toast}.tsx`, `src/app/{check-email/page,layout}.tsx`, `scripts/import-sqlite.ts`, `tests/{auth,validation}.test.ts`, `SETUP.md`, `README.md`, `.env.example`.
+- Known gap: a user who mistypes their email at sign-up can't verify and keeps the username; admins can't edit emails or delete users yet. Possible follow-ups: forgot-password by email, change-email, letting a new sign-up replace a stale unverified account.
 
 ### 2026-11-20: Review fixes after browser testing
 
