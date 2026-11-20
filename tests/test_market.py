@@ -1319,3 +1319,41 @@ def test_entry_fees_refunded_on_cancel_and_block_and_shown_in_quote():
         assert "Entry fee refunded: market cancelled" in trader.get("/activity/mine").get_data(as_text=True)
     finally:
         appmod.DB_PATH = old
+
+
+def test_pending_results_moved_onto_shorter_dispute_window():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        aid = db.execute("INSERT INTO users (username, password_hash, balance, is_admin, created_at) VALUES ('sw', 'x', 0, 1, ?)",
+                         (appmod.now_str(),)).lastrowid
+        past = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+        fmt = lambda d: d.strftime("%Y-%m-%d %H:%M:%S")
+        now = datetime.now()
+
+        def market(q, proposed_ago, deadline_in):
+            mid = appmod.create_market(db, q, RULES, "Other", past, ["Yes", "No"], 1000)
+            db.execute("UPDATE markets SET proposed_outcome_id = ?, proposed_by = ?, proposed_at = ?, finalizes_at = ? "
+                       "WHERE id = ?", (appmod.get_outcomes(db, mid)[0]["id"], aid, fmt(now - proposed_ago),
+                                        fmt(now + deadline_in), mid))
+            return mid
+
+        recent = market("Proposed 30 min ago?", timedelta(minutes=30), timedelta(hours=23, minutes=30))
+        stale = market("Proposed 5 hours ago?", timedelta(hours=5), timedelta(hours=19))
+        already = market("Already short?", timedelta(minutes=10), timedelta(minutes=50))  # earlier than 2h: untouched
+        before_already = db.execute("SELECT finalizes_at FROM markets WHERE id=?", (already,)).fetchone()[0]
+
+        appmod.shorten_dispute_windows(db)
+        appmod.shorten_dispute_windows(db)  # running again changes nothing
+
+        fin = lambda mid: appmod.parse_dt(db.execute("SELECT finalizes_at FROM markets WHERE id=?", (mid,)).fetchone()[0])
+        assert abs((fin(recent) - (now + timedelta(minutes=90))).total_seconds()) < 2
+        assert fin(stale) < datetime.now()
+        assert db.execute("SELECT finalizes_at FROM markets WHERE id=?", (already,)).fetchone()[0] == before_already
+
+        # the overdue one finalizes on the next page load; the others keep waiting
+        appmod.app.test_client().get("/")
+        status = lambda mid: db.execute("SELECT status FROM markets WHERE id=?", (mid,)).fetchone()[0]
+        assert (status(stale), status(recent), status(already)) == ("resolved", "open", "open")
+    finally:
+        appmod.DB_PATH = old

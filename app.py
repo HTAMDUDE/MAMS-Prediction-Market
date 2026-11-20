@@ -171,6 +171,24 @@ def backfill_activity(db):
         "FROM trades t JOIN markets m ON m.id = t.market_id JOIN outcomes o ON o.id = t.outcome_id ORDER BY t.id")
 
 
+def shorten_dispute_windows(db):
+    """If DISPUTE_WINDOW was made shorter, bring results that are already waiting in a challenge window onto the new
+    deadline: proposed time + DISPUTE_WINDOW. Deadlines only ever move earlier, so this is safe to run repeatedly.
+    Anything now past its deadline finalizes on the next request (unless someone has disputed it)."""
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        for m in db.execute("SELECT id, proposed_at, finalizes_at FROM markets WHERE status = 'open' "
+                            "AND proposed_outcome_id IS NOT NULL AND proposed_at IS NOT NULL "
+                            "AND finalizes_at IS NOT NULL").fetchall():
+            deadline = (datetime.fromisoformat(m["proposed_at"]) + DISPUTE_WINDOW).strftime("%Y-%m-%d %H:%M:%S")
+            if deadline < m["finalizes_at"]:
+                db.execute("UPDATE markets SET finalizes_at = ? WHERE id = ?", (deadline, m["id"]))
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+
+
 def init_db():
     db = connect()
     with open(os.path.join(BASE_DIR, "schema.sql")) as f:
@@ -178,6 +196,7 @@ def init_db():
     migrate(db)
     deepen_liquidity(db)
     backfill_activity(db)
+    shorten_dispute_windows(db)
     db.close()
 
 
