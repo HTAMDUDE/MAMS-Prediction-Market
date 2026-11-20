@@ -5,7 +5,7 @@
 
 from datetime import datetime, timedelta
 
-from app import LIQUIDITY, connect, create_market
+from app import connect, create_market, market_b
 
 SAMPLES = [
     ("Will there be a snow day before winter break?", "Weather", 30,
@@ -35,6 +35,6 @@ if __name__ == "__main__":
             continue
         closes = (datetime.now() + timedelta(days=days)).replace(hour=15, minute=0, second=0, microsecond=0)
         create_market(db, question, description, category, closes.strftime("%Y-%m-%d %H:%M:%S"),
-                      outcomes, LIQUIDITY["medium"])
+                      outcomes, market_b("medium", len(outcomes)))
         added += 1
     print(f"Added {added} sample market(s).")

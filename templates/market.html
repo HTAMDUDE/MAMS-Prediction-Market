@@ -33,7 +33,7 @@
     <div class="card">
       <h2>Your position</h2>
       <table class="table">
-        <thead><tr><th>Outcome</th><th class="num">Shares</th><th class="num">Spent</th><th class="num">Value now</th><th class="num">Pays if right</th></tr></thead>
+        <thead><tr><th>Outcome</th><th class="num">Shares</th><th class="num">Spent</th><th class="num" title="What these shares would sell for right now">Sell value</th><th class="num">Pays if right</th></tr></thead>
         <tbody>
         {% for p in my_positions %}
           <tr>
@@ -105,7 +105,7 @@
             {% set held = (my_positions|selectattr('outcome.id', 'equalto', o.id)|map(attribute='shares')|first) or 0 %}
             <label>
               <input type="radio" name="outcome_id" value="{{ o.id }}" data-held="{{ held }}" data-label="{{ o.label }}" {{ 'checked' if loop.first }}>
-              <span><i style="background: var(--c{{ loop.index0 }})"></i>{{ o.label }}<b>{{ (o.price * 100)|round(1) }}¢</b></span>
+              <span><i style="background: var(--c{{ loop.index0 }})"></i>{{ o.label }}<b>Ⓜ{{ '%.2f'|format(o.price) }}</b></span>
             </label>
           {% endfor %}
         </div>

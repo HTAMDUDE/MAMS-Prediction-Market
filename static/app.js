@@ -43,6 +43,34 @@ function drawChart(el, history, labels, endTime) {
     svg('circle', { cx: x(last.t), cy: y(last.p[i]), r: 3.5, style: `fill: var(--c${i})` }, root);
   });
   el.appendChild(root);
+
+  // Hover/touch readout: a guide line plus each outcome's price at that moment.
+  const guide = svg('line', { y1: T, y2: H - B, class: 'guide', visibility: 'hidden' }, root);
+  const tip = document.createElement('div');
+  tip.className = 'chart-tip';
+  tip.hidden = true;
+  el.style.position = 'relative';
+  el.appendChild(tip);
+  const priceAt = t => {
+    let cur = pts[0];
+    for (const pt of pts) { if (pt.t <= t) cur = pt; else break; }
+    return cur.p;
+  };
+  const hide = () => { guide.setAttribute('visibility', 'hidden'); tip.hidden = true; };
+  root.addEventListener('pointermove', e => {
+    const box = root.getBoundingClientRect();
+    const vx = (e.clientX - box.left) / box.width * W;
+    if (vx < L || vx > W - R) return hide();
+    const t = t0 + (vx - L) / (W - L - R) * (t1 - t0);
+    const p = priceAt(t);
+    guide.setAttribute('x1', vx); guide.setAttribute('x2', vx); guide.setAttribute('visibility', 'visible');
+    tip.hidden = false;
+    tip.innerHTML = `<div class="muted small">${new Date(t).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</div>` +
+      labels.map((name, i) => `<div><i style="background: var(--c${i})"></i>${name.replace(/</g, '&lt;')} <b>${(p[i] * 100).toFixed(1)}%</b></div>`).join('');
+    const left = vx / W * box.width;
+    tip.style.left = `${Math.min(Math.max(left + 12, 0), box.width - tip.offsetWidth)}px`;
+  });
+  root.addEventListener('pointerleave', hide);
 }
 
 // Buy/sell panel with a live quote from /api/quote.
@@ -67,41 +95,49 @@ function setupTradeForm(form) {
     valueLabel.textContent = isBuy() ? 'Amount (Ⓜ)' : `Shares to sell (you own ${fmt(held())})`;
     quick.hidden = !isBuy();
     submit.textContent = `${isBuy() ? 'Buy' : 'Sell'} “${outcomeName()}”`;
-    submit.disabled = !isBuy() && held() <= 0;
     requestQuote();
+  }
+
+  function setPreview(html, canSubmit) {
+    preview.innerHTML = html;
+    submit.disabled = !canSubmit;
   }
 
   function requestQuote() {
     clearTimeout(timer);
+    seq++;  // drop any quote still in flight
     const v = parseFloat(valueInput.value);
-    if (!(v > 0)) {
-      preview.innerHTML = `<span class="muted">${isBuy() ? 'Enter an amount to see your payout.' : 'Enter shares to see what you get back.'}</span>`;
+    if (!isBuy() && held() <= 0) {
+      setPreview(`<span class="muted">You don't own any “${outcomeName()}” shares to sell.</span>`, false);
       return;
     }
+    if (!(v > 0)) {
+      setPreview(`<span class="muted">${isBuy() ? 'Enter an amount to see your payout.' : 'Enter shares to see what you get back.'}</span>`, false);
+      return;
+    }
+    submit.disabled = true;
     timer = setTimeout(async () => {
       const my = ++seq;
       const params = new URLSearchParams({ market: form.dataset.market, outcome: selected().value, action: actionInput.value, value: v });
       try {
         const res = await (await fetch(`${form.dataset.quote}?${params}`)).json();
         if (my !== seq) return;
-        if (!res.ok) { preview.innerHTML = '<span class="muted">Can\'t quote that trade.</span>'; return; }
+        if (!res.ok) { setPreview(`<span class="down">${res.error || 'Can\'t quote that trade.'}</span>`, false); return; }
         const newPct = (res.new_price * 100).toFixed(1);
+        const avg = `Ⓜ${res.avg_price.toFixed(2)}`;
         if (isBuy()) {
-          const profit = res.shares - v;
-          preview.innerHTML =
+          setPreview(
             `<div><span>Shares</span><b>${fmt(res.shares)}</b></div>
-             <div><span>Avg price</span><b>${(res.avg_price * 100).toFixed(1)}¢</b></div>
-             <div><span>Pays if right</span><b class="up">Ⓜ${fmt(res.shares)} (+${fmt(profit)})</b></div>
-             <div><span>New price</span><b>${newPct}%</b></div>` +
-            (v > balance ? '<p class="down small">More than your balance.</p>' : '');
+             <div><span>Avg price</span><b>${avg}</b></div>
+             <div><span>Pays if right</span><b class="up">Ⓜ${fmt(res.shares)} (+${fmt(res.shares - res.coins)})</b></div>
+             <div><span>New price</span><b>${newPct}%</b></div>`, true);
         } else {
-          preview.innerHTML =
+          setPreview(
             `<div><span>You receive</span><b class="up">Ⓜ${fmt(res.coins)}</b></div>
-             <div><span>Avg price</span><b>${(res.avg_price * 100).toFixed(1)}¢</b></div>
-             <div><span>New price</span><b>${newPct}%</b></div>` +
-            (v > held() + 1e-6 ? '<p class="down small">You don\'t own that many shares.</p>' : '');
+             <div><span>Avg price</span><b>${avg}</b></div>
+             <div><span>New price</span><b>${newPct}%</b></div>`, true);
         }
-      } catch { preview.innerHTML = '<span class="muted">Quote unavailable.</span>'; }
+      } catch { if (my === seq) setPreview('<span class="muted">Quote unavailable.</span>', false); }
     }, 150);
   }
 

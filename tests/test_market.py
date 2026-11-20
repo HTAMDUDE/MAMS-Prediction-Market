@@ -167,7 +167,8 @@ def test_admin_edit():
             "closes_at": new_close, "outcomes": "A\nB\nC", "liquidity": "high"}, follow_redirects=True)
         assert "Market updated." in r.get_data(as_text=True)
         m = db.execute("SELECT * FROM markets WHERE id=?", (mid,)).fetchone()
-        assert (m["question"], m["category"], m["b"]) == ("New?", "Sports", 250)
+        assert (m["question"], m["category"]) == ("New?", "Sports")
+        assert m["b"] == pytest.approx(600 * 1.5849625007)  # "high", 3 outcomes
         labels = [o["label"] for o in appmod.get_outcomes(db, mid)]
         assert labels == ["A", "B", "C"]
 
@@ -181,7 +182,7 @@ def test_admin_edit():
         data.update({f"label_{o['id']}": l for o, l in zip(outs, ["Alpha", "B", "C"])})
         admin.post(f"/admin/markets/{mid}/edit", data=data)
         assert [o["label"] for o in appmod.get_outcomes(db, mid)] == ["Alpha", "B", "C"]
-        assert db.execute("SELECT b FROM markets WHERE id=?", (mid,)).fetchone()[0] == 250
+        assert db.execute("SELECT b FROM markets WHERE id=?", (mid,)).fetchone()[0] == pytest.approx(600 * 1.5849625007)
         assert db.execute("SELECT COUNT(*) FROM positions WHERE user_id=?", (uid,)).fetchone()[0] == 1
         assert admin.get(f"/market/{mid}").status_code == 200
         assert admin.get("/admin").status_code == 200
@@ -247,7 +248,7 @@ def test_proposals_flow():
         p = db.execute("SELECT * FROM proposals WHERE id=?", (pid,)).fetchone()
         assert p["status"] == "approved" and p["market_id"]
         m = db.execute("SELECT * FROM markets WHERE id=?", (p["market_id"],)).fetchone()
-        assert m["question"] == "Will the pep rally have a live band?" and m["b"] == 250
+        assert m["question"] == "Will the pep rally have a live band?" and m["b"] == 600
         assert "Clarified wording" in sam.get("/propose").get_data(as_text=True)
 
         # approving twice does nothing
@@ -344,5 +345,126 @@ def test_blocking_and_bans_refund_bets():
         admin.post(f"/admin/markets/{m2}/block", data={"csrf_token": block_tok, "username": "fay"})
         appmod.delete_market(db, m2)
         assert admin.get(f"/market/{m1}").status_code == 200
+    finally:
+        appmod.DB_PATH = old
+
+
+# ---------------------------------------------------------------- pricing audit regressions
+
+def _fresh_db():
+    path = os.path.join(tempfile.mkdtemp(), "pricing.db")
+    appmod.DB_PATH = path
+    appmod._hits.clear()
+    appmod.init_db()
+    return appmod.connect()
+
+
+def _user(db, name, balance=1000):
+    return db.execute("INSERT INTO users (username, password_hash, balance, created_at) VALUES (?, 'x', ?, ?)",
+                      (name, balance, appmod.now_str())).lastrowid
+
+
+def _market(db, n=2, b=300):
+    closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+    mid = appmod.create_market(db, f"Q{n}-{b}?", "", "Other", closes, [f"o{i}" for i in range(n)], b)
+    return mid, [o["id"] for o in appmod.get_outcomes(db, mid)]
+
+
+@pytest.mark.parametrize("b", [50, 150, 600])
+@pytest.mark.parametrize("n", [2, 8])
+@pytest.mark.parametrize("amount", [1e-12, 1.0, 1e5])
+def test_shares_for_amount_inverts_cost_at_extremes(b, n, amount):
+    q = [0.0] * n
+    q[0] = 40 * b  # outcome 1 is priced near e^-40
+    s = lmsr.shares_for_amount(q, b, 1, amount)
+    assert s >= 0
+    assert lmsr.cost_for_shares(q, b, 1, s) == pytest.approx(amount, rel=1e-6, abs=1e-9)
+
+
+def test_buying_does_not_inflate_net_worth():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        uid = _user(db, "buyer")
+        mid, (yes, no) = _market(db, 2, 100)
+        appmod.execute_trade(db, uid, mid, yes, "buy", 100)
+        assert appmod.net_worths(db)[uid] == pytest.approx(1000, abs=0.02)
+    finally:
+        appmod.DB_PATH = old
+
+
+def test_holding_both_sides_is_worth_its_cost():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        uid = _user(db, "hedger")
+        mid, (yes, no) = _market(db, 2, 50)
+        appmod.execute_trade(db, uid, mid, yes, "buy", 400)
+        appmod.execute_trade(db, uid, mid, no, "buy", 400)
+        assert appmod.net_worths(db)[uid] == pytest.approx(1000, abs=0.05)
+    finally:
+        appmod.DB_PATH = old
+
+
+def test_market_b_scales_with_outcomes():
+    assert appmod.market_b("medium", 2) == 300
+    assert appmod.market_b("medium", 8) == 900
+    assert appmod.market_b("bogus", 2) == 300
+    assert appmod.preset_for(900, 8) == "medium"
+    assert appmod.preset_for(50, 2) == "low"  # old-style markets map to the nearest preset
+
+
+def test_form_market_stores_scaled_b():
+    old = appmod.DB_PATH
+    try:
+        _fresh_db()
+        admin = appmod.app.test_client()
+        signup(admin, "formboss")
+        closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M")
+        admin.post("/admin/markets", data={"csrf_token": csrf(admin.get("/admin")), "question": "Eight?",
+                                           "outcomes": "\n".join("abcdefgh"), "category": "Other",
+                                           "closes_at": closes, "liquidity": "medium"})
+        db = appmod.connect()
+        mid, b = db.execute("SELECT id, b FROM markets WHERE question='Eight?'").fetchone()
+        assert b == pytest.approx(900)
+        page = admin.get(f"/admin/markets/{mid}/edit").get_data(as_text=True)
+        assert re.search(r'<option value="medium"\s+selected', page)
+    finally:
+        appmod.DB_PATH = old
+
+
+def test_quote_matches_trade_and_reports_errors():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        client = appmod.app.test_client()
+        signup(client, "quoter")
+        uid = db.execute("SELECT id FROM users WHERE username='quoter'").fetchone()[0]
+        mid, (yes, no) = _market(db, 2, 100)
+        url = lambda o, a, v: f"/api/quote?market={mid}&outcome={o}&action={a}&value={v}"
+
+        assert "Minimum bet" in client.get(url(yes, "buy", 0.5)).get_json()["error"]
+        assert "enough" in client.get(url(yes, "buy", 5000)).get_json()["error"]
+        assert "only own" in client.get(url(yes, "sell", 5)).get_json()["error"]
+
+        q = client.get(url(yes, "buy", 100)).get_json()
+        assert q["ok"]
+        bal0 = db.execute("SELECT balance FROM users WHERE id=?", (uid,)).fetchone()[0]
+        appmod.execute_trade(db, uid, mid, yes, "buy", 100)
+        held = db.execute("SELECT shares FROM positions WHERE user_id=?", (uid,)).fetchone()[0]
+        assert held == pytest.approx(q["shares"], abs=1e-3)
+        assert db.execute("SELECT balance FROM users WHERE id=?", (uid,)).fetchone()[0] == pytest.approx(bal0 - q["coins"])
+
+        sq = client.get(url(yes, "sell", held)).get_json()
+        assert sq["ok"]
+        before = db.execute("SELECT balance FROM users WHERE id=?", (uid,)).fetchone()[0]
+        appmod.execute_trade(db, uid, mid, yes, "sell", held)
+        after = db.execute("SELECT balance FROM users WHERE id=?", (uid,)).fetchone()[0]
+        assert after - before == pytest.approx(sq["coins"], abs=0.01)
+
+        # blocked users see the reason; logged-out visitors still get a price preview
+        db.execute("INSERT INTO market_blocks (market_id, user_id, created_at) VALUES (?, ?, ?)", (mid, uid, appmod.now_str()))
+        assert "blocked" in client.get(url(yes, "buy", 10)).get_json()["error"]
+        assert appmod.app.test_client().get(url(yes, "buy", 10)).get_json()["ok"]
     finally:
         appmod.DB_PATH = old

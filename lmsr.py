@@ -36,9 +36,12 @@ def shares_for_amount(q, b, i, amount):
     """How many shares of outcome i can be bought for exactly `amount` coins."""
     if amount <= 0:
         raise ValueError("amount must be positive")
-    target = (cost(q, b) + amount) / b
-    rest = sum(math.exp(q[j] / b - target) for j in range(len(q)) if j != i)
-    return b * (target + math.log(1.0 - rest)) - q[i]
+    # Solving cost_for_shares(s) = amount gives exp(s/b) = 1 + (exp(amount/b) - 1) / p_i. Evaluated in log
+    # space so it stays accurate for tiny amounts and for outcomes priced near 0.
+    x = amount / b
+    neg_log_p = (cost(q, b) - q[i]) / b  # = -ln(p_i)
+    a = neg_log_p + x + math.log(-math.expm1(-x))
+    return b * (max(a, 0.0) + math.log1p(math.exp(-abs(a))))  # b * ln(1 + e^a)
 
 
 def cost_for_shares(q, b, i, shares):
@@ -53,3 +56,10 @@ def sell_value(q, b, i, shares):
     q2 = list(q)
     q2[i] -= shares
     return cost(q, b) - cost(q2, b)
+
+
+def liquidation_value(q, b, holdings):
+    """Coins received for selling a whole set of holdings (one share count per outcome) at once.
+
+    This is not the sum of per-outcome sell values: holding s of every outcome is worth exactly s."""
+    return cost(q, b) - cost([x - h for x, h in zip(q, holdings)], b)

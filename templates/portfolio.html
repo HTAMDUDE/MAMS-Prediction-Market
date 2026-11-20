@@ -5,7 +5,7 @@
 <div class="kpis">
   <div class="kpi"><span>Net worth</span><strong>Ⓜ{{ worth|money }}</strong></div>
   <div class="kpi"><span>Cash</span><strong>Ⓜ{{ user.balance|money }}</strong></div>
-  <div class="kpi"><span>In open bets (current value)</span><strong>Ⓜ{{ invested|money }}</strong></div>
+  <div class="kpi"><span>In open bets (if sold now)</span><strong>Ⓜ{{ invested|money }}</strong></div>
 </div>
 
 <div class="card">
@@ -13,7 +13,7 @@
   {% if active %}
   <div class="table-scroll">
   <table class="table">
-    <thead><tr><th>Market</th><th>Outcome</th><th class="num">Shares</th><th class="num">Spent</th><th class="num">Value now</th><th class="num">Gain</th></tr></thead>
+    <thead><tr><th>Market</th><th>Outcome</th><th class="num">Shares</th><th class="num">Spent</th><th class="num" title="What these shares would sell for right now">Sell value</th><th class="num">Gain</th></tr></thead>
     <tbody>
     {% for i in active %}
       {% set gain = i.value - i.r.cost %}
@@ -30,6 +30,7 @@
     </tbody>
   </table>
   </div>
+  {% if (rows_total - invested)|abs > 0.01 %}<p class="muted small">Rows add up to Ⓜ{{ rows_total|money }}, but selling several outcomes of one market together is worth Ⓜ{{ invested|money }} in total.</p>{% endif %}
   {% else %}<p class="muted">No open bets. <a href="{{ url_for('index') }}">Browse markets →</a></p>{% endif %}
 </div>
 

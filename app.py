@@ -35,7 +35,18 @@ DAILY_BONUS = 100.0
 MIN_BET = 1.0
 CURRENCY = "MAMS Bucks"
 ADMIN_USERNAMES = {u.strip().lower() for u in os.environ.get("MAMS_ADMINS", "").split(",") if u.strip()}
-LIQUIDITY = {"low": 50.0, "medium": 100.0, "high": 250.0}
+# Liquidity presets are for a yes/no market; markets with more outcomes scale up (see market_b)
+# so a bet moves an 8-way market about as much as it moves a 2-way one.
+LIQUIDITY = {"low": 150.0, "medium": 300.0, "high": 600.0}
+
+
+def market_b(preset, n_outcomes):
+    return LIQUIDITY.get(preset, LIQUIDITY["medium"]) * math.log2(max(n_outcomes, 2))
+
+
+def preset_for(b, n_outcomes):
+    """The preset whose scaled liquidity is closest to a market's stored b (old markets may not match exactly)."""
+    return min(LIQUIDITY, key=lambda k: abs(market_b(k, n_outcomes) - b))
 CATEGORIES = ["Academics", "Competitions", "Sports", "Events", "Campus Life", "Weather", "Other"]
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,20}$")
 EPS = 1e-9
@@ -161,22 +172,30 @@ def snapshot_prices(db, market_id, b):
                (market_id, json.dumps([round(p, 5) for p in ps]), now_str()))
 
 
-def current_prices(db):
-    """{outcome_id: price} for every outcome in an open or closed (unresolved) market."""
-    result = {}
+def open_book_values(db):
+    """{user_id: {market_id: cash-out value}} for every unresolved market. Each value is what the user's
+    whole holding in that market would sell for right now, so buying can't inflate it."""
+    markets = {}
     for m in db.execute("SELECT * FROM markets WHERE status = 'open'").fetchall():
         outs = get_outcomes(db, m["id"])
-        for o, p in zip(outs, lmsr.prices([o["shares"] for o in outs], m["b"])):
-            result[o["id"]] = p
+        markets[m["id"]] = (m["b"], [o["shares"] for o in outs], {o["id"]: i for i, o in enumerate(outs)})
+    holdings = {}  # (user_id, market_id) -> share vector
+    for p in db.execute("SELECT p.user_id, p.outcome_id, p.shares, o.market_id FROM positions p "
+                        "JOIN outcomes o ON o.id = p.outcome_id WHERE p.shares > 0"):
+        if p["market_id"] in markets:
+            b, q, index = markets[p["market_id"]]
+            holdings.setdefault((p["user_id"], p["market_id"]), [0.0] * len(q))[index[p["outcome_id"]]] = p["shares"]
+    result = {}
+    for (uid, mid), h in holdings.items():
+        b, q, _ = markets[mid]
+        result.setdefault(uid, {})[mid] = lmsr.liquidation_value(q, b, h)
     return result
 
 
 def net_worths(db):
-    prices = current_prices(db)
     worth = {u["id"]: u["balance"] for u in db.execute("SELECT id, balance FROM users")}
-    for p in db.execute("SELECT user_id, outcome_id, shares FROM positions WHERE shares > 0"):
-        if p["outcome_id"] in prices:
-            worth[p["user_id"]] += p["shares"] * prices[p["outcome_id"]]
+    for uid, per_market in open_book_values(db).items():
+        worth[uid] += sum(per_market.values())
     return worth
 
 
@@ -248,6 +267,31 @@ def ban_user_from_trading(db, user_id):
         raise
 
 
+def check_trade(m, outs, idx, action, value, balance=None, held=None):
+    """Validate a trade and price it. Returns (shares, coins): shares bought/sold and coins spent/received.
+    Raises TradeError with a user-facing message. balance/held may be None to skip those checks
+    (used for logged-out quotes). Shared by execute_trade and the /api/quote preview so they always agree."""
+    q = [o["shares"] for o in outs]
+    label = outs[idx]["label"]
+    if action == "buy":
+        amount = cents(value)
+        if amount < MIN_BET:
+            raise TradeError(f"Minimum bet is {MIN_BET:.0f} {CURRENCY}.")
+        if balance is not None and amount > balance + EPS:
+            raise TradeError("You don't have enough MAMS Bucks for that bet.")
+        return lmsr.shares_for_amount(q, m["b"], idx, amount), amount
+    if action == "sell":
+        shares = value
+        if held is not None and abs(shares - held) < 1e-6:
+            shares = held
+        if shares <= EPS:
+            raise TradeError("Enter a number of shares to sell.")
+        if held is not None and shares > held + EPS:
+            raise TradeError(f"You only own {held:.2f} shares of “{label}”.")
+        return shares, math.floor(lmsr.sell_value(q, m["b"], idx, shares) * 100) / 100
+    raise TradeError("Unknown action.")
+
+
 def execute_trade(db, user_id, market_id, outcome_id, action, value):
     """Buy (value = coins to spend) or sell (value = shares to sell). Returns a status message."""
     db.execute("BEGIN IMMEDIATE")
@@ -273,31 +317,18 @@ def execute_trade(db, user_id, market_id, outcome_id, action, value):
         held = pos["shares"] if pos else 0.0
         held_cost = pos["cost"] if pos else 0.0
 
+        shares, coins = check_trade(m, outs, idx, action, value, user["balance"], held)
+        q[idx] += shares if action == "buy" else -shares
+        now_pct = lmsr.prices(q, m["b"])[idx] * 100
         if action == "buy":
-            amount = cents(value)
-            if amount < MIN_BET:
-                raise TradeError(f"Minimum bet is {MIN_BET:.0f} {CURRENCY}.")
-            if amount > user["balance"] + EPS:
-                raise TradeError("You don't have enough MAMS Bucks for that bet.")
-            shares = lmsr.shares_for_amount(q, m["b"], idx, amount)
-            d_shares, d_cash = shares, -amount
-            new_shares, new_cost = held + shares, held_cost + amount
-            msg = f"Bought {shares:.2f} shares of “{label}” for {amount:.2f} {CURRENCY}."
-        elif action == "sell":
-            shares = value
-            if abs(shares - held) < 1e-6:
-                shares = held
-            if shares <= EPS:
-                raise TradeError("Enter a number of shares to sell.")
-            if shares > held + EPS:
-                raise TradeError(f"You only own {held:.2f} shares of “{label}”.")
-            refund = math.floor(lmsr.sell_value(q, m["b"], idx, shares) * 100) / 100
-            d_shares, d_cash = -shares, refund
+            d_shares, d_cash = shares, -coins
+            new_shares, new_cost = held + shares, held_cost + coins
+            msg = f"Bought {shares:.2f} shares of “{label}” for {coins:.2f} {CURRENCY} — now {now_pct:.0f}%."
+        else:
+            d_shares, d_cash = -shares, coins
             new_shares = held - shares
             new_cost = held_cost * (new_shares / held) if held > 0 else 0.0
-            msg = f"Sold {shares:.2f} shares of “{label}” for {refund:.2f} {CURRENCY}."
-        else:
-            raise TradeError("Unknown action.")
+            msg = f"Sold {shares:.2f} shares of “{label}” for {coins:.2f} {CURRENCY} — now {now_pct:.0f}%."
 
         db.execute("UPDATE outcomes SET shares = shares + ? WHERE id = ?", (d_shares, outcome_id))
         db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (d_cash, user_id))
@@ -607,12 +638,16 @@ def market(mid):
     my_positions = []
     if g.user:
         by_id = {o["id"]: o for o in b["outcomes"]}
+        q = [o["shares"] for o in b["outcomes"]]
+        index = {o["id"]: i for i, o in enumerate(b["outcomes"])}
         for p in db.execute(
                 "SELECT p.* FROM positions p JOIN outcomes o ON o.id = p.outcome_id "
                 "WHERE p.user_id = ? AND o.market_id = ? ORDER BY o.position", (g.user["id"], mid)):
             o = by_id[p["outcome_id"]]
-            my_positions.append({"outcome": o, "shares": p["shares"], "cost": p["cost"],
-                                 "value": p["shares"] * o["price"]})
+            # Resolved markets pay 1 per winning share; otherwise show what the shares would sell for now.
+            value = (p["shares"] * o["price"] if b["m"]["status"] == "resolved"
+                     else lmsr.sell_value(q, b["m"]["b"], index[p["outcome_id"]], p["shares"]))
+            my_positions.append({"outcome": o, "shares": p["shares"], "cost": p["cost"], "value": value})
     block_reason = trade_block_reason(db, g.user["id"], mid) if g.user else None
     blocked, all_users = [], []
     if g.user and g.user["is_admin"]:
@@ -671,23 +706,26 @@ def quote():
         return jsonify(ok=False)
     m = db.execute("SELECT * FROM markets WHERE id = ?", (mid,)).fetchone()
     if m is None or market_state(m) != "open":
-        return jsonify(ok=False)
+        return jsonify(ok=False, error="This market is no longer accepting bets.")
     outs = get_outcomes(db, mid)
     ids = [o["id"] for o in outs]
     if oid not in ids:
-        return jsonify(ok=False)
+        return jsonify(ok=False, error="Unknown outcome.")
     i = ids.index(oid)
+    balance = held = None  # logged-out visitors still get a price preview
+    try:
+        if g.user:
+            block = trade_block_reason(db, g.user["id"], mid)
+            if block:
+                raise TradeError(block)
+            pos = db.execute("SELECT shares FROM positions WHERE user_id = ? AND outcome_id = ?",
+                             (g.user["id"], oid)).fetchone()
+            balance, held = g.user["balance"], pos["shares"] if pos else 0.0
+        shares, coins = check_trade(m, outs, i, action, value, balance, held)
+    except TradeError as e:
+        return jsonify(ok=False, error=str(e))
     q = [o["shares"] for o in outs]
-    if action == "buy":
-        shares = lmsr.shares_for_amount(q, m["b"], i, value)
-        coins = value
-        q[i] += shares
-    elif action == "sell":
-        shares = value
-        coins = math.floor(lmsr.sell_value(q, m["b"], i, shares) * 100) / 100
-        q[i] -= shares
-    else:
-        return jsonify(ok=False)
+    q[i] += shares if action == "buy" else -shares
     return jsonify(ok=True, shares=round(shares, 4), coins=coins,
                    avg_price=coins / shares if shares else 0,
                    new_price=lmsr.prices(q, m["b"])[i])
@@ -711,15 +749,23 @@ def portfolio():
             m = db.execute("SELECT * FROM markets WHERE id = ?", (r["market_id"],)).fetchone()
             bundles[r["market_id"]] = bundle(db, m)
         b = bundles[r["market_id"]]
-        price = next(o["price"] for o in b["outcomes"] if o["id"] == r["outcome_id"])
-        item = {"r": r, "b": b, "price": price, "value": r["shares"] * price}
+        outs = b["outcomes"]
+        i = next(k for k, o in enumerate(outs) if o["id"] == r["outcome_id"])
+        price = outs[i]["price"]
+        if b["m"]["status"] == "open":  # open or awaiting result: value = what the shares would sell for now
+            value = lmsr.sell_value([o["shares"] for o in outs], b["m"]["b"], i, r["shares"])
+        else:
+            value = r["shares"] * price
+        item = {"r": r, "b": b, "price": price, "value": value}
         (active if b["state"] in ("open", "closed") else settled).append(item)
     trades = db.execute(
         "SELECT t.*, o.label, m.question FROM trades t JOIN outcomes o ON o.id = t.outcome_id "
         "JOIN markets m ON m.id = t.market_id WHERE t.user_id = ? ORDER BY t.id DESC LIMIT 30", (uid,)).fetchall()
     worth = net_worths(db)[uid]
+    # Joint per-market value, so the KPI matches net worth even when someone holds several outcomes of a market.
+    invested = sum(open_book_values(db).get(uid, {}).values())
     return render_template("portfolio.html", active=active, settled=settled, trades=trades, worth=worth,
-                           invested=sum(i["value"] for i in active))
+                           invested=invested, rows_total=sum(i["value"] for i in active))
 
 
 @app.route("/leaderboard")
@@ -773,7 +819,7 @@ def read_market_form(f):
         "category": f.get("category") if f.get("category") in CATEGORIES else "Other",
         "closes_at": closes_at.strftime("%Y-%m-%d %H:%M:%S"),
         "labels": labels,
-        "b": LIQUIDITY.get(f.get("liquidity"), LIQUIDITY["medium"]),
+        "b": market_b(f.get("liquidity"), len(labels)),
     }, None
 
 
@@ -951,7 +997,8 @@ def admin_edit(mid):
                 for oid, label in renames.items():
                     db.execute("UPDATE outcomes SET label = ? WHERE id = ?", (label, oid))
             else:
-                b = LIQUIDITY.get(f.get("liquidity"), m["b"])
+                preset = f.get("liquidity")
+                b = market_b(preset, len(labels)) if preset in LIQUIDITY else m["b"]
                 db.execute("UPDATE markets SET b = ? WHERE id = ?", (b, mid))
                 if [o["label"] for o in outs] != labels:
                     db.execute("DELETE FROM outcomes WHERE market_id = ?", (mid,))
@@ -967,7 +1014,7 @@ def admin_edit(mid):
         flash("Market updated.", "success")
         return redirect(url_for("market", mid=mid))
 
-    liquidity = next((k for k, v in LIQUIDITY.items() if v == m["b"]), "medium")
+    liquidity = preset_for(m["b"], len(outs))
     return render_template("edit_market.html", m=m, outcomes=outs, has_trades=has_trades, liquidity=liquidity,
                            closes_value=parse_dt(m["closes_at"]).strftime("%Y-%m-%dT%H:%M"))
 

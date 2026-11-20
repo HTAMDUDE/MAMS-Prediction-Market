@@ -21,6 +21,7 @@
     --text: #ecebe8; --muted: #a29d93; --brand: #c2475a; --gold: #d9b444;
     --up: #4cc38a; --down: #f07167;
     --c0: #5b8ff0; --c1: #ef6f6a; --c2: #4cc38a; --c3: #f0b840;
+    --c4: #a98af0; --c5: #3fc3d9; --c6: #f08ab8; --c7: #93a3b8;
     --shadow: none;
   }
 }
@@ -150,6 +151,13 @@ main { padding-top: 8px; padding-bottom: 32px; }
 .chart .grid { stroke: var(--border); stroke-width: 1; }
 .chart .axis { fill: var(--muted); font-size: 11px; }
 .chart .line { fill: none; stroke-width: 2.25; stroke-linejoin: round; }
+.chart .guide { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; pointer-events: none; }
+.chart svg { touch-action: pan-y; }
+.chart-tip { position: absolute; top: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+             padding: 6px 10px; font-size: .82rem; pointer-events: none; box-shadow: var(--shadow); max-width: 220px; z-index: 2; }
+.chart-tip[hidden] { display: none; }
+.chart-tip b { margin-left: 6px; font-variant-numeric: tabular-nums; }
+.chart-tip i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 8px; font-size: .9rem; }
 .legend i, .outcome-pick i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: 0; }
 .legend .winner { font-weight: 700; }

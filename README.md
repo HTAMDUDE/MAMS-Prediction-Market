@@ -159,5 +159,8 @@ price_i  = exp(q_i / b) / Σ exp(q_j / b)
 ```
 
 Buying Δ shares costs `cost(q + Δ) − cost(q)`. Larger `b` (the "Liquidity" setting when creating a market) means
-prices move less per bet. The house can lose at most `b · ln(number of outcomes)` per market, which is fine
+prices move less per bet. The presets are Low/Medium/High = 150/300/600 for a yes/no market and scale with
+`log2(number of outcomes)`, so a bet moves an 8-way market about as much as a 2-way one (a Ⓜ100 bet moves a fresh
+Medium yes/no market from 50% to about 64%). Open bets are valued at what they would *sell* for right now (not
+shares × price, which a trader's own buy would inflate), so net worth can't be gamed by buying. The house can lose at most `b · ln(number of outcomes)` per market, which is fine
 because the money isn't real.
