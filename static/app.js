@@ -168,6 +168,8 @@ function setupTradeForm(form) {
 function setupMarketForm(form) {
   const kindInputs = form.querySelectorAll('input[name=kind]');
   const multiOnly = form.querySelector('[data-multi-only]');
+  const ouOnly = form.querySelectorAll('[data-ou-only]');
+  const ouInputs = form.querySelectorAll('input[name=ou_line], input[name=ou_unit]');
   const outcomes = form.querySelector('textarea[name=outcomes]');
   const rulesLabel = form.querySelector('[data-rules-label]');
   const rules = form.querySelector('textarea[name=description]');
@@ -182,28 +184,41 @@ function setupMarketForm(form) {
     return e;
   }
 
+  function ouText() {
+    const line = field('ou_line').trim() || '?';
+    const unit = field('ou_unit').trim();
+    return line + (unit && /^[A-Za-z0-9]/.test(unit) ? ' ' + unit : unit);
+  }
+
   function render() {
-    const yesno = kind() === 'yesno';
-    if (multiOnly) multiOnly.hidden = yesno;
+    const k = kind();
+    const yesno = k === 'yesno', ou = k === 'overunder', multi = k === 'multi';
+    if (multiOnly) multiOnly.hidden = !multi;
+    ouOnly.forEach(e => { e.hidden = !ou; });
+    ouInputs.forEach(i => { i.disabled = !ou; });
+    const lineInput = form.querySelector('input[name=ou_line]');
+    if (lineInput) lineInput.required = ou;
     if (outcomes) {
-      outcomes.disabled = yesno;
-      outcomes.required = !yesno;
-      if (!yesno && /^\s*yes\s*\n\s*no\s*$/i.test(outcomes.value)) outcomes.value = 'Option A\nOption B';
+      outcomes.disabled = !multi;
+      outcomes.required = multi;
+      if (multi && /^\s*yes\s*\n\s*no\s*$/i.test(outcomes.value)) outcomes.value = 'Option A\nOption B';
     }
-    if (rulesLabel) rulesLabel.textContent = yesno ? 'Resolves YES if…' : 'How the winner is decided';
-    if (rules) rules.placeholder = yesno ? rules.dataset.yesnoPlaceholder : rules.dataset.multiPlaceholder;
+    const heading = { yesno: 'Resolves YES if…', overunder: 'What number is measured, and how', multi: 'How the winner is decided' }[k];
+    if (rulesLabel) rulesLabel.textContent = heading;
+    if (rules) rules.placeholder = rules.dataset[k + 'Placeholder'] || '';
     if (!preview) return;
 
     preview.replaceChildren();
     const card = el('div', 'preview-market');
     card.append(el('h3', '', field('question').trim() || 'Your question will show up here'));
-    if (yesno) {
+    if (yesno || ou) {
       const row = el('div', 'chance-row');
       const chance = el('div', 'chance');
       chance.append(el('span', 'chance-pct', '50%'), document.createTextNode(' '), el('span', 'muted', 'chance'));
       const yn = el('div', 'yn');
-      yn.append(el('span', 'yn-yes', 'Yes 50¢'), el('span', 'yn-no', 'No 50¢'));
+      yn.append(el('span', 'yn-yes', `${ou ? 'Over' : 'Yes'} 50¢`), el('span', 'yn-no', `${ou ? 'Under' : 'No'} 50¢`));
       row.append(chance, yn);
+      if (ou) card.append(el('div', 'ou-line', `Over / Under ${ouText()}`));
       card.append(row);
     } else {
       const labels = field('outcomes').split('\n').map(x => x.trim()).filter(Boolean).slice(0, 8);
@@ -220,7 +235,7 @@ function setupMarketForm(form) {
       card.append(list);
     }
     const box = el('div', 'rules');
-    box.append(el('h4', '', yesno ? 'Resolves YES if' : 'How the winner is decided'),
+    box.append(el('h4', '', heading.replace('…', '')),
                el('p', '', field('description').trim() || '…'));
     if (field('rules_source').trim()) box.append(el('h4', '', 'Source'), el('p', '', field('rules_source').trim()));
     if (field('rules_otherwise').trim()) box.append(el('h4', '', 'Otherwise'), el('p', '', field('rules_otherwise').trim()));

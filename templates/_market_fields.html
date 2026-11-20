@@ -1,10 +1,12 @@
 {# Shared market fields. Expects `form` (dict-like). #}
 {% set typed = (form.outcomes or 'Yes\nNo').splitlines()|map('trim')|map('lower')|list %}
-{% set kind = form.kind or ('yesno' if typed == ['yes', 'no'] else 'multi') %}
+{% set kind = form.kind or ('overunder' if form.ou_line else ('yesno' if typed == ['yes', 'no'] else 'multi')) %}
+{% set rules_labels = {'yesno': 'Resolves YES if…', 'overunder': 'What number is measured, and how', 'multi': 'How the winner is decided'} %}
 <div class="field">
   <span>Type of market</span>
   <div class="seg kind-seg" role="radiogroup">
     <label><input type="radio" name="kind" value="yesno" {{ 'checked' if kind == 'yesno' }}><span>Yes / No</span></label>
+    <label><input type="radio" name="kind" value="overunder" {{ 'checked' if kind == 'overunder' }}><span>Over / Under</span></label>
     <label><input type="radio" name="kind" value="multi" {{ 'checked' if kind == 'multi' }}><span>Multiple choice</span></label>
   </div>
 </div>
@@ -12,11 +14,24 @@
   <input name="question" maxlength="200" required value="{{ form.question or '' }}"
          placeholder="Will MAMS win the regional Science Bowl?">
 </label>
-<label class="field"><span data-rules-label>{{ 'Resolves YES if…' if kind == 'yesno' else 'How the winner is decided' }}</span>
+<div class="row" data-ou-only {{ 'hidden' if kind != 'overunder' }}>
+  <label class="field"><span>Line</span>
+    <input name="ou_line" inputmode="decimal" value="{{ form.ou_line or '' }}" placeholder="85 or 50.5"
+           {{ 'required' if kind == 'overunder' else 'disabled' }}>
+  </label>
+  <label class="field"><span>Unit <em class="muted">(optional)</em></span>
+    <input name="ou_unit" maxlength="15" value="{{ form.ou_unit or '' }}" placeholder="%, minutes, points"
+           {{ 'disabled' if kind != 'overunder' }}>
+  </label>
+</div>
+<p class="muted small" data-ou-only {{ 'hidden' if kind != 'overunder' }}>People bet whether the real number will be
+  over or under the line. Tip: a line ending in .5 (like 50.5) can't be hit exactly, so there's never a tie.</p>
+<label class="field"><span data-rules-label>{{ rules_labels[kind] }}</span>
   <textarea name="description" rows="3" required minlength="20" maxlength="2000"
             data-yesno-placeholder="Resolves YES if the official results list MAMS in first place."
             data-multi-placeholder="The winner is the month of the first full-day weather cancellation."
-            placeholder="{{ 'Resolves YES if the official results list MAMS in first place.' if kind == 'yesno' else 'The winner is the month of the first full-day weather cancellation.' }}">{{ form.description or '' }}</textarea>
+            data-overunder-placeholder="The class average on the November physics test, as announced by the teacher."
+            placeholder="{{ {'yesno': 'Resolves YES if the official results list MAMS in first place.', 'overunder': 'The class average on the November physics test, as announced by the teacher.', 'multi': 'The winner is the month of the first full-day weather cancellation.'}[kind] }}">{{ form.description or '' }}</textarea>
 </label>
 <label class="field"><span>Source <em class="muted">(where will the answer be published?)</em></span>
   <input name="rules_source" maxlength="300" value="{{ form.rules_source or '' }}"
@@ -26,8 +41,8 @@
   <textarea name="rules_otherwise" rows="2" maxlength="1000"
             placeholder="If the event is postponed past the closing date, this resolves NO.">{{ form.rules_otherwise or '' }}</textarea>
 </label>
-<label class="field" data-multi-only {{ 'hidden' if kind == 'yesno' }}><span>Outcomes <em class="muted">(one per line, 2–8)</em></span>
-  <textarea name="outcomes" rows="3" {{ 'disabled' if kind == 'yesno' else 'required' }}>{{ form.outcomes or 'Option A\nOption B' if kind == 'multi' else 'Yes\nNo' }}</textarea>
+<label class="field" data-multi-only {{ 'hidden' if kind != 'multi' }}><span>Outcomes <em class="muted">(one per line, 2–8)</em></span>
+  <textarea name="outcomes" rows="3" {{ 'required' if kind == 'multi' else 'disabled' }}>{{ form.outcomes or 'Option A\nOption B' if kind == 'multi' else 'Yes\nNo' }}</textarea>
 </label>
 <div class="row">
   <label class="field"><span>Category</span>

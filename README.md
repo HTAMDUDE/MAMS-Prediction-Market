@@ -12,6 +12,8 @@ assemblies, and anything else the admins post.
   school's estimated probability.
 - You can sell shares back at the current price any time before the market closes.
 - Anyone can **propose a market** from the Propose page. It goes live once an admin approves it.
+- Three market types: **Yes/No**, **Over/Under** (bet whether a number lands above or below a line, like a class
+  average over/under 85%) and **multiple choice**.
 - Results are **proposed** by an admin and can be **disputed** for 24 hours before winners are paid.
 - Admins create, edit, cancel and delete markets, and propose results (see [Admin guide](#admin-guide)).
 - The site also has a leaderboard (ranked by net worth), a portfolio page, a price-history chart and comments on
@@ -56,8 +58,10 @@ Admins see an **Admin** link in the top bar.
 | Action | Where | What happens |
 |---|---|---|
 | **Review proposals** | Admin page → "Proposals waiting for approval" (the Admin link shows a count) | Open a proposal, fix anything you want, then **Approve & publish** (it goes live immediately, credited to the proposer) or **Reject**. You can leave a note the proposer will see. One admin's decision is final. |
-| **Create** | Admin page | Choose Yes/No (the default) or multiple choice, then write the rules (“Resolves YES if…”, source, edge cases), category and closing time. |
+| **Create** | Admin page | Choose Yes/No (the default), Over/Under (enter the line and an optional unit) or multiple choice, then write the rules (“Resolves YES if…”, source, edge cases), category and closing time. |
 | **Edit** | Admin page or the market's page | Question, category and closing time can always change. Before anyone bets, the written rules and outcomes can change too. After the first bet the rules are **locked**; use **Clarify the rules** on the market's page to add a dated note instead. After the first bet, outcomes can only be renamed, so earlier bets stay fair. Moving the closing time later reopens a closed market. |
+| **Convert to Over/Under** | The market's page → Admin | Turns an open Yes/No market about a number into Over/Under. Enter the line and unit and say whether YES meant Over or Under; everyone's bets and the current price carry over, and a dated clarification records the change. |
+| **Resolve an Over/Under** | The market's page → Admin | Type the actual number. Above the line → Over wins, below → Under. Exactly on the line is a tie ("push"): use Cancel & refund. Use a line ending in .5 to avoid ties. |
 | **Propose result** | Admin page or the market's page, after betting closes | Pick the winning outcome. Nobody is paid yet: traders get 24 hours to dispute it. With no dispute, the result finalizes by itself and each winning share pays Ⓜ1. Until then you can **withdraw** it or **propose a different outcome** (which restarts the 24 hours). |
 | **Review a dispute** | The market's page (a “Disputed” badge appears on the Admin page) | A dispute pauses finalizing. **Confirm result & pay out** settles it immediately, or propose a different outcome. Once a market is finalized it can't be undone. |
 | **Cancel & refund** | The market's page | Stops the market and refunds everyone's net spend. The market stays visible under "All". |

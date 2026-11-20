@@ -16,16 +16,17 @@
         {% else %}<span class="status status-cancelled">Cancelled — all bets refunded</span>{% endif %}
       </div>
       <h1 class="question">{{ b.m.question }}</h1>
+      {% if b.ou %}<div class="ou-line">Over / Under {{ b.ou.text }}{% if b.ou.result %} · Result: <b>{{ b.ou.result }}</b>{% endif %}</div>{% endif %}
 
       {% if b.binary and b.state != 'resolved' and b.state != 'cancelled' %}
-        <div class="chance"><span class="chance-pct">{{ b.outcomes[0].price|pct }}</span> <span class="muted">chance of Yes</span></div>
+        <div class="chance"><span class="chance-pct">{{ b.outcomes[0].price|pct }}</span> <span class="muted">chance of {{ b.outcomes[0].label if b.ou else 'Yes' }}</span></div>
       {% endif %}
 
       {% if b.m.description or b.m.rules_source or b.m.rules_otherwise or clarifications %}
       <div class="rules" id="rules">
         <h2>Rules</h2>
         {% if b.m.description %}
-          <h4>{{ 'Resolves YES if' if b.binary else 'How the winner is decided' }}</h4>
+          <h4>{{ 'What number is measured' if b.ou else ('Resolves YES if' if b.binary else 'How the winner is decided') }}</h4>
           <p>{{ b.m.description }}</p>
         {% endif %}
         {% if b.m.rules_source %}<h4>Source</h4><p>{{ b.m.rules_source }}</p>{% endif %}
@@ -193,12 +194,19 @@
       <form method="post" action="{{ url_for('admin_propose_result', mid=b.m.id) }}"
             onsubmit="return confirm('Propose this result? Traders get 24 hours to dispute it before winners are paid.')">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        {% if b.ou %}
+        <label class="field"><span>{{ 'Change the actual number' if b.state in ('proposed', 'disputed') else 'Actual number' }}{% if b.m.ou_unit %} <em class="muted">({{ b.m.ou_unit }})</em>{% endif %}</span>
+          <input name="actual" inputmode="decimal" required placeholder="e.g. 87.3">
+        </label>
+        <p class="muted small">Over wins above {{ b.ou.text }}, Under below. Exactly {{ b.ou.text }} is a tie: cancel &amp; refund instead.</p>
+        {% else %}
         <label class="field"><span>{{ 'Change the proposed result' if b.state in ('proposed', 'disputed') else 'Winning outcome' }}</span>
           <select name="outcome_id" required>
             <option value="">Choose…</option>
             {% for o in b.outcomes if o.id != b.m.proposed_outcome_id %}<option value="{{ o.id }}">{{ o.label }}</option>{% endfor %}
           </select>
         </label>
+        {% endif %}
         <button class="btn btn-block">{{ 'Propose this instead' if b.state in ('proposed', 'disputed') else 'Propose result' }}</button>
       </form>
       {% endif %}
@@ -217,6 +225,28 @@
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <button class="btn btn-block btn-danger">Cancel &amp; refund</button>
       </form>
+
+      {% if b.binary and not b.ou and b.m.proposed_outcome_id is none %}
+      <h3 class="spaced">Convert to Over / Under</h3>
+      <p class="muted small">For Yes/No questions about a number. Everyone's bets carry over, and a dated clarification
+        explains the change.</p>
+      <form method="post" action="{{ url_for('admin_convert_ou', mid=b.m.id) }}" class="stack"
+            onsubmit="return confirm('Convert this market to Over/Under? YES and NO bets will become the sides you picked.')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div class="row">
+          <label class="field"><span>Line</span><input name="ou_line" inputmode="decimal" required placeholder="85"></label>
+          <label class="field"><span>Unit</span><input name="ou_unit" maxlength="15" placeholder="%"></label>
+        </div>
+        <label class="field"><span>YES meant…</span>
+          <select name="yes_means" required>
+            <option value="">Choose…</option>
+            <option value="over">Over the line</option>
+            <option value="under">Under the line</option>
+          </select>
+        </label>
+        <button class="btn btn-small btn-ghost">Convert</button>
+      </form>
+      {% endif %}
 
       <h3 class="spaced">Clarify the rules</h3>
       <p class="muted small">The written rules are locked once betting starts. Add a dated note instead.</p>

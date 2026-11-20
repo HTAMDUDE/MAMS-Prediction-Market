@@ -115,8 +115,11 @@ def close_db(_exc):
 NEW_COLUMNS = {
     "markets": [("rules_source", "TEXT NOT NULL DEFAULT ''"), ("rules_otherwise", "TEXT NOT NULL DEFAULT ''"),
                 ("proposed_outcome_id", "INTEGER"), ("proposed_by", "INTEGER"), ("proposed_at", "TEXT"),
-                ("finalizes_at", "TEXT"), ("resolved_by", "INTEGER")],
-    "proposals": [("rules_source", "TEXT NOT NULL DEFAULT ''"), ("rules_otherwise", "TEXT NOT NULL DEFAULT ''")],
+                ("finalizes_at", "TEXT"), ("resolved_by", "INTEGER"),
+                # Over/Under markets: the line, an optional unit ("%", "minutes"), and the measured result.
+                ("ou_line", "REAL"), ("ou_unit", "TEXT NOT NULL DEFAULT ''"), ("ou_result", "REAL")],
+    "proposals": [("rules_source", "TEXT NOT NULL DEFAULT ''"), ("rules_otherwise", "TEXT NOT NULL DEFAULT ''"),
+                  ("ou_line", "REAL"), ("ou_unit", "TEXT NOT NULL DEFAULT ''")],
 }
 
 
@@ -188,6 +191,36 @@ def is_binary(labels):
     return [x.lower() for x in labels] == ["yes", "no"]
 
 
+# ---------------------------------------------------------------- over/under
+
+def fmt_number(x):
+    """85.0 -> '85', 50.5 -> '50.5', 1200 -> '1,200'."""
+    return f"{x:,.4f}".rstrip("0").rstrip(".")
+
+
+def ou_text(line, unit):
+    """The line with its unit: '85%', '90 minutes', '50.5'."""
+    unit = (unit or "").strip()
+    return fmt_number(line) + ((" " + unit) if unit and unit[0].isalnum() else unit)
+
+
+def ou_labels(line, unit):
+    """Over is always first, Under second."""
+    text = ou_text(line, unit)
+    return [f"Over {text}", f"Under {text}"]
+
+
+def parse_ou(f):
+    """Read the line and unit from a form. Returns (line, unit, error)."""
+    try:
+        line = float(str(f.get("ou_line", "")).replace(",", "").strip())
+        if not math.isfinite(line) or abs(line) >= 1e9:
+            raise ValueError
+    except ValueError:
+        return None, "", "Enter the over/under line as a number, like 85 or 50.5."
+    return line, f.get("ou_unit", "").strip()[:15], None
+
+
 def open_disputes(db, market_id):
     return db.execute("SELECT d.*, u.username FROM disputes d JOIN users u ON u.id = d.user_id "
                       "WHERE d.market_id = ? AND d.handled_at IS NULL ORDER BY d.id", (market_id,)).fetchall()
@@ -213,7 +246,11 @@ def bundle(db, m):
     return {
         "m": m,
         "state": state,
-        "binary": is_binary([o["label"] for o in outs]),
+        # "binary" = shown as a single chance % (Yes/No, and Over/Under where Over is outcome 0)
+        "binary": is_binary([o["label"] for o in outs]) or m["ou_line"] is not None,
+        "ou": ({"text": ou_text(m["ou_line"], m["ou_unit"]),
+                "result": None if m["ou_result"] is None else ou_text(m["ou_result"], m["ou_unit"])}
+               if m["ou_line"] is not None else None),
         "outcomes": [{"id": o["id"], "label": o["label"], "shares": o["shares"], "price": p}
                      for o, p in zip(outs, ps)],
         "volume": stats["volume"],
@@ -466,7 +503,7 @@ def retract_result(db, market_id):
         if m is None or m["status"] != "open" or m["proposed_outcome_id"] is None:
             raise TradeError("There's no proposed result to withdraw.")
         db.execute("UPDATE markets SET proposed_outcome_id = NULL, proposed_by = NULL, proposed_at = NULL, "
-                   "finalizes_at = NULL WHERE id = ?", (market_id,))
+                   "finalizes_at = NULL, ou_result = NULL WHERE id = ?", (market_id,))
         db.execute("UPDATE disputes SET handled_at = ? WHERE market_id = ? AND handled_at IS NULL",
                    (now_str(), market_id))
         db.execute("COMMIT")
@@ -549,13 +586,14 @@ def delete_market(db, market_id):
 
 
 def create_market(db, question, description, category, closes_at, labels, b, created_by=None,
-                  rules_source="", rules_otherwise=""):
+                  rules_source="", rules_otherwise="", ou_line=None, ou_unit=""):
     db.execute("BEGIN IMMEDIATE")
     try:
         cur = db.execute(
             "INSERT INTO markets (question, description, category, b, closes_at, created_by, created_at, "
-            "rules_source, rules_otherwise) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (question, description, category, b, closes_at, created_by, now_str(), rules_source, rules_otherwise))
+            "rules_source, rules_otherwise, ou_line, ou_unit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (question, description, category, b, closes_at, created_by, now_str(), rules_source, rules_otherwise,
+             ou_line, ou_unit or ""))
         mid = cur.lastrowid
         for i, label in enumerate(labels):
             db.execute("INSERT INTO outcomes (market_id, label, position) VALUES (?, ?, ?)", (mid, label, i))
@@ -1003,8 +1041,17 @@ def admin():
 def read_market_form(f):
     """Validate a create/propose/review form. Returns (fields, error_message)."""
     question = f.get("question", "").strip()
-    # "yesno" is the standard market; "multi" (or no kind at all) takes the outcome list as typed.
-    labels = ["Yes", "No"] if f.get("kind") == "yesno" else parse_outcome_lines(f.get("outcomes", ""))
+    # "yesno" is the standard market; "overunder" bets on a number vs. a line;
+    # "multi" (or no kind at all) takes the outcome list as typed.
+    kind = f.get("kind")
+    ou_line, ou_unit = None, ""
+    if kind == "overunder":
+        ou_line, ou_unit, error = parse_ou(f)
+        if error:
+            return None, error
+        labels = ou_labels(ou_line, ou_unit)
+    else:
+        labels = ["Yes", "No"] if kind == "yesno" else parse_outcome_lines(f.get("outcomes", ""))
     description = f.get("description", "").strip()
     try:
         closes_at = datetime.fromisoformat(f.get("closes_at", ""))
@@ -1028,6 +1075,8 @@ def read_market_form(f):
         "closes_at": closes_at.strftime("%Y-%m-%d %H:%M:%S"),
         "labels": labels,
         "b": market_b(len(labels)),
+        "ou_line": ou_line,
+        "ou_unit": ou_unit,
     }, None
 
 
@@ -1040,7 +1089,7 @@ def admin_create():
         return redirect(url_for("admin"))
     mid = create_market(get_db(), fields["question"], fields["description"], fields["category"],
                         fields["closes_at"], fields["labels"], fields["b"], g.user["id"],
-                        fields["rules_source"], fields["rules_otherwise"])
+                        fields["rules_source"], fields["rules_otherwise"], fields["ou_line"], fields["ou_unit"])
     flash("Market created.", "success")
     return redirect(url_for("market", mid=mid))
 
@@ -1065,10 +1114,10 @@ def propose():
             return render_template("propose.html", form=request.form, mine=my_proposals(db))
         db.execute(
             "INSERT INTO proposals (user_id, question, description, category, outcomes, closes_at, created_at, "
-            "rules_source, rules_otherwise) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "rules_source, rules_otherwise, ou_line, ou_unit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (g.user["id"], fields["question"], fields["description"], fields["category"],
              json.dumps(fields["labels"]), fields["closes_at"], now_str(),
-             fields["rules_source"], fields["rules_otherwise"]))
+             fields["rules_source"], fields["rules_otherwise"], fields["ou_line"], fields["ou_unit"]))
         flash("Thanks! Your market was sent to the admins for approval.", "success")
         return redirect(url_for("propose"))
     return render_template("propose.html", form={}, mine=my_proposals(db))
@@ -1120,7 +1169,7 @@ def admin_review(pid):
             return redirect(url_for("admin"))
         mid = create_market(db, fields["question"], fields["description"], fields["category"],
                             fields["closes_at"], fields["labels"], fields["b"], p["user_id"],
-                            fields["rules_source"], fields["rules_otherwise"])
+                            fields["rules_source"], fields["rules_otherwise"], fields["ou_line"], fields["ou_unit"])
         db.execute("UPDATE proposals SET market_id = ? WHERE id = ?", (mid, pid))
         flash(f"Approved! The market is now live. (Proposed by {p['username']}.)", "success")
         return redirect(url_for("market", mid=mid))
@@ -1129,18 +1178,96 @@ def admin_review(pid):
             "rules_source": p["rules_source"], "rules_otherwise": p["rules_otherwise"],
             "outcomes": "\n".join(json.loads(p["outcomes"])),
             "closes_at": parse_dt(p["closes_at"]).strftime("%Y-%m-%dT%H:%M")}
+    if p["ou_line"] is not None:
+        form.update(kind="overunder", ou_line=fmt_number(p["ou_line"]).replace(",", ""), ou_unit=p["ou_unit"])
     return render_template("review_proposal.html", p=p, form=form)
 
 
 @app.post("/admin/markets/<int:mid>/propose-result")
 @admin_required
 def admin_propose_result(mid):
+    db = get_db()
+    m = db.execute("SELECT * FROM markets WHERE id = ?", (mid,)).fetchone()
+    if m is None:
+        abort(404)
     try:
-        propose_result(get_db(), mid, int(request.form.get("outcome_id", 0)), g.user["id"])
+        actual = None
+        if m["ou_line"] is not None:
+            # Over/Under: the admin enters the measured number and the winner follows from the line.
+            try:
+                actual = float(request.form.get("actual", "").replace(",", "").strip())
+                if not math.isfinite(actual):
+                    raise ValueError
+            except ValueError:
+                raise TradeError("Enter the actual number, like 87.3.")
+            if actual == m["ou_line"]:
+                raise TradeError(f"{ou_text(actual, m['ou_unit'])} is exactly on the line, so neither side wins "
+                                 "(a “push”). Use Cancel & refund to give everyone their money back.")
+            over, under = get_outcomes(db, mid)
+            outcome_id = over["id"] if actual > m["ou_line"] else under["id"]
+        else:
+            outcome_id = int(request.form.get("outcome_id", 0))
+        propose_result(db, mid, outcome_id, g.user["id"])
+        if actual is not None:
+            db.execute("UPDATE markets SET ou_result = ? WHERE id = ?", (actual, mid))
         flash("Result proposed. It finalizes in 24 hours unless someone disputes it.", "success")
     except (TradeError, ValueError) as e:
         flash(str(e) or "Pick a winning outcome.", "error")
     return redirect(request.referrer or url_for("market", mid=mid))
+
+
+def convert_to_over_under(db, market_id, line, unit, yes_means, admin_id):
+    """Turn an open Yes/No market into Over/Under. Bets carry over: YES holders get the side that YES meant.
+    Over becomes outcome 0 (swapping the price history to match if needed) and a dated clarification
+    records the change."""
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        m = db.execute("SELECT * FROM markets WHERE id = ?", (market_id,)).fetchone()
+        if m is None or m["status"] != "open" or m["proposed_outcome_id"] is not None:
+            raise TradeError("Only open markets without a proposed result can be converted.")
+        if m["ou_line"] is not None:
+            raise TradeError("This market is already Over/Under.")
+        outs = get_outcomes(db, market_id)
+        if not is_binary([o["label"] for o in outs]):
+            raise TradeError("Only Yes/No markets can be converted to Over/Under.")
+        yes, no = outs
+        over, under = (yes, no) if yes_means == "over" else (no, yes)
+        over_label, under_label = ou_labels(line, unit)
+        db.execute("UPDATE outcomes SET label = ?, position = 0 WHERE id = ?", (over_label, over["id"]))
+        db.execute("UPDATE outcomes SET label = ?, position = 1 WHERE id = ?", (under_label, under["id"]))
+        if over["id"] != yes["id"]:  # outcome order flipped, so flip the stored price history too
+            for r in db.execute("SELECT id, prices FROM price_history WHERE market_id = ?", (market_id,)).fetchall():
+                db.execute("UPDATE price_history SET prices = ? WHERE id = ?",
+                           (json.dumps(json.loads(r["prices"])[::-1]), r["id"]))
+        db.execute("UPDATE markets SET ou_line = ?, ou_unit = ? WHERE id = ?", (line, unit, market_id))
+        text = ou_text(line, unit)
+        note = (f"Converted to Over/Under {text}. YES bets became {over_label if yes_means == 'over' else under_label}"
+                f" and NO bets became {under_label if yes_means == 'over' else over_label}. Over wins if the result is "
+                f"above {text}, Under if below. Exactly {text} is a push and everyone is refunded.")
+        db.execute("INSERT INTO clarifications (market_id, admin_id, body, created_at) VALUES (?, ?, ?, ?)",
+                   (market_id, admin_id, note, now_str()))
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+
+
+@app.post("/admin/markets/<int:mid>/convert-ou")
+@admin_required
+def admin_convert_ou(mid):
+    line, unit, error = parse_ou(request.form)
+    yes_means = request.form.get("yes_means")
+    if not error and yes_means not in ("over", "under"):
+        error = "Choose whether YES meant Over or Under."
+    if error:
+        flash(error, "error")
+    else:
+        try:
+            convert_to_over_under(get_db(), mid, line, unit, yes_means, g.user["id"])
+            flash(f"Converted to Over/Under {ou_text(line, unit)}. Everyone's bets carried over.", "success")
+        except TradeError as e:
+            flash(str(e), "error")
+    return redirect(url_for("market", mid=mid))
 
 
 @app.post("/admin/markets/<int:mid>/result-action")
@@ -1220,13 +1347,22 @@ def admin_edit(mid):
             closes_at = datetime.fromisoformat(f.get("closes_at", "")).strftime("%Y-%m-%d %H:%M:%S")
         except ValueError:
             closes_at = None
-        if has_trades:
+        is_ou = m["ou_line"] is not None
+        ou_line, ou_unit, error = m["ou_line"], m["ou_unit"], None
+        if is_ou and has_trades:  # the line is locked once anyone has bet; labels stay as they are
+            renames = {o["id"]: o["label"] for o in outs}
+            labels = list(renames.values())
+        elif is_ou:
+            ou_line, ou_unit, error = parse_ou(f)
+            labels = ou_labels(ou_line, ou_unit) if not error else []
+        elif has_trades:
             renames = {o["id"]: f.get(f"label_{o['id']}", "").strip()[:60] for o in outs}
             labels = list(renames.values())
         else:
             labels = parse_outcome_lines(f.get("outcomes", ""))
-        error = None
-        if not question or len(question) > 200:
+        if error:
+            pass
+        elif not question or len(question) > 200:
             error = "Question is required (max 200 characters)."
         elif closes_at is None:
             error = "Pick a valid closing time."
@@ -1254,7 +1390,8 @@ def admin_edit(mid):
                     db.execute("UPDATE outcomes SET label = ? WHERE id = ?", (label, oid))
             else:
                 b = market_b(len(labels))  # outcome count may have changed
-                db.execute("UPDATE markets SET b = ? WHERE id = ?", (b, mid))
+                db.execute("UPDATE markets SET b = ?, ou_line = ?, ou_unit = ? WHERE id = ?",
+                           (b, ou_line, ou_unit if is_ou else "", mid))
                 if [o["label"] for o in outs] != labels:
                     db.execute("DELETE FROM outcomes WHERE market_id = ?", (mid,))
                     for i, label in enumerate(labels):
@@ -1270,8 +1407,9 @@ def admin_edit(mid):
         return redirect(url_for("market", mid=mid))
 
     clarifications = db.execute("SELECT * FROM clarifications WHERE market_id = ? ORDER BY id", (mid,)).fetchall()
+    ou_line_value = "" if m["ou_line"] is None else fmt_number(m["ou_line"]).replace(",", "")
     return render_template("edit_market.html", m=m, outcomes=outs, has_trades=has_trades,
-                           clarifications=clarifications,
+                           clarifications=clarifications, ou_line_value=ou_line_value,
                            closes_value=parse_dt(m["closes_at"]).strftime("%Y-%m-%dT%H:%M"))
 
 

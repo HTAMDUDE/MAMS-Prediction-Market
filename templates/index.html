@@ -41,10 +41,11 @@
         {% else %}<span class="status status-cancelled">Cancelled</span>{% endif %}
       </div>
       <h3>{{ b.m.question }}</h3>
+      {% if b.ou %}<div class="ou-line">Over / Under {{ b.ou.text }}{% if b.ou.result %} · Result: {{ b.ou.result }}{% endif %}</div>{% endif %}
       {% if b.binary and b.state in ('open', 'closed', 'proposed', 'disputed') %}
       <div class="chance-row">
         <div class="chance"><span class="chance-pct">{{ b.outcomes[0].price|pct }}</span> <span class="muted">chance</span></div>
-        <div class="yn"><span class="yn-yes">Yes {{ (b.outcomes[0].price * 100)|round|int }}¢</span><span class="yn-no">No {{ (b.outcomes[1].price * 100)|round|int }}¢</span></div>
+        <div class="yn"><span class="yn-yes">{{ 'Over' if b.ou else 'Yes' }} {{ (b.outcomes[0].price * 100)|round|int }}¢</span><span class="yn-no">{{ 'Under' if b.ou else 'No' }} {{ (b.outcomes[1].price * 100)|round|int }}¢</span></div>
       </div>
       {% else %}
       <ul class="odds">

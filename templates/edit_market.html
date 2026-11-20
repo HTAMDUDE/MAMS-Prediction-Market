@@ -26,7 +26,17 @@
       <textarea name="rules_otherwise" rows="2" maxlength="1000" {{ 'readonly' if has_trades }}>{{ m.rules_otherwise }}</textarea>
     </label>
 
-    {% if has_trades %}
+    {% if m.ou_line is not none %}
+      <div class="row">
+        <label class="field"><span>Over/Under line</span>
+          <input name="ou_line" inputmode="decimal" required value="{{ ou_line_value }}" {{ 'readonly' if has_trades }}>
+        </label>
+        <label class="field"><span>Unit <em class="muted">(optional)</em></span>
+          <input name="ou_unit" maxlength="15" value="{{ m.ou_unit }}" placeholder="%, minutes, points" {{ 'readonly' if has_trades }}>
+        </label>
+      </div>
+      {% if has_trades %}<p class="muted small">People have already bet, so the line is locked.</p>{% endif %}
+    {% elif has_trades %}
       <div class="field"><span>Outcomes</span>
         <p class="muted small">People have already bet, so you can rename outcomes but not add or remove them.</p>
         {% for o in outcomes %}

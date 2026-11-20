@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import sys
@@ -829,5 +830,157 @@ def test_existing_markets_upgraded_to_deeper_liquidity_without_moving_prices():
         shallow = appmod.lmsr.prices([q_before[0] + appmod.lmsr.shares_for_amount(q_before, 300, 0, 100)] + q_before[1:], 300)[0]
         deep = appmod.lmsr.prices([q_after[0] + appmod.lmsr.shares_for_amount(q_after, b, 0, 100)] + q_after[1:], b)[0]
         assert deep - prices_before[0] < (shallow - prices_before[0]) / 2
+    finally:
+        appmod.DB_PATH = old
+
+
+# ---------------------------------------------------------------- over/under
+
+def test_ou_labels_and_text():
+    assert appmod.ou_labels(85, "%") == ["Over 85%", "Under 85%"]
+    assert appmod.ou_labels(90, "minutes") == ["Over 90 minutes", "Under 90 minutes"]
+    assert appmod.ou_labels(50.5, "") == ["Over 50.5", "Under 50.5"]
+    assert appmod.ou_text(1200, "pts") == "1,200 pts"
+    assert appmod.parse_ou({"ou_line": "abc"})[2]
+    assert appmod.parse_ou({"ou_line": "nan"})[2]
+    assert appmod.parse_ou({"ou_line": " 1,250.5 ", "ou_unit": " points "})[:2] == (1250.5, "points")
+
+
+def test_over_under_create_trade_and_resolve():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        admin, kid = appmod.app.test_client(), appmod.app.test_client()
+        signup(admin, "ouboss")
+        signup(kid, "oukid")
+        closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M")
+        r = admin.post("/admin/markets", data={
+            "csrf_token": csrf(admin.get("/admin")), "kind": "overunder", "ou_line": "85", "ou_unit": "%",
+            "question": "Physics test average?", "description": "The class average as announced by the teacher.",
+            "category": "Academics", "closes_at": closes, "outcomes": "should be ignored"}, follow_redirects=True)
+        assert "Market created." in r.get_data(as_text=True)
+        m = db.execute("SELECT * FROM markets WHERE question='Physics test average?'").fetchone()
+        assert (m["ou_line"], m["ou_unit"], m["b"]) == (85, "%", 1000)
+        over, under = appmod.get_outcomes(db, m["id"])
+        assert (over["label"], under["label"]) == ("Over 85%", "Under 85%")
+
+        page = kid.get(f"/market/{m['id']}").get_data(as_text=True)
+        assert "Over / Under 85%" in page and "chance of Over 85%" in page
+        assert "Over / Under 85%" in kid.get("/").get_data(as_text=True)
+
+        kid_id = db.execute("SELECT id FROM users WHERE username='oukid'").fetchone()[0]
+        appmod.execute_trade(db, kid_id, m["id"], over["id"], "buy", 100)
+        db.execute("UPDATE markets SET closes_at = ? WHERE id = ?",
+                   ((datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S"), m["id"]))
+
+        url = f"/admin/markets/{m['id']}/propose-result"
+        r = admin.post(url, data={"csrf_token": csrf(admin.get("/admin")), "actual": "85"}, follow_redirects=True)
+        assert "exactly on the line" in r.get_data(as_text=True)
+        r = admin.post(url, data={"csrf_token": csrf(admin.get("/admin")), "actual": "abc"}, follow_redirects=True)
+        assert "Enter the actual number" in r.get_data(as_text=True)
+
+        admin.post(url, data={"csrf_token": csrf(admin.get("/admin")), "actual": "87.3"})
+        m = db.execute("SELECT * FROM markets WHERE id=?", (m["id"],)).fetchone()
+        assert m["proposed_outcome_id"] == over["id"] and m["ou_result"] == 87.3
+        assert "Result: <b>87.3%</b>" in kid.get(f"/market/{m['id']}").get_data(as_text=True)
+
+        # withdrawing clears the number; a lower number picks Under
+        admin.post(f"/admin/markets/{m['id']}/result-action",
+                   data={"csrf_token": csrf(admin.get("/admin")), "decision": "retract"})
+        assert db.execute("SELECT ou_result FROM markets WHERE id=?", (m["id"],)).fetchone()[0] is None
+        admin.post(url, data={"csrf_token": csrf(admin.get("/admin")), "actual": "80"})
+        assert db.execute("SELECT proposed_outcome_id FROM markets WHERE id=?", (m["id"],)).fetchone()[0] == under["id"]
+    finally:
+        appmod.DB_PATH = old
+
+
+def test_over_under_proposal_and_edit():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        admin, kid = appmod.app.test_client(), appmod.app.test_client()
+        signup(admin, "ouadmin")
+        signup(kid, "ouproposer")
+        closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M")
+        assert 'value="overunder"' in kid.get("/propose").get_data(as_text=True)
+        kid.post("/propose", data={"csrf_token": csrf(kid.get("/propose")), "kind": "overunder", "ou_line": "90",
+                                   "ou_unit": "minutes", "question": "How long is the assembly?",
+                                   "description": "From scheduled start to dismissal, timed by the admins.",
+                                   "category": "Events", "closes_at": closes})
+        p = db.execute("SELECT * FROM proposals WHERE question='How long is the assembly?'").fetchone()
+        assert (p["ou_line"], p["ou_unit"]) == (90, "minutes")
+        review = admin.get(f"/admin/proposals/{p['id']}").get_data(as_text=True)
+        assert re.search(r'value="overunder"\s+checked', review) and 'value="90"' in review
+
+        admin.post(f"/admin/proposals/{p['id']}", data={
+            "csrf_token": csrf(admin.get(f"/admin/proposals/{p['id']}")), "decision": "approve", "kind": "overunder",
+            "ou_line": "90", "ou_unit": "minutes", "question": "How long is the assembly?",
+            "description": "From scheduled start to dismissal, timed by the admins.", "category": "Events",
+            "closes_at": closes})
+        mid = db.execute("SELECT market_id FROM proposals WHERE id=?", (p["id"],)).fetchone()[0]
+        assert [o["label"] for o in appmod.get_outcomes(db, mid)] == ["Over 90 minutes", "Under 90 minutes"]
+
+        # before any bets the line can be edited; afterwards it's locked
+        edit = lambda line: admin.post(f"/admin/markets/{mid}/edit", data={
+            "csrf_token": csrf(admin.get(f"/admin/markets/{mid}/edit")), "question": "How long is the assembly?",
+            "description": "From scheduled start to dismissal, timed by the admins.", "category": "Events",
+            "closes_at": closes, "ou_line": line, "ou_unit": "min"})
+        assert 'name="ou_line"' in admin.get(f"/admin/markets/{mid}/edit").get_data(as_text=True)
+        edit("75.5")
+        assert [o["label"] for o in appmod.get_outcomes(db, mid)] == ["Over 75.5 min", "Under 75.5 min"]
+        kid_id = db.execute("SELECT id FROM users WHERE username='ouproposer'").fetchone()[0]
+        appmod.execute_trade(db, kid_id, mid, appmod.get_outcomes(db, mid)[1]["id"], "buy", 50)
+        edit("120")
+        assert db.execute("SELECT ou_line FROM markets WHERE id=?", (mid,)).fetchone()[0] == 75.5
+        assert [o["label"] for o in appmod.get_outcomes(db, mid)] == ["Over 75.5 min", "Under 75.5 min"]
+    finally:
+        appmod.DB_PATH = old
+
+
+@pytest.mark.parametrize("yes_means", ["over", "under"])
+def test_convert_yes_no_to_over_under_keeps_bets(yes_means):
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        admin = appmod.app.test_client()
+        signup(admin, "convboss")
+        uid = db.execute("SELECT id FROM users WHERE username='convboss'").fetchone()[0]
+        closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+        mid = appmod.create_market(db, "Physics Average +- 85%", RULES, "Academics", closes, ["YES", "NO"], 1000)
+        yes, no = appmod.get_outcomes(db, mid)
+        appmod.execute_trade(db, uid, mid, yes["id"], "buy", 200)
+        yes_price = appmod.bundle(db, db.execute("SELECT * FROM markets WHERE id=?", (mid,)).fetchone())["outcomes"][0]["price"]
+        history_before = [json.loads(r[0]) for r in db.execute("SELECT prices FROM price_history WHERE market_id=? ORDER BY id", (mid,))]
+        bal = db.execute("SELECT balance FROM users WHERE id=?", (uid,)).fetchone()[0]
+
+        r = admin.post(f"/admin/markets/{mid}/convert-ou", data={
+            "csrf_token": csrf(admin.get(f"/market/{mid}")), "ou_line": "85", "ou_unit": "%", "yes_means": yes_means},
+            follow_redirects=True)
+        assert "bets carried over" in r.get_data(as_text=True)
+
+        m = db.execute("SELECT * FROM markets WHERE id=?", (mid,)).fetchone()
+        b = appmod.bundle(db, m)
+        assert b["ou"]["text"] == "85%" and b["binary"]
+        assert [o["label"] for o in b["outcomes"]] == ["Over 85%", "Under 85%"]
+        held_label = db.execute("SELECT o.label FROM positions p JOIN outcomes o ON o.id = p.outcome_id "
+                                "WHERE p.user_id=?", (uid,)).fetchone()[0]
+        assert held_label == ("Over 85%" if yes_means == "over" else "Under 85%")
+        side = 0 if yes_means == "over" else 1
+        assert b["outcomes"][side]["price"] == pytest.approx(yes_price)      # YES's price moved with its bets
+        history_after = [json.loads(r[0]) for r in db.execute("SELECT prices FROM price_history WHERE market_id=? ORDER BY id", (mid,))]
+        assert history_after == (history_before if yes_means == "over" else [h[::-1] for h in history_before])
+        assert db.execute("SELECT balance FROM users WHERE id=?", (uid,)).fetchone()[0] == bal
+        note = db.execute("SELECT body FROM clarifications WHERE market_id=?", (mid,)).fetchone()[0]
+        assert "Converted to Over/Under 85%" in note
+        assert admin.get(f"/market/{mid}").status_code == 200
+
+        # can't convert twice, or convert multiple-choice markets
+        r = admin.post(f"/admin/markets/{mid}/convert-ou", data={
+            "csrf_token": csrf(admin.get(f"/market/{mid}")), "ou_line": "90", "yes_means": "over"}, follow_redirects=True)
+        assert "already Over/Under" in r.get_data(as_text=True)
+        multi = appmod.create_market(db, "Which month?", RULES, "Other", closes, ["Dec", "Jan", "Feb"], 1585)
+        r = admin.post(f"/admin/markets/{multi}/convert-ou", data={
+            "csrf_token": csrf(admin.get(f"/market/{multi}")), "ou_line": "1", "yes_means": "over"}, follow_redirects=True)
+        assert "Only Yes/No markets" in r.get_data(as_text=True)
     finally:
         appmod.DB_PATH = old
