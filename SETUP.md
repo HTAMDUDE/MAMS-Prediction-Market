@@ -116,7 +116,7 @@ they go, so never point `TEST_DATABASE_URL` at real data.
 | `pnpm lint && pnpm typecheck && pnpm test` | What must pass before committing |
 | `pnpm db:migrate` | Create/apply a migration after editing `prisma/schema.prisma` |
 | `pnpm db:seed` | Add the example markets (skips ones that exist) |
-| `pnpm reset-password <username>` | Print a temporary password for a user |
+| `pnpm reset-password <username>` | Print a temporary password for a user (also marks their email verified: the owner's way back in) |
 | `docker compose down` | Stop the database (add `-v` to also delete its data) |
 
 ---
@@ -216,9 +216,10 @@ Use Railway's database backups, or `pg_dump "$DATABASE_URL" > backup.sql`.
 | **Email only arrives for you** | You're still on the test sender `onboarding@resend.dev`. Verify a domain and set `EMAIL_FROM` (Part 2, step 2). |
 | **No email locally** | With no `RESEND_API_KEY` it's printed in the terminal running `pnpm dev`, not sent. (A production build, `next start`, treats a missing key as an error instead.) |
 | **"That verification link is invalid or has expired"** | Links last 24 hours and each is tied to the account. Just try logging in: a fresh link is emailed automatically. |
-| **User can't log in: "Verify your email"** | They haven't clicked the link. They can log in again to get a new one, or use the Resend button on the Check your email page. |
-| **Wrong email typed at sign-up** | They can't verify, so sign up again with the right address (a different username is needed until an admin deletes the stuck account; admins can reset passwords but not edit emails). |
-| **Everyone locked out / forgot the owner password** | Run `pnpm reset-password <username>` with `DATABASE_URL` pointing at the database. |
+| **User can't log in: "Verify your email"** | They haven't clicked the link. They can log in again to get a new one, or use the Resend button on the Check your email page. An admin can also use **Admin → Users → Manage → Email**: *Resend verification*, or *Mark as verified* if you know the address is theirs. |
+| **Wrong email typed at sign-up** | An admin fixes it: **Admin → Users → Manage → Email → Change email**. A verification link goes to the corrected address. (Or delete the stuck account under *Danger zone* and let them sign up again.) |
+| **The owner is locked out** (forgotten password, or an unverified/mistyped email) | No admin can manage the owner, so run `pnpm reset-password <owner username>` with `DATABASE_URL` pointing at the database. It prints a temporary password **and marks the email verified**. |
+| **Any other user forgot their password** | **Admin → Users → Manage → Password → Reset password** gives them a temporary password. |
 | **Build fails at `prisma migrate deploy`** | `DATABASE_URL` is missing or is Railway's *internal* URL. Use the public one. |
 | **Too many connections** | Each serverless instance keeps a pool of up to 5. On Railway's smaller plans, keep traffic reasonable or add a connection pooler (PgBouncer). |
 | **Tests fail to connect** | `docker compose up -d db`, and create `mams_test` once (Part 1, step 3). |

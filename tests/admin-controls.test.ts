@@ -7,7 +7,7 @@ import { deleteComment, loadComments, setCommentHidden, toggleCommentMute, HIDDE
 import { addClarification, addComment, closeMarketEarly, reopenMarket, setFeatured, marketState } from "@/server/services/markets";
 import { grantBalance, toggleAdmin, toggleTradingBan } from "@/server/services/moderation";
 import { actorFor } from "@/server/services/permissions";
-import { proposeResult } from "@/server/services/resolution";
+import { addDispute, confirmResult, proposeResult } from "@/server/services/resolution";
 import { getAnnouncement, setAnnouncement, ANNOUNCEMENT_MAX } from "@/server/services/settings";
 import { executeTrade } from "@/server/services/trading";
 import { balanceOf, closeMarket, hours, makeActor, makeMarket, makeUser, resetDb } from "./helpers";
@@ -144,6 +144,23 @@ describe("user management", () => {
     await toggleAdmin(owner.actor, helper.id); // demote, then deletion is allowed for the owner
     await deleteUser(owner.actor, helper.id);
     expect(await prisma.user.count({ where: { id: helper.id } })).toBe(0);
+  });
+
+  it("won't delete a user whose open dispute is holding a result (it would auto-finalize and pay out)", async () => {
+    const { helper, kid } = await cast();
+    const { id: mid, outs } = await makeMarket({ labels: ["Yes", "No"] });
+    await executeTrade(kid.id, mid, outs[0], "buy", 50);
+    await closeMarket(mid);
+    await proposeResult(helper.actor, mid, outs[1]);
+    await addDispute(kid.id, mid, "The official page says Yes won");
+
+    await expect(deleteUser(helper.actor, kid.id)).rejects.toThrow(/open dispute/);
+    expect(await prisma.user.count({ where: { id: kid.id } })).toBe(1);
+    expect(await prisma.dispute.count({ where: { userId: kid.id, handledAt: null } })).toBe(1); // still pausing the result
+
+    await confirmResult(helper.actor, mid); // an admin settles it; the dispute is now handled
+    await deleteUser(helper.actor, kid.id);
+    expect(await prisma.user.count({ where: { id: kid.id } })).toBe(0);
   });
 
   it("a deleted admin's clarifications stay on the market", async () => {

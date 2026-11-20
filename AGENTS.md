@@ -106,7 +106,7 @@ tests/                       Vitest suites (helpers.ts has the test fixtures)
 | Role | Can do |
 |---|---|
 | **Owner** (user matching `MAMS_OWNER`, or the first account if unset) | Everything admins can, plus add/remove admins and manage other admins. Nobody can demote, ban, block or change the owner's balance. |
-| **Admin** | Run markets and manage **regular users** (balances, bans, blocks, password resets). Can't act on the owner/other admins or create admins. |
+| **Admin** | Run markets and manage **regular users** (balances, bans, blocks, mutes, password resets, email fixes, account deletion) and moderate comments; every action is audited. Can't act on the owner/other admins or create admins. |
 | **User** | Bet, comment, propose markets, dispute results in markets they traded in. |
 
 ## Environment variables
@@ -118,6 +118,7 @@ tests/                       Vitest suites (helpers.ts has the test fixtures)
 - No CSRF tokens: Server Actions and better-auth check the request origin.
 - Rate limits live in Postgres (serverless functions don't share memory). better-auth defaults `/sign-in*`, `/sign-up*` and `/change-password` to 3 requests per 10 s per IP, which would lock out a school sharing one IP, so `auth.ts` overrides them (sign-up 40/hour, sign-in 120/min, change-password 30/min per IP). Brute force is covered by the per-username lockout (10 failures / 5 min, `LoginFailure` table; attempts rejected by the lockout aren't counted).
 - New: password reset (CLI + Admin → Users → Reset) and a change-password form on Portfolio, because imported accounts have no usable password.
+- New admin tools the Flask app never had: user search/filters, email change/verify/resend, account deletion, comment hide/delete/mute, close-early/reopen/feature markets, a site announcement banner, and the audit log (Admin → Activity).
 - Forbidden admin pages render a 403 view with HTTP status 200 (Next's `forbidden()` is still experimental).
 - Deleting a market now also removes its disputes and clarifications (the old app left them, which broke deletes in that case).
 
@@ -135,8 +136,8 @@ Newest first. One entry per change; see rule 2 above.
 - **Audit log:** new `AuditLog` table, `logAudit()`/`listAudit()` in `src/server/services/audit.ts`, action catalog in `src/lib/audit-actions.ts`, and an Admin → Activity page (search + pagination). Every existing admin service (markets, results, proposals, blocks, bans, balances, roles, password reset) is now instrumented, as are all the new controls.
 - **Comment moderation:** hide/unhide and delete comments from the market page (hidden text is never sent to non-admins), and mute a user from commenting (`CommentMute`, enforced in `addComment`). Same `canManage` rules as for people.
 - **Market controls:** close betting early, reopen a closed market (no proposed result, new closing time), feature markets (`Market.featured`: sorted first on the home page, ★ badge), and a site-wide announcement banner (`SiteSetting`, 300 chars).
-- Schema migration `admin_controls` (additive; `Clarification.adminId` is now nullable with `SetNull` so a deleted admin's rules notes survive). New tests in `tests/admin-controls.test.ts` (83 tests total).
-- Fixed: the Users "admins" filter now counts the owner even if their stored flag was never set.
+- Schema migration `admin_controls` (additive; `Clarification.adminId` is now nullable with `SetNull` so a deleted admin's rules notes survive). New tests in `tests/admin-controls.test.ts` (85 tests total).
+- Fixed: the Users "admins" filter now counts the owner even if their stored flag was never set. Deleting an account is refused while the user has an open dispute (it would silently lift the pause and auto-finalize the market). The result action's confirm branch is now explicit (an unknown `decision` is an error, never a payout). `pnpm reset-password` now also marks the email verified so a locked-out owner can get back in (the admin Reset button deliberately does not).
 - Files: `prisma/schema.prisma`, `src/server/services/{accounts,audit,comments,settings,markets,moderation,resolution,proposals}.ts`, `src/server/actions/admin.ts`, `src/lib/audit-actions.ts`, `src/components/{admin-users-table,manage-dialog,market-admin-panel,market-card}.tsx`, `src/app/{admin/page,admin/activity/page,market/[id]/page,layout,page}.tsx`, `tests/{admin-controls,helpers}.ts`, `README.md`.
 - Notes: auto-finalized results (system action) are not in the audit log. The announcement banner lives in the root layout, so people already on the site see a new one on their next full page load.
 
@@ -149,7 +150,7 @@ Newest first. One entry per change; see rule 2 above.
 - Added `SETUP.md` (local + production guide with troubleshooting), updated `README.md` and `.env.example`; installed the Resend skills `email-best-practices` and `resend` via skills.sh.
 - Tests: `tests/auth.test.ts` rewritten around the verification flow with a captured outbox (65 tests total now); the `registerSchema` test covers email.
 - Files: `src/lib/{auth,email,email-templates,verify,username,validation}.ts`, `src/components/{auth-forms,check-email,verify-toast}.tsx`, `src/app/{check-email/page,layout}.tsx`, `scripts/import-sqlite.ts`, `tests/{auth,validation}.test.ts`, `SETUP.md`, `README.md`, `.env.example`.
-- Known gap: a user who mistypes their email at sign-up can't verify and keeps the username; admins can't edit emails or delete users yet. Possible follow-ups: forgot-password by email, change-email, letting a new sign-up replace a stale unverified account.
+- Known gap at the time (fixed in "More admin controls"): a user who mistypes their email at sign-up couldn't verify and kept the username. Possible follow-ups: forgot-password by email, change-email, letting a new sign-up replace a stale unverified account.
 
 ### 2026-11-20: Review fixes after browser testing
 

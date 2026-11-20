@@ -50,7 +50,7 @@ empty to make the first account the owner). To make more usernames admins when t
 | Role | Can do |
 |---|---|
 | **Owner** (one person) | Everything admins can, plus add/remove admins and manage other admins. Nobody can demote, ban, block or change the owner's balance. |
-| **Admin** | Run markets (create, edit, approve proposals, resolve, cancel, delete) and manage **regular users** (balances, bans, blocks, password resets). Can't act on the owner or other admins, and can't create admins. |
+| **Admin** | Run markets (create, edit, approve proposals, resolve, cancel, delete) and manage **regular users** (balances, bans, blocks, mutes, password resets, email fixes, account deletion) and moderate comments. Can't act on the owner or other admins, and can't create admins. |
 | **User** | Bet, comment and propose markets. |
 
 ## Admin guide

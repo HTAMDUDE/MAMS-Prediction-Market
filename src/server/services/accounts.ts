@@ -115,6 +115,10 @@ export async function deleteUser(actor: Actor, userId: string) {
   if (userId === (await findOwnerId())) throw new TradeError("The owner's account can't be deleted.");
   if (!(await canManage(actor, userId))) throw new TradeError(NOT_ALLOWED);
   if (target.isAdmin) throw new TradeError("Remove their admin role before deleting the account.");
+  // Deleting would silently drop their dispute and let the market pay out on the next page load.
+  if ((await prisma.dispute.count({ where: { userId, handledAt: null } })) > 0) {
+    throw new TradeError("They have an open dispute on a proposed result. Confirm or change that result first, then delete the account.");
+  }
   const label = await userLabel(userId);
   const refund = await prisma.$transaction(async (tx) => {
     const markets = await tx.trade.findMany({ where: { userId }, distinct: ["marketId"], select: { marketId: true }, orderBy: { marketId: "asc" } });

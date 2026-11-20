@@ -3,8 +3,12 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/db";
 import { TradeError } from "./services/permissions";
 
-/** Give a user a new random password (hashed like better-auth does) and return it, to be shared privately. */
-export async function setTemporaryPassword(userId: string): Promise<string> {
+/**
+ * Give a user a new random password (hashed like better-auth does) and return it, to be shared privately.
+ * `markVerified` also marks their email verified: only the command-line tool uses it (whoever has the database can
+ * do anything anyway), so a locked-out owner with an unverified or mistyped email can get back in.
+ */
+export async function setTemporaryPassword(userId: string, opts: { markVerified?: boolean } = {}): Promise<string> {
   const ctx = await auth.$context;
   const password = randomBytes(9).toString("base64url");
   const hash = await ctx.password.hash(password);
@@ -14,6 +18,7 @@ export async function setTemporaryPassword(userId: string): Promise<string> {
   } else {
     await prisma.account.create({ data: { id: randomBytes(16).toString("hex"), accountId: userId, providerId: "credential", userId, password: hash } });
   }
+  if (opts.markVerified) await prisma.user.update({ where: { id: userId }, data: { emailVerified: true } });
   await prisma.session.deleteMany({ where: { userId } }); // sign them out everywhere
   await prisma.loginFailure.deleteMany({ where: { username: (await prisma.user.findUnique({ where: { id: userId }, select: { username: true } }))?.username ?? "" } });
   return password;

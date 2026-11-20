@@ -71,12 +71,16 @@ export async function resultAction(_prev: ActionState, fd: FormData): Promise<Ac
   return run(async () => {
     const actor = await admin();
     const marketId = id(fd, "market_id");
-    if (fd.get("decision") === "retract") {
+    const decision = fd.get("decision");
+    if (decision === "retract") {
       await retractResult(actor, marketId);
       return "Proposed result withdrawn. You can propose a different one.";
     }
-    const n = await confirmResult(actor, marketId);
-    return `Result confirmed. Paid out ${n} winning position(s).`;
+    if (decision === "confirm") {
+      const n = await confirmResult(actor, marketId);
+      return `Result confirmed. Paid out ${n} winning position(s).`;
+    }
+    throw new TradeError("Unknown action."); // never default to paying out
   });
 }
 

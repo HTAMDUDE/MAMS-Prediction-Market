@@ -3,6 +3,7 @@ import { auth, LOGIN_FAIL_LIMIT } from "@/lib/auth";
 import { prisma } from "@/lib/db";
 import { setEmailTransport, type Email } from "@/lib/email";
 import { legacyEmail } from "@/lib/username";
+import { setTemporaryPassword } from "@/server/password";
 import { resetDb } from "./helpers";
 
 let outbox: Email[] = [];
@@ -110,6 +111,21 @@ describe("sign-up and email verification", () => {
     await signUpVerified("seed");
     await prisma.user.update({ where: { username: "seed" }, data: { email: legacyEmail("old"), emailVerified: true } });
     expect((await signIn("seed", "secret1")).user.id).toBeTruthy();
+  });
+});
+
+describe("reset-password command", () => {
+  it("with markVerified it lets a locked-out, unverified owner back in; the admin path doesn't verify", async () => {
+    await signUp("owner");
+    await expect(signIn("owner", "secret1")).rejects.toMatchObject({ body: { code: "EMAIL_NOT_VERIFIED" } });
+
+    const adminPath = await setTemporaryPassword((await prisma.user.findUniqueOrThrow({ where: { username: "owner" } })).id);
+    expect((await prisma.user.findUniqueOrThrow({ where: { username: "owner" } })).emailVerified).toBe(false); // admins can't vouch implicitly
+    await expect(signIn("owner", adminPath)).rejects.toMatchObject({ body: { code: "EMAIL_NOT_VERIFIED" } });
+
+    const cli = await setTemporaryPassword((await prisma.user.findUniqueOrThrow({ where: { username: "owner" } })).id, { markVerified: true });
+    expect((await signIn("owner", cli)).user.id).toBeTruthy();
+    await expect(signIn("owner", "secret1")).rejects.toThrow(); // the old password is gone
   });
 });
 
