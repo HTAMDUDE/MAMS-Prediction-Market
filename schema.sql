@@ -141,6 +141,16 @@ CREATE TABLE IF NOT EXISTS activity (
     created_at    TEXT NOT NULL
 );
 
+-- Who has "entered" each market. Your first bet in a market costs ENTRY_FEE, paid to the market's creator.
+CREATE TABLE IF NOT EXISTS market_entries (
+    market_id  INTEGER NOT NULL REFERENCES markets(id),
+    user_id    INTEGER NOT NULL REFERENCES users(id),
+    creator_id INTEGER NOT NULL REFERENCES users(id),
+    fee        REAL NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (market_id, user_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_activity_user ON activity(user_id, id);
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
 CREATE INDEX IF NOT EXISTS idx_outcomes_market ON outcomes(market_id);

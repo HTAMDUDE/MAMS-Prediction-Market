@@ -45,7 +45,13 @@ BASE_LIQUIDITY = 1000.0
 def market_b(n_outcomes):
     return BASE_LIQUIDITY * math.log2(max(n_outcomes, 2))
 MIN_RULES_LENGTH = 20
-DISPUTE_WINDOW = timedelta(hours=24)  # how long traders can challenge a proposed result
+DISPUTE_WINDOW = timedelta(hours=2)  # how long traders can challenge a proposed result
+DISPUTE_HOURS = int(DISPUTE_WINDOW.total_seconds() // 3600)
+# Making a market costs CREATION_FEE (refunded if you withdraw your proposal, kept if it's rejected), and everyone
+# else pays the market's creator ENTRY_FEE on their first bet in it. Good markets that attract traders earn their
+# creator money; flooding the site with junk proposals costs money.
+CREATION_FEE = 20.0
+ENTRY_FEE = 10.0
 CATEGORIES = ["Academics", "Competitions", "Sports", "Events", "Campus Life", "Weather", "Other"]
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,20}$")
 EPS = 1e-9
@@ -119,7 +125,8 @@ NEW_COLUMNS = {
                 # Over/Under markets: the line, an optional unit ("%", "minutes"), and the measured result.
                 ("ou_line", "REAL"), ("ou_unit", "TEXT NOT NULL DEFAULT ''"), ("ou_result", "REAL")],
     "proposals": [("rules_source", "TEXT NOT NULL DEFAULT ''"), ("rules_otherwise", "TEXT NOT NULL DEFAULT ''"),
-                  ("ou_line", "REAL"), ("ou_unit", "TEXT NOT NULL DEFAULT ''")],
+                  ("ou_line", "REAL"), ("ou_unit", "TEXT NOT NULL DEFAULT ''"),
+                  ("fee", "REAL NOT NULL DEFAULT 0")],  # creation fee paid, refunded on withdrawal
 }
 
 
@@ -320,6 +327,42 @@ def log_activity(db, user_id, kind, amount, market=None, detail=""):
                 market["id"] if market else None, market["question"] if market else "", detail, now_str()))
 
 
+def entry_fee_due(db, m, user_id):
+    """What this user owes the creator before their next bet in market m: ENTRY_FEE on their first bet, else 0.
+    Nothing is owed on markets without a creator, by the creator, or by anyone who traded before fees existed."""
+    if m["created_by"] is None or user_id == m["created_by"]:
+        return 0.0
+    if db.execute("SELECT 1 FROM market_entries WHERE market_id = ? AND user_id = ?", (m["id"], user_id)).fetchone():
+        return 0.0
+    if db.execute("SELECT 1 FROM trades WHERE market_id = ? AND user_id = ? LIMIT 1", (m["id"], user_id)).fetchone():
+        return 0.0
+    return ENTRY_FEE
+
+
+def creator_name(db, m):
+    if m["created_by"] is None:
+        return None
+    row = db.execute("SELECT username FROM users WHERE id = ?", (m["created_by"],)).fetchone()
+    return row["username"] if row else None
+
+
+def refund_entry_fees(db, market_id, user_id=None, reason="Entry fee refunded"):
+    """Give entry fees back (all entrants, or one), taking them back from the creator. Must run inside a
+    transaction. The creator's balance won't go below zero."""
+    m = db.execute("SELECT * FROM markets WHERE id = ?", (market_id,)).fetchone()
+    sql, args = "SELECT * FROM market_entries WHERE market_id = ? AND fee > 0", [market_id]
+    if user_id is not None:
+        sql += " AND user_id = ?"
+        args.append(user_id)
+    for e in db.execute(sql, args).fetchall():
+        payer = db.execute("SELECT username FROM users WHERE id = ?", (e["user_id"],)).fetchone()["username"]
+        db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (e["fee"], e["user_id"]))
+        log_activity(db, e["user_id"], "refund", e["fee"], m, reason)
+        db.execute("UPDATE users SET balance = MAX(0, ROUND(balance - ?, 2)) WHERE id = ?", (e["fee"], e["creator_id"]))
+        log_activity(db, e["creator_id"], "earning", -e["fee"], m, f"Entry fee returned to {payer}")
+        db.execute("DELETE FROM market_entries WHERE market_id = ? AND user_id = ?", (market_id, e["user_id"]))
+
+
 def trade_block_reason(db, user_id, market_id):
     """Why this user can't trade in this market, or None if they can."""
     if db.execute("SELECT 1 FROM trade_bans WHERE user_id = ?", (user_id,)).fetchone():
@@ -353,6 +396,7 @@ def refund_user_in_market(db, user_id, market_id, reason="Refund"):
     if refund > 0:
         db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (refund, user_id))
     log_activity(db, user_id, "refund", refund, m, f"{reason}: your bets here were removed")
+    refund_entry_fees(db, market_id, user_id, f"{reason}: entry fee returned")
     snapshot_prices(db, market_id, m["b"])
     return refund
 
@@ -385,7 +429,7 @@ def ban_user_from_trading(db, user_id):
         raise
 
 
-def check_trade(m, outs, idx, action, value, balance=None, held=None):
+def check_trade(m, outs, idx, action, value, balance=None, held=None, fee=0.0):
     """Validate a trade and price it. Returns (shares, coins): shares bought/sold and coins spent/received.
     Raises TradeError with a user-facing message. balance/held may be None to skip those checks
     (used for logged-out quotes). Shared by execute_trade and the /api/quote preview so they always agree."""
@@ -395,7 +439,10 @@ def check_trade(m, outs, idx, action, value, balance=None, held=None):
         amount = cents(value)
         if amount < MIN_BET:
             raise TradeError(f"Minimum bet is {MIN_BET:.0f} {CURRENCY}.")
-        if balance is not None and amount > balance + EPS:
+        if balance is not None and amount + fee > balance + EPS:
+            if fee:
+                raise TradeError(f"You need Ⓜ{amount + fee:,.2f} (Ⓜ{amount:,.2f} bet + Ⓜ{fee:,.0f} entry fee) "
+                                 f"but have Ⓜ{balance:,.2f}.")
             raise TradeError("You don't have enough MAMS Bucks for that bet.")
         return lmsr.shares_for_amount(q, m["b"], idx, amount), amount
     if action == "sell":
@@ -435,14 +482,24 @@ def execute_trade(db, user_id, market_id, outcome_id, action, value):
         held = pos["shares"] if pos else 0.0
         held_cost = pos["cost"] if pos else 0.0
 
-        shares, coins = check_trade(m, outs, idx, action, value, user["balance"], held)
+        fee = entry_fee_due(db, m, user_id) if action == "buy" else 0.0
+        shares, coins = check_trade(m, outs, idx, action, value, user["balance"], held, fee)
+        if fee:
+            creator = creator_name(db, m)
+            db.execute("UPDATE users SET balance = ROUND(balance - ?, 2) WHERE id = ?", (fee, user_id))
+            log_activity(db, user_id, "fee", -fee, m, f"Entry fee (first bet), paid to {creator}")
+            db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (fee, m["created_by"]))
+            log_activity(db, m["created_by"], "earning", fee, m, f"Entry fee from {user['username']}")
+            db.execute("INSERT INTO market_entries (market_id, user_id, creator_id, fee, created_at) VALUES (?, ?, ?, ?, ?)",
+                       (market_id, user_id, m["created_by"], fee, now_str()))
         q[idx] += shares if action == "buy" else -shares
         now_pct = lmsr.prices(q, m["b"])[idx] * 100
         if action == "buy":
             d_shares, d_cash = shares, -coins
             new_shares, new_cost = held + shares, held_cost + coins
-            msg = (f"You paid Ⓜ{coins:,.2f} for {shares:,.2f} shares of “{label}”. If it wins they pay "
-                   f"Ⓜ{new_shares:,.2f} in total. Price now {now_pct:.0f}%.")
+            msg = (f"You paid Ⓜ{coins:,.2f} for {shares:,.2f} shares of “{label}”"
+                   + (f" plus a Ⓜ{fee:,.0f} entry fee to {creator}" if fee else "") +
+                   f". If it wins they pay Ⓜ{new_shares:,.2f} in total. Price now {now_pct:.0f}%.")
             detail = f"Bought {shares:,.2f} shares of “{label}”"
         else:
             d_shares, d_cash = -shares, coins
@@ -591,6 +648,7 @@ def cancel_market(db, market_id):
             if r["net"] > 0:
                 db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (r["net"], r["user_id"]))
             log_activity(db, r["user_id"], "refund", max(r["net"], 0), m, "Refund: market cancelled")
+        refund_entry_fees(db, market_id, reason="Entry fee refunded: market cancelled")
         db.execute("UPDATE markets SET status = 'cancelled', resolved_at = ? WHERE id = ?", (now_str(), market_id))
         db.execute("COMMIT")
     except Exception:
@@ -613,10 +671,11 @@ def delete_market(db, market_id):
                     db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?",
                                (r["net"], r["user_id"]))
                 log_activity(db, r["user_id"], "refund", max(r["net"], 0), m, "Refund: market deleted")
+            refund_entry_fees(db, market_id, reason="Entry fee refunded: market deleted")
         db.execute("DELETE FROM positions WHERE outcome_id IN (SELECT id FROM outcomes WHERE market_id = ?)",
                    (market_id,))
         db.execute("UPDATE proposals SET market_id = NULL WHERE market_id = ?", (market_id,))
-        for table in ("trades", "price_history", "comments", "market_blocks", "outcomes"):
+        for table in ("trades", "price_history", "comments", "market_blocks", "market_entries", "outcomes"):
             db.execute(f"DELETE FROM {table} WHERE market_id = ?", (market_id,))
         db.execute("DELETE FROM markets WHERE id = ?", (market_id,))
         db.execute("COMMIT")
@@ -626,9 +685,15 @@ def delete_market(db, market_id):
 
 
 def create_market(db, question, description, category, closes_at, labels, b, created_by=None,
-                  rules_source="", rules_otherwise="", ou_line=None, ou_unit=""):
+                  rules_source="", rules_otherwise="", ou_line=None, ou_unit="", charge_fee=False):
     db.execute("BEGIN IMMEDIATE")
     try:
+        if charge_fee:  # an admin making a market directly pays the same fee as a proposer
+            bal = db.execute("SELECT balance FROM users WHERE id = ?", (created_by,)).fetchone()["balance"]
+            if bal + EPS < CREATION_FEE:
+                raise TradeError(f"Making a market costs Ⓜ{CREATION_FEE:,.0f}. You have Ⓜ{bal:,.2f}.")
+            db.execute("UPDATE users SET balance = ROUND(balance - ?, 2) WHERE id = ?", (CREATION_FEE, created_by))
+            log_activity(db, created_by, "fee", -CREATION_FEE, None, f"Market creation fee: “{question}”")
         cur = db.execute(
             "INSERT INTO markets (question, description, category, b, closes_at, created_by, created_at, "
             "rules_source, rules_otherwise, ou_line, ou_unit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -725,7 +790,8 @@ def inject_globals():
         pending = get_db().execute("SELECT COUNT(*) FROM proposals WHERE status = 'pending'").fetchone()[0]
     return {"csrf_token": csrf_token, "user": g.user, "can_bonus": can_bonus, "pending_proposals": pending,
             "owner_id": g.get("owner_id"), "is_owner": is_owner(),
-            "CURRENCY": CURRENCY, "DAILY_BONUS": DAILY_BONUS, "CATEGORIES": CATEGORIES}
+            "CURRENCY": CURRENCY, "DAILY_BONUS": DAILY_BONUS, "CATEGORIES": CATEGORIES,
+            "DISPUTE_HOURS": DISPUTE_HOURS, "CREATION_FEE": CREATION_FEE, "ENTRY_FEE": ENTRY_FEE}
 
 
 @app.template_filter("money")
@@ -923,8 +989,11 @@ def market(mid):
         blocked = db.execute("SELECT u.id, u.username FROM market_blocks mb JOIN users u ON u.id = mb.user_id "
                              "WHERE mb.market_id = ? ORDER BY u.username", (mid,)).fetchall()
         all_users = [r["username"] for r in db.execute("SELECT username FROM users ORDER BY username")]
+    creator = creator_name(db, m)
+    my_entry_fee = entry_fee_due(db, m, g.user["id"]) if g.user else (ENTRY_FEE if creator else 0.0)
     return render_template("market.html", b=b, history=history, trades=trades, comments=comments,
                            my_positions=my_positions, block_reason=block_reason,
+                           creator=creator, my_entry_fee=my_entry_fee,
                            blocked=blocked, all_users=all_users, clarifications=clarifications,
                            disputes=disputes, proposer=proposer, can_dispute=can_dispute)
 
@@ -942,7 +1011,7 @@ def dispute(mid):
 
 @app.route("/how-it-works")
 def how_it_works():
-    return render_template("how_it_works.html", window_hours=int(DISPUTE_WINDOW.total_seconds() // 3600))
+    return render_template("how_it_works.html", window_hours=DISPUTE_HOURS)
 
 
 @app.post("/market/<int:mid>/trade")
@@ -1007,12 +1076,15 @@ def quote():
             pos = db.execute("SELECT shares FROM positions WHERE user_id = ? AND outcome_id = ?",
                              (g.user["id"], oid)).fetchone()
             balance, held = g.user["balance"], pos["shares"] if pos else 0.0
-        shares, coins = check_trade(m, outs, i, action, value, balance, held)
+            fee = entry_fee_due(db, m, g.user["id"]) if action == "buy" else 0.0
+        else:
+            fee = ENTRY_FEE if action == "buy" and m["created_by"] is not None else 0.0
+        shares, coins = check_trade(m, outs, i, action, value, balance, held, fee)
     except TradeError as e:
         return jsonify(ok=False, error=str(e))
     q = [o["shares"] for o in outs]
     q[i] += shares if action == "buy" else -shares
-    return jsonify(ok=True, shares=round(shares, 4), coins=coins,
+    return jsonify(ok=True, shares=round(shares, 4), coins=coins, entry_fee=fee, creator=creator_name(db, m),
                    avg_price=coins / shares if shares else 0,
                    new_price=lmsr.prices(q, m["b"])[i])
 
@@ -1060,6 +1132,7 @@ ACTIVITY_FILTERS = {
     "": None,
     "trades": ("buy", "sell"),
     "results": ("payout", "loss", "refund"),
+    "fees": ("fee", "earning"),
     "other": ("signup", "bonus", "admin"),
 }
 
@@ -1216,10 +1289,15 @@ def admin_create():
     if error:
         flash(error, "error")
         return redirect(url_for("admin"))
-    mid = create_market(get_db(), fields["question"], fields["description"], fields["category"],
-                        fields["closes_at"], fields["labels"], fields["b"], g.user["id"],
-                        fields["rules_source"], fields["rules_otherwise"], fields["ou_line"], fields["ou_unit"])
-    flash("Market created.", "success")
+    try:
+        mid = create_market(get_db(), fields["question"], fields["description"], fields["category"],
+                            fields["closes_at"], fields["labels"], fields["b"], g.user["id"],
+                            fields["rules_source"], fields["rules_otherwise"], fields["ou_line"], fields["ou_unit"],
+                            charge_fee=True)
+    except TradeError as e:
+        flash(str(e), "error")
+        return redirect(url_for("admin"))
+    flash(f"Market created. You paid the Ⓜ{CREATION_FEE:,.0f} creation fee.", "success")
     return redirect(url_for("market", mid=mid))
 
 
@@ -1238,16 +1316,34 @@ def propose():
         fields, error = read_market_form(request.form)
         if pending >= MAX_PENDING_PROPOSALS:
             error = f"You already have {MAX_PENDING_PROPOSALS} proposals waiting. Wait for an admin to review them."
+        elif not error and g.user["balance"] + EPS < CREATION_FEE:
+            error = f"Proposing a market costs Ⓜ{CREATION_FEE:,.0f}. You have Ⓜ{g.user['balance']:,.2f}."
         if error:
             flash(error, "error")
             return render_template("propose.html", form=request.form, mine=my_proposals(db))
-        db.execute(
-            "INSERT INTO proposals (user_id, question, description, category, outcomes, closes_at, created_at, "
-            "rules_source, rules_otherwise, ou_line, ou_unit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (g.user["id"], fields["question"], fields["description"], fields["category"],
-             json.dumps(fields["labels"]), fields["closes_at"], now_str(),
-             fields["rules_source"], fields["rules_otherwise"], fields["ou_line"], fields["ou_unit"]))
-        flash("Thanks! Your market was sent to the admins for approval.", "success")
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            charged = db.execute("UPDATE users SET balance = ROUND(balance - ?, 2) WHERE id = ? AND balance >= ?",
+                                 (CREATION_FEE, g.user["id"], CREATION_FEE - EPS)).rowcount
+            if not charged:
+                raise TradeError(f"Proposing a market costs Ⓜ{CREATION_FEE:,.0f}.")
+            log_activity(db, g.user["id"], "fee", -CREATION_FEE, None, f"Market proposal fee: “{fields['question']}”")
+            db.execute(
+                "INSERT INTO proposals (user_id, question, description, category, outcomes, closes_at, created_at, "
+                "rules_source, rules_otherwise, ou_line, ou_unit, fee) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (g.user["id"], fields["question"], fields["description"], fields["category"],
+                 json.dumps(fields["labels"]), fields["closes_at"], now_str(),
+                 fields["rules_source"], fields["rules_otherwise"], fields["ou_line"], fields["ou_unit"], CREATION_FEE))
+            db.execute("COMMIT")
+        except TradeError as e:
+            db.execute("ROLLBACK")
+            flash(str(e), "error")
+            return render_template("propose.html", form=request.form, mine=my_proposals(db))
+        except Exception:
+            db.execute("ROLLBACK")
+            raise
+        flash(f"Thanks! Your market was sent to the admins for approval. You paid the Ⓜ{CREATION_FEE:,.0f} fee.",
+              "success")
         return redirect(url_for("propose"))
     return render_template("propose.html", form={}, mine=my_proposals(db))
 
@@ -1260,10 +1356,20 @@ def my_proposals(db):
 @app.post("/propose/<int:pid>/withdraw")
 @login_required
 def withdraw_proposal(pid):
-    cur = get_db().execute("DELETE FROM proposals WHERE id = ? AND user_id = ? AND status = 'pending'",
-                           (pid, g.user["id"]))
-    flash("Proposal withdrawn." if cur.rowcount else "That proposal can't be withdrawn.",
-          "success" if cur.rowcount else "error")
+    db = get_db()
+    db.execute("BEGIN IMMEDIATE")
+    p = db.execute("SELECT * FROM proposals WHERE id = ? AND user_id = ? AND status = 'pending'",
+                   (pid, g.user["id"])).fetchone()
+    if p:
+        db.execute("DELETE FROM proposals WHERE id = ?", (pid,))
+        if p["fee"] > 0:
+            db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (p["fee"], g.user["id"]))
+            log_activity(db, g.user["id"], "refund", p["fee"], None, f"Proposal withdrawn, fee refunded: “{p['question']}”")
+    db.execute("COMMIT")
+    if p:
+        flash("Proposal withdrawn." + (f" Your Ⓜ{p['fee']:,.0f} fee was refunded." if p["fee"] > 0 else ""), "success")
+    else:
+        flash("That proposal can't be withdrawn.", "error")
     return redirect(url_for("propose"))
 
 
@@ -1339,7 +1445,7 @@ def admin_propose_result(mid):
         propose_result(db, mid, outcome_id, g.user["id"])
         if actual is not None:
             db.execute("UPDATE markets SET ou_result = ? WHERE id = ?", (actual, mid))
-        flash("Result proposed. It finalizes in 24 hours unless someone disputes it.", "success")
+        flash(f"Result proposed. It finalizes in {DISPUTE_HOURS} hours unless someone disputes it.", "success")
     except (TradeError, ValueError) as e:
         flash(str(e) or "Pick a winning outcome.", "error")
     return redirect(request.referrer or url_for("market", mid=mid))

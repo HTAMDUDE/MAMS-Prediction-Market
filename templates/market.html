@@ -114,11 +114,17 @@
     {% if b.state == 'open' %}
     <div class="card trade-card" id="trade">
       <h2>Place a bet</h2>
+      {% if creator %}
+        <p class="fee-note">Market by <b>{{ creator }}</b>.
+          {% if my_entry_fee %}Your first bet here includes a <b>Ⓜ{{ my_entry_fee|int }} entry fee</b> that goes to {{ creator }}.
+          {% elif user and user.username == creator %}This is your market: you earn Ⓜ{{ ENTRY_FEE|int }} from each new trader.
+          {% elif user %}You've already paid the entry fee here.{% endif %}</p>
+      {% endif %}
       {% if user and block_reason %}
         <p class="muted">{{ block_reason }}</p>
       {% elif user %}
       <form method="post" action="{{ url_for('trade', mid=b.m.id) }}" id="trade-form"
-            data-market="{{ b.m.id }}" data-quote="{{ url_for('quote') }}">
+            data-market="{{ b.m.id }}" data-quote="{{ url_for('quote') }}" data-entry-fee="{{ my_entry_fee }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="action" value="buy">
         <div class="seg">
@@ -161,7 +167,7 @@
         {% if b.m.proposed_at %}Proposed {{ b.m.proposed_at|when }} · finalized {{ b.m.resolved_at|when }}.{% endif %}</p>
     </div>
     {% elif b.state == 'closed' %}
-    <div class="card"><h2>Betting closed</h2><p class="muted">An admin will propose a result once it's known. You'll then have 24 hours to dispute it before winners are paid.</p></div>
+    <div class="card"><h2>Betting closed</h2><p class="muted">An admin will propose a result once it's known. You'll then have {{ DISPUTE_HOURS }} hours to dispute it before winners are paid.</p></div>
     {% elif b.state in ('proposed', 'disputed') %}
     <div class="card" id="proposed-result">
       <h2>Proposed result</h2>
@@ -193,7 +199,7 @@
         <p class="muted small">You can propose a result once betting closes.</p>
       {% else %}
       <form method="post" action="{{ url_for('admin_propose_result', mid=b.m.id) }}"
-            onsubmit="return confirm('Propose this result? Traders get 24 hours to dispute it before winners are paid.')">
+            onsubmit="return confirm('Propose this result? Traders get {{ DISPUTE_HOURS }} hours to dispute it before winners are paid.')">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         {% if b.ou %}
         <label class="field"><span>{{ 'Change the actual number' if b.state in ('proposed', 'disputed') else 'Actual number' }}{% if b.m.ou_unit %} <em class="muted">({{ b.m.ou_unit }})</em>{% endif %}</span>

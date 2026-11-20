@@ -86,6 +86,7 @@ function setupTradeForm(form) {
   const maxBtn = form.querySelector('#max-btn');
   const quick = form.querySelector('#quick');
   const balance = parseFloat(maxBtn.dataset.balance);
+  const entryFee = parseFloat(form.dataset.entryFee) || 0;  // charged on your first bet in this market
   let timer = null, seq = 0;
 
   const selected = () => form.querySelector('input[name=outcome_id]:checked');
@@ -134,15 +135,19 @@ function setupTradeForm(form) {
         const newPct = `${(res.new_price * 100).toFixed(1)}%`;
         const name = outcomeName();
         if (isBuy()) {
+          const fee = res.entry_fee || 0;
+          const total = res.coins + fee;
           setPreview(
-            row('You pay', money(res.coins), 'total down') +
+            row('You pay', money(total), 'total down') +
+            (fee ? row('Bet', money(res.coins)) +
+                   row(`Entry fee (first bet${res.creator ? `, to ${res.creator}` : ''})`, money(fee)) : '') +
             row('You get', `${fmt(res.shares)} shares`) +
             row('Avg price per share', money(res.avg_price)) +
-            row('If it wins', `you get ${money(res.shares)} (${signed(res.shares - res.coins)})`, 'up') +
-            row('If it loses', `you lose ${money(res.coins)}`, 'down') +
-            row('Balance after', money(balance - res.coins)) +
+            row('If it wins', `you get ${money(res.shares)} (${signed(res.shares - total)})`, 'up') +
+            row('If it loses', `you lose ${money(total)}`, 'down') +
+            row('Balance after', money(balance - total)) +
             row('New price', newPct),
-            true, `Pay ${money(res.coins)} for “${name}”`);
+            true, `Pay ${money(total)} for “${name}”`);
         } else {
           const costOfThese = held() > 0 ? paid() * Math.min(res.shares / held(), 1) : 0;
           setPreview(
@@ -169,12 +174,12 @@ function setupTradeForm(form) {
   form.querySelectorAll('input[name=outcome_id]').forEach(r => r.addEventListener('change', refresh));
   valueInput.addEventListener('input', requestQuote);
   maxBtn.addEventListener('click', () => {
-    valueInput.value = isBuy() ? Math.floor(balance * 100) / 100 : held();
+    valueInput.value = isBuy() ? Math.max(0, Math.floor((balance - entryFee) * 100) / 100) : held();
     requestQuote();
   });
   quick.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
     const next = (parseFloat(valueInput.value) || 0) + parseFloat(b.dataset.amt);
-    valueInput.value = Math.min(next, Math.floor(balance * 100) / 100);
+    valueInput.value = Math.min(next, Math.max(0, Math.floor((balance - entryFee) * 100) / 100));
     requestQuote();
   }));
   refresh();

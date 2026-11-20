@@ -95,7 +95,9 @@ def test_full_flow():
                  follow_redirects=True)
     assert "You paid" in r.get_data(as_text=True)
     bal = db.execute("SELECT balance FROM users WHERE username='bob'").fetchone()[0]
-    assert bal == pytest.approx(900)
+    assert bal == pytest.approx(890)  # Ⓜ100 bet + Ⓜ10 entry fee on his first bet in this market
+    # the admin paid Ⓜ20 to create the market and earned Bob's Ⓜ10 entry fee
+    assert db.execute("SELECT balance FROM users WHERE username='teacher'").fetchone()[0] == pytest.approx(990)
     shares = db.execute("SELECT shares FROM positions WHERE outcome_id=?", (yes,)).fetchone()[0]
     assert shares > 100  # bought below 1 coin/share
 
@@ -121,14 +123,14 @@ def test_full_flow():
     # after the close, an admin proposes Yes; nobody is paid until the window ends
     db.execute("UPDATE markets SET closes_at = ? WHERE id = ?", (past(), mid))
     admin.post(f"/admin/markets/{mid}/propose-result", data={"csrf_token": tok, "outcome_id": yes})
-    assert db.execute("SELECT balance FROM users WHERE username='bob'").fetchone()[0] == pytest.approx(900)
+    assert db.execute("SELECT balance FROM users WHERE username='bob'").fetchone()[0] == pytest.approx(890)
     assert "Proposed result" in bob.get(f"/market/{mid}").get_data(as_text=True)
 
     # window ends with no dispute -> the next request finalizes and pays 1 per share
     db.execute("UPDATE markets SET finalizes_at = ? WHERE id = ?", (past(), mid))
     bob.get("/")
     bal = db.execute("SELECT balance FROM users WHERE username='bob'").fetchone()[0]
-    assert bal == pytest.approx(900 + shares, abs=0.01)
+    assert bal == pytest.approx(890 + shares, abs=0.01)
 
     # no more trading after resolution
     tok = csrf(bob.get(f"/market/{mid}"))
@@ -1145,5 +1147,175 @@ def test_activity_feed_pages_back_through_history():
         before = re.search(r"before=(\d+)", first).group(1)
         second = client.get(f"/activity?before={before}").get_data(as_text=True)
         assert second.count('class="kind kind-') == 5 and "Older trades" not in second
+    finally:
+        appmod.DB_PATH = old
+
+
+# ---------------------------------------------------------------- fees & dispute window
+
+def test_dispute_window_is_two_hours():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        assert appmod.DISPUTE_WINDOW == timedelta(hours=2) and appmod.DISPUTE_HOURS == 2
+        aid = db.execute("INSERT INTO users (username, password_hash, balance, is_admin, created_at) VALUES ('w', 'x', 0, 1, ?)",
+                         (appmod.now_str(),)).lastrowid
+        past = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+        mid = appmod.create_market(db, "Window?", RULES, "Other", past, ["Yes", "No"], 1000)
+        appmod.propose_result(db, mid, appmod.get_outcomes(db, mid)[0]["id"], aid)
+        fin = appmod.parse_dt(db.execute("SELECT finalizes_at FROM markets WHERE id=?", (mid,)).fetchone()[0])
+        assert timedelta(minutes=119) < fin - datetime.now() <= timedelta(hours=2)
+        assert "2 hours" in appmod.app.test_client().get("/how-it-works").get_data(as_text=True)
+    finally:
+        appmod.DB_PATH = old
+
+
+def test_creation_fee_for_proposals_and_admin_markets():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        admin, kid = appmod.app.test_client(), appmod.app.test_client()
+        signup(admin, "feeboss")
+        signup(kid, "feekid")
+        bal = lambda n: db.execute("SELECT balance FROM users WHERE username=?", (n,)).fetchone()[0]
+        closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M")
+        form = lambda q: {"kind": "yesno", "question": q, "description": RULES, "category": "Events", "closes_at": closes}
+
+        def propose(q):
+            return kid.post("/propose", data={"csrf_token": csrf(kid.get("/propose")), **form(q)}, follow_redirects=True)
+
+        assert "Costs Ⓜ20 to propose" in kid.get("/propose").get_data(as_text=True)
+        assert "You paid the Ⓜ20 fee" in propose("Kept?").get_data(as_text=True)
+        assert bal("feekid") == 980
+        propose("Withdrawn?")
+        assert bal("feekid") == 960
+
+        # withdrawing refunds; rejecting keeps the fee
+        pid = db.execute("SELECT id FROM proposals WHERE question='Withdrawn?'").fetchone()[0]
+        r = kid.post(f"/propose/{pid}/withdraw", data={"csrf_token": csrf(kid.get("/propose"))}, follow_redirects=True)
+        assert "Ⓜ20 fee was refunded" in r.get_data(as_text=True) and bal("feekid") == 980
+        pid = db.execute("SELECT id FROM proposals WHERE question='Kept?'").fetchone()[0]
+        admin.post(f"/admin/proposals/{pid}", data={"csrf_token": csrf(admin.get(f"/admin/proposals/{pid}")),
+                                                     "decision": "reject", "review_note": "Too vague"})
+        assert bal("feekid") == 980
+        assert "fee kept" in kid.get("/propose").get_data(as_text=True)
+
+        # approving doesn't charge again
+        propose("Approved?")
+        pid = db.execute("SELECT id FROM proposals WHERE question='Approved?'").fetchone()[0]
+        admin.post(f"/admin/proposals/{pid}", data={"csrf_token": csrf(admin.get(f"/admin/proposals/{pid}")),
+                                                     "decision": "approve", **form("Approved?")})
+        assert bal("feekid") == 960 and bal("feeboss") == 1000
+
+        # can't propose without Ⓜ20
+        db.execute("UPDATE users SET balance = 15 WHERE username='feekid'")
+        assert "costs Ⓜ20" in propose("Broke?").get_data(as_text=True)
+        assert db.execute("SELECT COUNT(*) FROM proposals WHERE question='Broke?'").fetchone()[0] == 0
+        assert bal("feekid") == 15
+
+        # admins pay too when creating directly
+        r = admin.post("/admin/markets", data={"csrf_token": csrf(admin.get("/admin")), **form("Admin made?")},
+                       follow_redirects=True)
+        assert "You paid the Ⓜ20 creation fee" in r.get_data(as_text=True) and bal("feeboss") == 980
+        db.execute("UPDATE users SET balance = 5 WHERE username='feeboss'")
+        r = admin.post("/admin/markets", data={"csrf_token": csrf(admin.get("/admin")), **form("Too poor?")},
+                       follow_redirects=True)
+        assert "costs Ⓜ20" in r.get_data(as_text=True)
+        assert db.execute("SELECT COUNT(*) FROM markets WHERE question='Too poor?'").fetchone()[0] == 0
+        kinds = [r[0] for r in db.execute("SELECT kind FROM activity WHERE user_id=(SELECT id FROM users WHERE username='feekid')")]
+        assert kinds.count("fee") == 3 and kinds.count("refund") == 1  # Kept, Withdrawn, Approved; Broke? was blocked
+    finally:
+        appmod.DB_PATH = old
+
+
+def test_entry_fee_paid_to_creator_once_per_trader():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        ids = {}
+        for n in ("maker", "t1", "t2", "oldtimer"):
+            ids[n] = db.execute("INSERT INTO users (username, password_hash, balance, created_at) VALUES (?, 'x', 1000, ?)",
+                                (n, appmod.now_str())).lastrowid
+        bal = lambda n: db.execute("SELECT balance FROM users WHERE id=?", (ids[n],)).fetchone()[0]
+        closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+        mid = appmod.create_market(db, "Fee market?", RULES, "Other", closes, ["Yes", "No"], 1000, ids["maker"])
+        yes, no = [o["id"] for o in appmod.get_outcomes(db, mid)]
+
+        # someone who traded before entry fees existed isn't charged
+        db.execute("INSERT INTO trades (user_id, market_id, outcome_id, shares, amount, created_at) VALUES (?, ?, ?, 0, 0, ?)",
+                   (ids["oldtimer"], mid, yes, appmod.now_str()))
+        appmod.execute_trade(db, ids["oldtimer"], mid, yes, "buy", 50)
+        assert bal("oldtimer") == 950
+
+        msg = appmod.execute_trade(db, ids["t1"], mid, yes, "buy", 100)
+        assert "plus a Ⓜ10 entry fee to maker" in msg
+        assert bal("t1") == 890 and bal("maker") == 1010
+        appmod.execute_trade(db, ids["t1"], mid, no, "buy", 100)          # second bet, other side: no fee
+        assert bal("t1") == 790 and bal("maker") == 1010
+        held = db.execute("SELECT shares FROM positions WHERE user_id=? AND outcome_id=?", (ids["t1"], yes)).fetchone()[0]
+        before = bal("t1")
+        appmod.execute_trade(db, ids["t1"], mid, yes, "sell", held / 2)   # selling never costs a fee
+        assert bal("maker") == 1010 and bal("t1") > before
+        appmod.execute_trade(db, ids["maker"], mid, yes, "buy", 20)        # creator's own market: no fee
+        assert bal("maker") == 990
+
+        # the bet plus the fee must fit in your balance
+        db.execute("UPDATE users SET balance = 105 WHERE id=?", (ids["t2"],))
+        with pytest.raises(appmod.TradeError, match=r"need Ⓜ110.00"):
+            appmod.execute_trade(db, ids["t2"], mid, yes, "buy", 100)
+        assert bal("t2") == 105 and bal("maker") == 990
+        appmod.execute_trade(db, ids["t2"], mid, yes, "buy", 95)
+        assert bal("t2") == 0 and bal("maker") == 1000
+
+        # markets with no creator have no fee
+        free = appmod.create_market(db, "Free?", RULES, "Other", closes, ["Yes", "No"], 1000)
+        db.execute("UPDATE users SET balance = 100 WHERE id=?", (ids["t2"],))
+        appmod.execute_trade(db, ids["t2"], free, appmod.get_outcomes(db, free)[0]["id"], "buy", 100)
+        assert bal("t2") == 0
+
+        # activity shows the fee and the creator's earnings
+        assert db.execute("SELECT COUNT(*) FROM activity WHERE user_id=? AND kind='earning'", (ids["maker"],)).fetchone()[0] == 2
+        assert db.execute("SELECT detail FROM activity WHERE user_id=? AND kind='fee'", (ids["t1"],)).fetchone()[0] \
+            == "Entry fee (first bet), paid to maker"
+    finally:
+        appmod.DB_PATH = old
+
+
+def test_entry_fees_refunded_on_cancel_and_block_and_shown_in_quote():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        maker, trader = appmod.app.test_client(), appmod.app.test_client()
+        signup(maker, "qmaker")
+        signup(trader, "qtrader")
+        uid = lambda n: db.execute("SELECT id FROM users WHERE username=?", (n,)).fetchone()[0]
+        bal = lambda n: db.execute("SELECT balance FROM users WHERE username=?", (n,)).fetchone()[0]
+        closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+        mid = appmod.create_market(db, "Quote fee?", RULES, "Other", closes, ["Yes", "No"], 1000, uid("qmaker"))
+        yes = appmod.get_outcomes(db, mid)[0]["id"]
+
+        page = trader.get(f"/market/{mid}").get_data(as_text=True)
+        assert "Ⓜ10 entry fee" in page and 'data-entry-fee="10.0"' in page
+        q = trader.get(f"/api/quote?market={mid}&outcome={yes}&action=buy&value=50").get_json()
+        assert q["ok"] and q["entry_fee"] == 10 and q["creator"] == "qmaker" and q["coins"] == 50
+        assert maker.get(f"/api/quote?market={mid}&outcome={yes}&action=buy&value=50").get_json()["entry_fee"] == 0
+        assert "you earn Ⓜ10" in maker.get(f"/market/{mid}").get_data(as_text=True)
+
+        appmod.execute_trade(db, uid("qtrader"), mid, yes, "buy", 50)
+        assert trader.get(f"/api/quote?market={mid}&outcome={yes}&action=buy&value=50").get_json()["entry_fee"] == 0
+        assert "already paid the entry fee" in trader.get(f"/market/{mid}").get_data(as_text=True)
+        assert (bal("qtrader"), bal("qmaker")) == (940, 1010)
+
+        # blocked: bet and entry fee both come back, creator gives the fee back
+        appmod.block_user_in_market(db, uid("qtrader"), mid)
+        assert (bal("qtrader"), bal("qmaker")) == (1000, 1000)
+
+        # cancelled: same
+        mid2 = appmod.create_market(db, "Cancel fee?", RULES, "Other", closes, ["Yes", "No"], 1000, uid("qmaker"))
+        appmod.execute_trade(db, uid("qtrader"), mid2, appmod.get_outcomes(db, mid2)[0]["id"], "buy", 30)
+        assert (bal("qtrader"), bal("qmaker")) == (960, 1010)
+        appmod.cancel_market(db, mid2)
+        assert (bal("qtrader"), bal("qmaker")) == (1000, 1000)
+        assert "Entry fee refunded: market cancelled" in trader.get("/activity/mine").get_data(as_text=True)
     finally:
         appmod.DB_PATH = old

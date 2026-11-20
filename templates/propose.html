@@ -20,7 +20,12 @@
           <li><b>Nothing private</b>: no grades, health or questions about individual people.</li>
         </ul>
       </div>
-      <button class="btn">Send for approval</button>
+      <div class="fee-box">
+        <strong>Costs Ⓜ{{ CREATION_FEE|int }} to propose.</strong> Refunded if you withdraw it; kept if an admin rejects it.
+        Once your market is live, <b>every trader pays you Ⓜ{{ ENTRY_FEE|int }}</b> on their first bet, so a market lots of
+        people want to bet on earns you money.
+      </div>
+      <button class="btn">Send for approval · Ⓜ{{ CREATION_FEE|int }}</button>
     </form>
   </div>
 
@@ -37,7 +42,7 @@
       <div class="proposal">
         <div class="card-meta">
           <span class="tag">{{ p.category }}</span>
-          <span class="status status-{{ p.status }}">{{ {'pending': 'Waiting for review', 'approved': 'Approved', 'rejected': 'Not approved'}[p.status] }}</span>
+          <span class="status status-{{ p.status }}">{{ {'pending': 'Waiting for review', 'approved': 'Approved', 'rejected': 'Not approved'}[p.status] }}{% if p.fee and p.status == 'rejected' %} · Ⓜ{{ p.fee|int }} fee kept{% endif %}</span>
         </div>
         <strong>{{ p.question }}</strong>
         <div class="muted small">{{ p.outcomes|join(' · ') }} — sent {{ p.created_at|ago }}</div>

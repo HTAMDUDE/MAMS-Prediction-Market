@@ -10,11 +10,12 @@
   <div class="kpi"><span>Spent buying shares</span><strong class="down">Ⓜ{{ (-(totals.buy or 0))|money }}</strong></div>
   <div class="kpi"><span>Got back from selling</span><strong class="up">Ⓜ{{ (totals.sell or 0)|money }}</strong></div>
   <div class="kpi"><span>Won in payouts</span><strong class="up">Ⓜ{{ (totals.payout or 0)|money }}</strong></div>
+  <div class="kpi"><span>Earned from your markets</span><strong class="up">Ⓜ{{ (totals.earning or 0)|money }}</strong></div>
   <div class="kpi"><span>Balance now</span><strong>Ⓜ{{ target.balance|money }}</strong></div>
 </div>
 
 <div class="tabs">
-  {% for key, label in [('', 'All'), ('trades', 'Buys & sells'), ('results', 'Payouts & refunds'), ('other', 'Bonuses & other')] %}
+  {% for key, label in [('', 'All'), ('trades', 'Buys & sells'), ('results', 'Payouts & refunds'), ('fees', 'Fees & earnings'), ('other', 'Bonuses & other')] %}
     <a href="{{ url_for('balance_history', show=key or None, user=target.username if viewing_other else None) }}" class="tab {{ 'active' if show == key }}">{{ label }}</a>
   {% endfor %}
 </div>
@@ -29,7 +30,7 @@
       <tr>
         <td class="muted small nowrap" title="{{ r.created_at|when }}">{{ r.created_at|ago }}</td>
         <td>
-          <span class="kind kind-{{ r.kind }}">{{ {'signup': 'Joined', 'bonus': 'Bonus', 'buy': 'Bought', 'sell': 'Sold', 'payout': 'Won', 'loss': 'Lost', 'refund': 'Refund', 'admin': 'Admin'}[r.kind] or r.kind }}</span>
+          <span class="kind kind-{{ r.kind }}">{{ {'signup': 'Joined', 'bonus': 'Bonus', 'buy': 'Bought', 'sell': 'Sold', 'payout': 'Won', 'loss': 'Lost', 'refund': 'Refund', 'admin': 'Admin', 'fee': 'Fee', 'earning': 'Earned'}[r.kind] or r.kind }}</span>
           {{ r.detail }}
           {% if r.market_title %}
             <div class="muted small">

@@ -48,13 +48,13 @@ h3 { font-size: 1.02rem; margin: .4em 0 .7em; line-height: 1.35; }
 
 /* top bar */
 .topbar { background: var(--surface); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10; }
-.topbar-inner { display: flex; align-items: center; gap: 20px; min-height: 60px; flex-wrap: wrap; padding-top: 8px; padding-bottom: 8px; }
+.topbar-inner { display: flex; align-items: center; gap: 14px; min-height: 60px; flex-wrap: wrap; padding-top: 8px; padding-bottom: 8px; }
 .brand { display: flex; align-items: center; gap: 10px; color: var(--text); font-size: 1.02rem; }
 .brand:hover { text-decoration: none; }
 .logo { width: 32px; height: 32px; border-radius: 8px; background: var(--brand); color: var(--brand-ink);
         display: grid; place-items: center; font-weight: 700; }
-.nav { display: flex; gap: 4px; flex: 1; }
-.nav a { color: var(--muted); padding: 6px 8px; border-radius: 8px; font-weight: 500; white-space: nowrap; }
+.nav { display: flex; gap: 2px; flex: 1; }
+.nav a { color: var(--muted); padding: 6px 6px; border-radius: 8px; font-weight: 500; white-space: nowrap; font-size: .92rem; }
 .nav a:hover { background: var(--surface-2); text-decoration: none; }
 .nav a.active { color: var(--text); background: var(--surface-2); }
 .account { display: flex; align-items: center; gap: 8px; }
@@ -272,6 +272,7 @@ main { padding-top: 8px; padding-bottom: 32px; }
 .outcome-pick.binary label:last-child span { color: var(--down); }
 .outcome-pick.binary label:first-child input:checked + span { border-color: var(--up); box-shadow: inset 0 0 0 1px var(--up); background: color-mix(in srgb, var(--up) 12%, var(--surface)); }
 .outcome-pick.binary label:last-child input:checked + span { border-color: var(--down); box-shadow: inset 0 0 0 1px var(--down); background: color-mix(in srgb, var(--down) 12%, var(--surface)); }
+.kind-seg { grid-template-columns: repeat(3, 1fr); }
 .kind-seg label { display: block; }
 .kind-seg input { position: absolute; opacity: 0; width: 0; }
 .kind-seg span { display: block; text-align: center; font-weight: 600; color: var(--muted); padding: 7px; border-radius: 8px; cursor: pointer; }
@@ -310,3 +311,10 @@ main { padding-top: 8px; padding-bottom: 32px; }
 .activity-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
 .activity-head p { margin-top: 0; }
 .filters { margin-top: 12px; align-items: center; }
+
+/* fees */
+.fee-note { font-size: .85rem; color: var(--muted); margin: -4px 0 12px; }
+.fee-box { font-size: .9rem; background: color-mix(in srgb, var(--gold) 14%, var(--surface)); border: 1px solid
+           color-mix(in srgb, var(--gold) 40%, transparent); border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; }
+.kind-fee { background: color-mix(in srgb, var(--down) 12%, transparent); color: var(--down); }
+.kind-earning { background: color-mix(in srgb, var(--up) 14%, transparent); color: var(--up); }

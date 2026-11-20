@@ -76,7 +76,7 @@
     <div><span class="step">1</span><h4>Pick a market</h4><p>Each market is a question about a Mass Academy event with two or more possible outcomes.</p></div>
     <div><span class="step">2</span><h4>Buy shares</h4><p>A share at 30% costs about Ⓜ0.30. If that outcome happens, every share pays Ⓜ1. Buying pushes the price up.</p></div>
     <div><span class="step">3</span><h4>Sell any time</h4><p>Changed your mind? Sell shares back before the market closes at the current price.</p></div>
-    <div><span class="step">4</span><h4>Climb the board</h4><p>After a result is announced, an admin proposes it and everyone has 24 hours to dispute it. Then winners are paid. <a href="{{ url_for('how_it_works') }}">Read the full guide</a>.</p></div>
+    <div><span class="step">4</span><h4>Climb the board</h4><p>After a result is announced, an admin proposes it and everyone has {{ DISPUTE_HOURS }} hours to dispute it. Then winners are paid. <a href="{{ url_for('how_it_works') }}">Read the full guide</a>.</p></div>
   </div>
 </section>
 {% endblock %}

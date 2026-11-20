@@ -20,7 +20,7 @@
       <a href="{{ url_for('index') }}" class="{{ 'active' if request.endpoint in ('index', 'market') }}">Markets</a>
       <a href="{{ url_for('leaderboard') }}" class="{{ 'active' if request.endpoint == 'leaderboard' }}">Leaderboard</a>
       <a href="{{ url_for('activity') }}" class="{{ 'active' if request.endpoint in ('activity', 'balance_history') }}">Activity</a>
-      <a href="{{ url_for('how_it_works') }}" class="{{ 'active' if request.endpoint == 'how_it_works' }}">How it works</a>
+      {% if not user or request.endpoint == 'how_it_works' %}<a href="{{ url_for('how_it_works') }}" class="{{ 'active' if request.endpoint == 'how_it_works' }}">How it works</a>{% endif %}
       {% if user %}
         <a href="{{ url_for('portfolio') }}" class="{{ 'active' if request.endpoint == 'portfolio' }}">Portfolio</a>
         <a href="{{ url_for('propose') }}" class="{{ 'active' if request.endpoint == 'propose' }}">Propose</a>
@@ -32,7 +32,7 @@
         {% if can_bonus %}
           <form method="post" action="{{ url_for('bonus') }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button class="btn btn-small btn-gold" title="Claim your free daily MAMS Bucks">+{{ DAILY_BONUS|int }} daily</button>
+            <button class="btn btn-small btn-gold" title="Claim your free daily {{ DAILY_BONUS|int }} MAMS Bucks">+{{ DAILY_BONUS|int }} bonus</button>
           </form>
         {% endif %}
         <a class="balance" href="{{ url_for('portfolio') }}" title="Your {{ CURRENCY }}">
@@ -61,6 +61,7 @@
 
 <footer class="wrap footer">
   Play money only — {{ CURRENCY }} have no cash value. Prices are the crowd's estimate of how likely each outcome is.
+  <a href="{{ url_for('how_it_works') }}">How it works</a>
 </footer>
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 {% block scripts %}{% endblock %}
