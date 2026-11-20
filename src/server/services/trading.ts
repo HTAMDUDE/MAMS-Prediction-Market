@@ -1,4 +1,5 @@
-import { CURRENCY, cents, EPS, MIN_BET } from "@/lib/constants";
+import { cents, EPS, MIN_BET } from "@/lib/constants";
+import { money, pct } from "@/lib/format";
 import { prisma, type Db } from "@/lib/db";
 import * as lmsr from "@/lib/lmsr";
 import { getOutcomes, marketState, snapshotPrices } from "./markets";
@@ -33,8 +34,8 @@ export function checkTrade(
   const label = outs[idx].label;
   if (action === "buy") {
     const amount = cents(value);
-    if (amount < MIN_BET) throw new TradeError(`Minimum bet is ${MIN_BET.toFixed(0)} ${CURRENCY}.`);
-    if (balance !== null && amount > balance + EPS) throw new TradeError("You don't have enough MAMS Bucks for that bet.");
+    if (amount < MIN_BET) throw new TradeError(`Minimum bet is Ⓜ${MIN_BET.toFixed(0)}.`);
+    if (balance !== null && amount > balance + EPS) throw new TradeError(`You don't have enough for that bet. Your balance is Ⓜ${money(balance)}.`);
     return { shares: lmsr.sharesForAmount(q, m.b, idx, amount), coins: amount };
   }
   if (action === "sell") {
@@ -42,13 +43,15 @@ export function checkTrade(
     if (held !== null && Math.abs(shares - held) < 1e-6) shares = held;
     if (shares <= EPS) throw new TradeError("Enter a number of shares to sell.");
     if (held !== null && shares > held + EPS) throw new TradeError(`You only own ${held.toFixed(2)} shares of “${label}”.`);
-    return { shares, coins: Math.floor(lmsr.sellValue(q, m.b, idx, shares) * 100) / 100 };
+    const coins = Math.floor(lmsr.sellValue(q, m.b, idx, shares) * 100) / 100;
+    if (coins < 0.01) throw new TradeError("That's worth less than Ⓜ0.01. Sell more shares at once.");
+    return { shares, coins };
   }
   throw new TradeError("Unknown action.");
 }
 
 /** Buy (value = coins to spend) or sell (value = shares to sell). Returns a status message. */
-export async function executeTrade(userId: string, marketId: number, outcomeId: number, action: TradeAction, value: number): Promise<string> {
+export async function executeTrade(userId: string, marketId: number, outcomeId: number, action: TradeAction, value: number, minOut: number | null = null): Promise<string> {
   return prisma.$transaction(async (tx) => {
     await lockMarket(tx, marketId);
     const m = await tx.market.findUnique({ where: { id: marketId } });
@@ -67,20 +70,25 @@ export async function executeTrade(userId: string, marketId: number, outcomeId: 
     const heldCost = pos?.cost ?? 0;
 
     const { shares, coins } = checkTrade(m, outs, idx, action, value, user.balance, held);
+    // Slippage guard: the client sends what it was quoted (minus a tolerance); refuse if the price has moved against them.
+    const got = action === "buy" ? shares : coins;
+    if (minOut !== null && got < minOut - 1e-9) {
+      throw new TradeError("The price moved since your quote. Check the new quote and try again.");
+    }
     const q = outs.map((o) => o.shares);
     q[idx] += action === "buy" ? shares : -shares;
-    const nowPct = lmsr.prices(q, m.b)[idx] * 100;
+    const nowPrice = lmsr.prices(q, m.b)[idx];
 
     let dShares: number, dCash: number, newShares: number, newCost: number, msg: string;
     if (action === "buy") {
       dShares = shares; dCash = -coins;
       newShares = held + shares; newCost = heldCost + coins;
-      msg = `Bought ${shares.toFixed(2)} shares of “${label}” for ${coins.toFixed(2)} ${CURRENCY} — now ${nowPct.toFixed(0)}%.`;
+      msg = `Bought ${money(shares)} shares of “${label}” for Ⓜ${money(coins)}. Now ${pct(nowPrice)}.`;
     } else {
       dShares = -shares; dCash = coins;
       newShares = held - shares;
       newCost = held > 0 ? heldCost * (newShares / held) : 0;
-      msg = `Sold ${shares.toFixed(2)} shares of “${label}” for ${coins.toFixed(2)} ${CURRENCY} — now ${nowPct.toFixed(0)}%.`;
+      msg = `Sold ${money(shares)} shares of “${label}” for Ⓜ${money(coins)}. Now ${pct(nowPrice)}.`;
     }
 
     await tx.outcome.update({ where: { id: outcomeId }, data: { shares: { increment: dShares } } });

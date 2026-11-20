@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import { toast } from "sonner";
 import { authClient } from "@/lib/auth-client";
 import { changePasswordSchema, firstError } from "@/lib/validation";
@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 
 export function ChangePasswordForm() {
   const [pending, setPending] = useState(false);
+  const id = useId();
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const form = e.currentTarget;
@@ -23,15 +24,26 @@ export function ChangePasswordForm() {
     form.reset();
     toast.success("Password changed.");
   }
+  const field = (name: string, label: string, auto: string, minLength?: number) => (
+    <div className="space-y-1.5">
+      <Label htmlFor={`${id}-${name}`}>{label}</Label>
+      <Input id={`${id}-${name}`} type="password" name={name} required minLength={minLength} autoComplete={auto} />
+    </div>
+  );
   return (
-    <Card className="gap-3 p-5">
-      <h2>Change password</h2>
-      <form onSubmit={submit} className="grid gap-3 sm:grid-cols-3">
-        <div className="space-y-1.5"><Label>Current password</Label><Input type="password" name="current" required autoComplete="current-password" /></div>
-        <div className="space-y-1.5"><Label>New password</Label><Input type="password" name="next" required minLength={6} autoComplete="new-password" /></div>
-        <div className="space-y-1.5"><Label>Confirm new password</Label><Input type="password" name="confirm" required minLength={6} autoComplete="new-password" /></div>
-        <div className="sm:col-span-3"><Button variant="outline" disabled={pending}>Change password</Button></div>
-      </form>
+    <Card className="p-0">
+      <details className="group">
+        <summary className="flex min-h-12 cursor-pointer list-none items-center justify-between px-4 text-base font-semibold outline-none focus-visible:ring-3 focus-visible:ring-ring/50 sm:px-5 [&::-webkit-details-marker]:hidden">
+          Account: change password
+          <span aria-hidden className="text-muted-foreground transition-transform group-open:rotate-180">▾</span>
+        </summary>
+        <form onSubmit={submit} className="grid gap-3 px-4 pb-4 sm:grid-cols-3 sm:px-5 sm:pb-5">
+          {field("current", "Current password", "current-password")}
+          {field("next", "New password", "new-password", 6)}
+          {field("confirm", "Confirm new password", "new-password", 6)}
+          <div className="sm:col-span-3"><Button variant="outline" disabled={pending}>{pending ? "Changing…" : "Change password"}</Button></div>
+        </form>
+      </details>
     </Card>
   );
 }

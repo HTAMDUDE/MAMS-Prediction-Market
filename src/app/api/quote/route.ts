@@ -8,7 +8,7 @@ import { quoteTrade } from "@/server/services/trading";
 /** Preview a trade without making it. Works logged out (price preview only). */
 export async function GET(req: NextRequest) {
   const parsed = quoteSchema.safeParse(Object.fromEntries(req.nextUrl.searchParams));
-  if (!parsed.success) return NextResponse.json({ ok: false });
+  if (!parsed.success) return NextResponse.json({ ok: false, error: "Enter a valid amount." });
   const { market, outcome, action, value } = parsed.data;
   await ensureFinalized();
   const user = await getCurrentUser();

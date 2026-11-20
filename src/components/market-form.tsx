@@ -4,10 +4,10 @@ import { useState, type ReactNode } from "react";
 import { CATEGORIES } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import { ActionForm, ConfirmButton, type FormAction } from "@/components/action-form";
+import { Field } from "@/components/field";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Textarea } from "@/components/ui/textarea";
 
@@ -19,15 +19,6 @@ export type MarketFormValues = {
 const YESNO_RULES = { label: "Resolves YES if…", placeholder: "Resolves YES if the official results list MAMS in first place." };
 const MULTI_RULES = { label: "How the winner is decided", placeholder: "The winner is the month of the first full-day weather cancellation." };
 const SMALL_HEADING = "pt-1 text-xs font-semibold tracking-wide text-muted-foreground uppercase";
-
-function Field({ label, hint, children }: { label: ReactNode; hint?: string; children: ReactNode }) {
-  return (
-    <div className="space-y-1.5">
-      <Label>{label}{hint && <em className="ml-1 font-normal text-muted-foreground">{hint}</em>}</Label>
-      {children}
-    </div>
-  );
-}
 
 function isYesNo(outcomes: string) {
   const typed = (outcomes || "Yes\nNo").split(/\r?\n/).map((x) => x.trim().toLowerCase());
@@ -66,7 +57,7 @@ export function MarketForm({
   const rules = yesno ? YESNO_RULES : MULTI_RULES;
 
   const form = (
-    <Card className="gap-4 p-5">
+    <Card className="gap-4 p-4 sm:p-5">
       {intro}
       <ActionForm
         action={action}
@@ -86,7 +77,7 @@ export function MarketForm({
                 {([["yesno", "Yes / No"], ["multi", "Multiple choice"]] as const).map(([val, label]) => (
                   <label key={val} className="cursor-pointer">
                     <input type="radio" name="kind" value={val} checked={kind === val} onChange={() => setKind(val)} className="peer sr-only" />
-                    <span className="block rounded-md py-1.5 text-center text-sm font-semibold text-muted-foreground peer-checked:bg-card peer-checked:text-foreground peer-checked:shadow-sm peer-focus-visible:ring-3 peer-focus-visible:ring-ring/50">{label}</span>
+                    <span className="block rounded-md py-2 text-center text-sm font-semibold text-muted-foreground peer-checked:bg-card peer-checked:text-foreground peer-checked:shadow-sm peer-focus-visible:ring-3 peer-focus-visible:ring-ring/50">{label}</span>
                   </label>
                 ))}
               </div>
@@ -96,7 +87,7 @@ export function MarketForm({
             <Field label="Source" hint="(where will the answer be published?)"><Input name="rules_source" maxLength={300} value={v.rules_source} onChange={set("rules_source")} placeholder="Official Science Bowl results page, or an announcement at assembly" /></Field>
             <Field label="Otherwise / edge cases" hint="(what if it's postponed, tied or unclear?)"><Textarea name="rules_otherwise" rows={2} maxLength={1000} value={v.rules_otherwise} onChange={set("rules_otherwise")} placeholder="If the event is postponed past the closing date, this resolves NO." /></Field>
             {!yesno && <Field label="Outcomes" hint="(one per line, 2–8)"><Textarea name="outcomes" rows={3} required value={outcomes} onChange={(e) => setOutcomes(e.target.value)} /></Field>}
-            <div className={cn("grid gap-3", showLiquidity ? "sm:grid-cols-3" : "sm:grid-cols-2")}>
+            <div className={cn("grid gap-3 sm:grid-cols-2", showLiquidity && "xl:grid-cols-3")}>
               <Field label="Category"><NativeSelect name="category" value={v.category} onChange={set("category")}>{CATEGORIES.map((c) => <option key={c}>{c}</option>)}</NativeSelect></Field>
               <Field label="Betting closes"><Input type="datetime-local" name="closes_at" required value={v.closes_at} onChange={set("closes_at")} /></Field>
               {showLiquidity && (
@@ -115,12 +106,12 @@ export function MarketForm({
               </Field>
             )}
             {review ? (
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 <Button name="decision" value="approve" disabled={pending}>Approve &amp; publish</Button>
                 <ConfirmButton variant="destructive" name="decision" value="reject" noValidate title="Reject this proposal?" message={`${review.proposer} will see your note, if you wrote one.`} confirmLabel="Reject">Reject</ConfirmButton>
               </div>
             ) : (
-              <Button disabled={pending}>{submitLabel ?? "Submit"}</Button>
+              <Button className="h-10 w-full text-base sm:w-auto" disabled={pending}>{pending ? "Saving…" : (submitLabel ?? "Submit")}</Button>
             )}
           </>
         )}
@@ -138,7 +129,7 @@ export function MarketForm({
     <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
       {form}
       <div className="space-y-4">
-        <Card className="gap-2 p-5" aria-live="polite">
+        <Card className="gap-2 p-4 sm:p-5" aria-live="polite">
           <h2>Preview</h2>
           <p className="text-sm text-muted-foreground">This is roughly how your market will look.</p>
           <div className="space-y-3 rounded-lg border p-3">
@@ -147,8 +138,8 @@ export function MarketForm({
               <div className="flex items-end justify-between">
                 <div><span className="text-3xl font-bold">50%</span> <span className="text-sm text-muted-foreground">chance</span></div>
                 <div className="flex gap-1.5 text-sm font-semibold">
-                  <span className="rounded-md bg-up/15 px-2 py-1 text-up">Yes 50¢</span>
-                  <span className="rounded-md bg-down/15 px-2 py-1 text-down">No 50¢</span>
+                  <span className="rounded-md bg-c0/15 px-2 py-1 text-c0">Yes 50¢</span>
+                  <span className="rounded-md bg-c1/15 px-2 py-1 text-c1">No 50¢</span>
                 </div>
               </div>
             ) : (
@@ -165,11 +156,11 @@ export function MarketForm({
               </ul>
             )}
             <div className="space-y-1 rounded-lg bg-secondary p-3 text-sm">
-              <h4 className={SMALL_HEADING}>{yesno ? "Resolves YES if" : "How the winner is decided"}</h4>
+              <h3 className={SMALL_HEADING}>{yesno ? "Resolves YES if" : "How the winner is decided"}</h3>
               <p>{v.description.trim() || "…"}</p>
-              {v.rules_source.trim() && <><h4 className={SMALL_HEADING}>Source</h4><p>{v.rules_source.trim()}</p></>}
-              {v.rules_otherwise.trim() && <><h4 className={SMALL_HEADING}>Otherwise</h4><p>{v.rules_otherwise.trim()}</p></>}
-              {closes && <><h4 className={SMALL_HEADING}>Betting closes</h4><p>{closes}</p></>}
+              {v.rules_source.trim() && <><h3 className={SMALL_HEADING}>Source</h3><p>{v.rules_source.trim()}</p></>}
+              {v.rules_otherwise.trim() && <><h3 className={SMALL_HEADING}>Otherwise</h3><p>{v.rules_otherwise.trim()}</p></>}
+              {closes && <><h3 className={SMALL_HEADING}>Betting closes</h3><p>{closes}</p></>}
             </div>
           </div>
         </Card>

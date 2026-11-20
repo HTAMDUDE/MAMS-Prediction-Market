@@ -13,29 +13,29 @@ export default async function Leaderboard() {
   const user = await getCurrentUser();
   const board = await getLeaderboard(user?.id ?? null);
   return (
-    <>
+    <div className="space-y-2">
       <h1>Leaderboard</h1>
-      <p className="mb-4 text-muted-foreground">Net worth = cash + what your open bets would sell for right now.</p>
+      <p className="mb-2 text-muted-foreground">Net worth = cash + what your open bets would sell for right now.</p>
       <Card className="p-2">
         {board.length ? (
           <Table>
             <TableHeader>
-              <TableRow><TableHead>#</TableHead><TableHead>Trader</TableHead><TableHead className="text-right">Net worth</TableHead><TableHead className="text-right">Cash</TableHead><TableHead className="text-right">Trades</TableHead></TableRow>
+              <TableRow><TableHead>#</TableHead><TableHead>Trader</TableHead><TableHead className="text-right">Net worth</TableHead><TableHead className="hidden text-right sm:table-cell">Cash</TableHead><TableHead className="hidden text-right sm:table-cell">Trades</TableHead></TableRow>
             </TableHeader>
             <TableBody>
               {board.map((row, i) => (
-                <TableRow key={row.username} className={row.isMe ? "bg-primary/10" : undefined}>
+                <TableRow key={`${row.username}-${i}`} className={row.isMe ? "bg-primary/10" : undefined}>
                   <TableCell className="w-12">{MEDALS[i] ?? i + 1}</TableCell>
-                  <TableCell><strong>{row.username}</strong>{row.isMe && <span className="ml-1 text-sm text-muted-foreground">(you)</span>}</TableCell>
+                  <TableCell className="max-w-0 truncate"><strong>{row.username}</strong>{row.isMe && <span className="ml-1 text-sm text-muted-foreground">(you)</span>}</TableCell>
                   <TableCell className="text-right">Ⓜ{money(row.worth)}</TableCell>
-                  <TableCell className="text-right">Ⓜ{money(row.balance)}</TableCell>
-                  <TableCell className="text-right">{row.trades}</TableCell>
+                  <TableCell className="hidden text-right sm:table-cell">Ⓜ{money(row.balance)}</TableCell>
+                  <TableCell className="hidden text-right sm:table-cell">{row.trades}</TableCell>
                 </TableRow>
               ))}
             </TableBody>
           </Table>
-        ) : <p className="p-4 text-muted-foreground">Nobody has signed up yet.</p>}
+        ) : <p className="p-4 text-muted-foreground">Nobody has signed up yet. Be the first on the board!</p>}
       </Card>
-    </>
+    </div>
   );
 }

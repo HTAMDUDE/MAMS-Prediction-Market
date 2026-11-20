@@ -1,26 +1,30 @@
 "use client";
 
+import { pctPrecise } from "@/lib/format";
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 
 export type HistoryPoint = { t: number; p: number[] };
 
 const DAY = 86400000;
-const fmtDay = (t: number) => new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-const fmtTime = (t: number) => new Date(t).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-const fmtFull = (t: number) => new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+// Always en-US in school time, so the server render and the browser agree and everyone sees the same clock.
+const formatter = (tz: string, opts: Intl.DateTimeFormatOptions) => new Intl.DateTimeFormat("en-US", { timeZone: tz, ...opts });
 
 /**
  * Price-over-time chart: one stepped line per outcome. `lines` limits how many outcomes are drawn
  * (a Yes/No market only needs its Yes line). `endTime` is when a settled market stopped; otherwise the chart runs to now.
  */
-export function PriceChart({ history, labels, endTime, lines }: { history: HistoryPoint[]; labels: string[]; endTime: number | null; lines: number }) {
-  if (!history.length) return null;
+export function PriceChart({ history, labels, endTime, lines, now, tz }: { history: HistoryPoint[]; labels: string[]; endTime: number | null; lines: number; now: number; tz: string }) {
+  if (!history.length) {
+    return <div className="grid h-40 place-items-center rounded-lg border border-dashed text-sm text-muted-foreground">No trades yet. The chart appears after the first bet.</div>;
+  }
+  const fmtDay = (t: number) => formatter(tz, { month: "short", day: "numeric" }).format(t);
+  const fmtTime = (t: number) => formatter(tz, { hour: "numeric", minute: "2-digit" }).format(t);
+  const fmtFull = (t: number) => formatter(tz, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(t);
   const shown = labels.slice(0, lines);
   const last = history[history.length - 1];
   const t0 = history[0].t;
-  // eslint-disable-next-line react-hooks/purity -- "now" is the right end for a live market; the chart is redrawn on every visit
-  const t1 = Math.max(endTime ?? Date.now(), last.t, t0 + 1);
+  const t1 = Math.max(endTime ?? now, last.t, t0 + 1);
   const pts = [...history, { t: t1, p: last.p }];
   const priceAt = (t: number) => {
     let cur = pts[0];
@@ -51,7 +55,7 @@ export function PriceChart({ history, labels, endTime, lines }: { history: Histo
             <div className="flex w-full items-center gap-2">
               <i className="size-2 rounded-full" style={{ background: `var(--c${String(name).slice(1)})` }} />
               <span className="text-muted-foreground">{config[String(name)]?.label}</span>
-              <b className="ml-auto font-mono">{(Number(value) * 100).toFixed(1)}%</b>
+              <b className="ml-auto font-mono">{pctPrecise(Number(value))}</b>
             </div>
           )} hideIndicator />}
         />

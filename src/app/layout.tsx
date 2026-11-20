@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import { cookies } from "next/headers";
+import Link from "next/link";
 import { Suspense } from "react";
 import { CURRENCY } from "@/lib/constants";
 import { FLASH_COOKIE } from "@/lib/flash";
@@ -37,9 +38,15 @@ export default async function RootLayout({ children }: { children: React.ReactNo
               <p className="mx-auto max-w-280 px-4 py-2 text-sm font-medium whitespace-pre-line">📢 {announcement}</p>
             </div>
           )}
-          <main className="mx-auto w-full max-w-280 flex-1 px-4 py-5">{children}</main>
-          <footer className="mx-auto w-full max-w-280 px-4 py-6 text-sm text-muted-foreground">
-            Play money only — {CURRENCY} have no cash value. Prices are the crowd&apos;s estimate of how likely each outcome is.
+          <main className="mx-auto w-full max-w-280 flex-1 px-4 py-4 sm:py-6">{children}</main>
+          <footer className="mt-4 border-t">
+            <div className="mx-auto flex w-full max-w-280 flex-col gap-2 px-4 py-6 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+              <p>Play money only. {CURRENCY} have no cash value. Prices are the crowd&apos;s estimate of how likely each outcome is.</p>
+              <nav aria-label="Footer" className="flex shrink-0 gap-4">
+                <Link href="/how-it-works" className="hover:text-foreground">How it works</Link>
+                <Link href="/leaderboard" className="hover:text-foreground">Leaderboard</Link>
+              </nav>
+            </div>
           </footer>
           <Toaster richColors closeButton />
           <Flash raw={flash} />

@@ -2,11 +2,7 @@ import { DISPUTE_WINDOW_MS } from "@/lib/constants";
 import { prisma, type Tx } from "@/lib/db";
 import { logAudit } from "./audit";
 import { getOutcomes } from "./markets";
-import { adjustBalance, assertAdmin, lockMarket, TradeError, type Actor } from "./permissions";
-
-async function handleOpenDisputes(tx: Tx, marketId: number) {
-  await tx.dispute.updateMany({ where: { marketId, handledAt: null }, data: { handledAt: new Date() } });
-}
+import { adjustBalance, assertAdmin, handleOpenDisputes, lockMarket, TradeError, type Actor } from "./permissions";
 
 /**
  * Pay out a market. `automatic` is used when a challenge window ends: it only goes ahead if the proposed result is

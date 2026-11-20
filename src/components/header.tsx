@@ -7,6 +7,7 @@ import { todayInSchoolTz } from "@/lib/time";
 import { buttonVariants } from "@/components/ui/button";
 import { BonusButton } from "@/components/bonus-button";
 import { LogoutButton } from "@/components/logout-button";
+import { MobileNav } from "@/components/mobile-nav";
 import { NavLinks, type NavItem } from "@/components/nav-links";
 
 export async function Header() {
@@ -24,28 +25,30 @@ export async function Header() {
   }
   const canBonus = Boolean(user) && user!.lastBonus !== todayInSchoolTz();
   return (
-    <header className="sticky top-0 z-10 border-b bg-card">
-      <div className="mx-auto flex min-h-15 max-w-280 flex-wrap items-center gap-x-5 gap-y-2 px-4 py-2">
-        <Link href="/" className="flex items-center gap-2.5 text-base">
+    <header className="sticky top-0 z-20 border-b bg-card">
+      <div className="mx-auto flex h-14 max-w-280 items-center gap-3 px-4 md:gap-5">
+        <Link href="/" className="flex items-center gap-2.5 rounded-lg text-base outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
           <span className="grid size-8 place-items-center rounded-lg bg-primary font-bold text-primary-foreground">M</span>
-          <span>MAMS <strong>Prediction Market</strong></span>
+          <span className="hidden sm:inline">MAMS <strong>Prediction Market</strong></span>
+          <span className="font-bold sm:hidden">MAMS</span>
         </Link>
         <NavLinks items={items} />
-        <div className="ml-auto flex items-center gap-2 sm:ml-0">
+        <div className="ml-auto flex items-center gap-2 md:ml-0">
           {user ? (
             <>
-              {canBonus && <BonusButton amount={DAILY_BONUS} />}
-              <Link href="/portfolio" title={`Your ${CURRENCY}`} className="flex items-center gap-1 rounded-full border bg-secondary px-3 py-1 text-sm font-semibold">
+              {canBonus && <span className="hidden md:block"><BonusButton amount={DAILY_BONUS} /></span>}
+              <Link href="/portfolio" title={`Your ${CURRENCY}`} className="flex h-9 items-center gap-1 rounded-full border bg-secondary px-3 text-sm font-semibold outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
                 <span className="text-gold">Ⓜ</span>{money(user.balance)}
               </Link>
-              <LogoutButton username={user.username} />
+              <span className="hidden md:block"><LogoutButton username={user.username} /></span>
             </>
           ) : (
-            <>
+            <span className="hidden items-center gap-2 md:flex">
               <Link href="/login" className={buttonVariants({ variant: "ghost", size: "sm" })}>Log in</Link>
               <Link href="/register" className={buttonVariants({ size: "sm" })}>Sign up</Link>
-            </>
+            </span>
           )}
+          <MobileNav items={items} username={user?.username ?? null} canBonus={canBonus} bonusAmount={DAILY_BONUS} />
         </div>
       </div>
     </header>

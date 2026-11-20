@@ -71,6 +71,8 @@ export type PortfolioItem = {
   price: number;
   value: number;
   bundle: Bundle;
+  /** For cancelled markets: what this user actually got back (their net spend, never negative). */
+  refund: number;
 };
 
 export async function getPortfolio(userId: string) {
@@ -81,6 +83,13 @@ export async function getPortfolio(userId: string) {
   });
   const marketList = [...new Map(rows.map((r) => [r.outcome.market.id, r.outcome.market])).values()];
   const bs = new Map((await bundles(prisma, marketList)).map((b) => [b.m.id, b]));
+  const cancelledIds = marketList.filter((m) => m.status === "cancelled").map((m) => m.id);
+  const refunds = new Map(
+    (cancelledIds.length
+      ? await prisma.trade.groupBy({ by: ["marketId"], where: { userId, marketId: { in: cancelledIds } }, _sum: { amount: true } })
+      : []
+    ).map((g) => [g.marketId, Math.max(g._sum.amount ?? 0, 0)]),
+  );
   const active: PortfolioItem[] = [];
   const settled: PortfolioItem[] = [];
   for (const r of rows) {
@@ -91,9 +100,10 @@ export async function getPortfolio(userId: string) {
     if (b.m.status === "open") value = lmsr.sellValue(b.outcomes.map((o) => o.shares), b.m.b, i, r.shares); // what the shares would sell for now
     else if (b.m.status === "cancelled") value = 0; // refunded when the market was cancelled
     else value = r.shares * price;
-    const item = { marketId: b.m.id, question: b.m.question, label: r.outcome.label, shares: r.shares, cost: r.cost, price, value, bundle: b };
+    const item = { marketId: b.m.id, question: b.m.question, label: r.outcome.label, shares: r.shares, cost: r.cost, price, value, bundle: b, refund: refunds.get(b.m.id) ?? 0 };
     (b.m.status === "open" ? active : settled).push(item);
   }
+  settled.sort((a, c) => (c.bundle.m.resolvedAt?.getTime() ?? 0) - (a.bundle.m.resolvedAt?.getTime() ?? 0)); // newest result first
   const trades = await prisma.trade.findMany({
     where: { userId }, orderBy: { id: "desc" }, take: 30,
     include: { outcome: { select: { label: true } }, market: { select: { question: true } } },

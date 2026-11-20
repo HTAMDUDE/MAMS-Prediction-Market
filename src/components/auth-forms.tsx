@@ -8,20 +8,10 @@ import { authClient } from "@/lib/auth-client";
 import { CURRENCY } from "@/lib/constants";
 import { markVerificationSent } from "@/lib/verify";
 import { firstError, loginSchema, registerSchema, safeNext } from "@/lib/validation";
+import { Field } from "@/components/field";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-
-function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
-  return (
-    <div className="space-y-1.5">
-      <Label>{label}</Label>
-      {children}
-      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
-    </div>
-  );
-}
 
 export function LoginForm({ next }: { next?: string }) {
   const router = useRouter();
@@ -47,7 +37,7 @@ export function LoginForm({ next }: { next?: string }) {
     router.refresh();
   }
   return (
-    <Card className="mx-auto max-w-sm p-6">
+    <Card className="mx-auto mt-2 max-w-sm p-5 sm:mt-6 sm:p-6">
       <h1>Log in</h1>
       <form onSubmit={submit} className="mt-4 space-y-4">
         {unverified && (
@@ -56,9 +46,9 @@ export function LoginForm({ next }: { next?: string }) {
             folder), click the link, then log in again.
           </div>
         )}
-        <Field label="Username"><Input name="username" required autoFocus autoComplete="username" /></Field>
-        <Field label="Password"><Input type="password" name="password" required autoComplete="current-password" /></Field>
-        <Button className="w-full" disabled={pending}>Log in</Button>
+        <Field label="Username"><Input name="username" required autoFocus autoComplete="username" autoCapitalize="none" spellCheck={false} className="h-10 text-base" /></Field>
+        <Field label="Password"><Input type="password" name="password" required autoComplete="current-password" className="h-10 text-base" /></Field>
+        <Button className="h-10 w-full text-base" disabled={pending}>{pending ? "Logging in…" : "Log in"}</Button>
       </form>
       <p className="mt-4 text-center text-sm text-muted-foreground">New here? <Link href="/register" className="text-primary hover:underline">Create an account</Link></p>
     </Card>
@@ -89,19 +79,19 @@ export function RegisterForm() {
     router.push(`/check-email?email=${encodeURIComponent(email)}`);
   }
   return (
-    <Card className="mx-auto max-w-sm p-6">
+    <Card className="mx-auto mt-2 max-w-sm p-5 sm:mt-6 sm:p-6">
       <h1>Create an account</h1>
       <p className="mt-1 text-sm text-muted-foreground">You&apos;ll start with Ⓜ1,000 {CURRENCY} — play money, no real value.</p>
       <form onSubmit={submit} className="mt-4 space-y-4">
-        <Field label="Username" hint="3–20 letters, numbers, _ . - — this is what other players see.">
-          <Input name="username" required autoFocus minLength={3} maxLength={20} pattern="[A-Za-z0-9_.\-]+" autoComplete="username" />
+        <Field label="Username" hintBelow="3–20 letters, numbers, _ . - — this is what other players see.">
+          <Input name="username" required autoFocus minLength={3} maxLength={20} pattern="[A-Za-z0-9_.\-]+" autoComplete="username" autoCapitalize="none" spellCheck={false} className="h-10 text-base" />
         </Field>
-        <Field label="Email" hint="We'll send a link to verify it. It's never shown to other players.">
-          <Input type="email" name="email" required autoComplete="email" />
+        <Field label="Email" hintBelow="We'll send a link to verify it. It's never shown to other players.">
+          <Input type="email" name="email" required autoComplete="email" className="h-10 text-base" />
         </Field>
-        <Field label="Password"><Input type="password" name="password" required minLength={6} autoComplete="new-password" /></Field>
-        <Field label="Confirm password"><Input type="password" name="confirm" required minLength={6} autoComplete="new-password" /></Field>
-        <Button className="w-full" disabled={pending}>Sign up</Button>
+        <Field label="Password"><Input type="password" name="password" required minLength={6} autoComplete="new-password" className="h-10 text-base" /></Field>
+        <Field label="Confirm password"><Input type="password" name="confirm" required minLength={6} autoComplete="new-password" className="h-10 text-base" /></Field>
+        <Button className="h-10 w-full text-base" disabled={pending}>{pending ? "Creating account…" : "Sign up"}</Button>
       </form>
       <p className="mt-4 text-center text-sm text-muted-foreground">Already have an account? <Link href="/login" className="text-primary hover:underline">Log in</Link></p>
     </Card>

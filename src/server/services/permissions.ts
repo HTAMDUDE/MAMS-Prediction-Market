@@ -63,3 +63,8 @@ export async function lockMarket(db: Db, marketId: number) {
 export async function lockUser(db: Db, userId: string) {
   await db.$queryRaw`SELECT id FROM "user" WHERE id = ${userId} FOR UPDATE`;
 }
+
+/** Mark every unhandled dispute on a market as handled (resolved, cancelled, or re-proposed). */
+export async function handleOpenDisputes(db: Db, marketId: number) {
+  await db.dispute.updateMany({ where: { marketId, handledAt: null }, data: { handledAt: new Date() } });
+}

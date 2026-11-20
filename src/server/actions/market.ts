@@ -19,7 +19,7 @@ export async function placeTrade(_prev: ActionState, fd: FormData): Promise<Acti
     } catch {
       throw new TradeError("Pick an outcome and enter a valid number.");
     }
-    return executeTrade(user.id, marketId(fd), t.outcome_id, t.action, t.value);
+    return executeTrade(user.id, marketId(fd), t.outcome_id, t.action, t.value, t.min_out);
   });
 }
 

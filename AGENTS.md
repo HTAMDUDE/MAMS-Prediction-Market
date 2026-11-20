@@ -77,7 +77,7 @@ src/server/services/         ALL business logic: markets, trading, resolution, m
 src/server/actions/          thin "use server" actions: zod-parse → auth → service → toast/redirect
 src/server/finalize.ts       ensureFinalized(): pays out markets whose dispute window ended (cached per request)
 src/app/                     pages (App Router) + api/auth, api/quote, api/cron/finalize
-src/components/              app components; ui/ is shadcn
+src/components/              app components; ui/ is shadcn; field.tsx (labelled form field), mobile-nav / mobile-bet-bar / mobile-rows (phone patterns), skeletons.tsx
 tests/                       Vitest suites (helpers.ts has the test fixtures)
 ```
 
@@ -99,6 +99,8 @@ tests/                       Vitest suites (helpers.ts has the test fixtures)
 - shadcn's Base UI `Button` is patched to default to `type="submit"` like a native button; pass `type="button"` for non-submit buttons.
 - Redirecting actions hand a toast to the next page through the `mams_flash` cookie (`setFlash` in `src/server/actions/util.ts`); the server layout passes the raw cookie to `<Flash/>`, so it works even when redirecting to the same URL. Actions that don't redirect return `{ok, message}` to `ActionForm`, which toasts it.
 - Forms use `ActionForm` + `ConfirmButton` (`src/components/action-form.tsx`); confirmations are AlertDialogs, not `confirm()`.
+- **Mobile-first layout:** below `md` the header is a menu sheet; below `lg` the market page is one column ordered market → trade panel → details (the page wrappers use `contents` to reorder, see `market/[id]/page.tsx`). New wide tables need a `MobileRows` twin (`hidden sm:table` + `sm:hidden`) or hidden secondary columns; inputs are `text-base md:text-sm` so iOS doesn't zoom; interactive controls are at least 36px tall on phones.
+- **Formatting:** use the helpers in `src/lib/format.ts` (never `toFixed`/`toLocaleString` inline for money or percentages). Error boundaries use `retry` (see Next docs in `node_modules`).
 - Use Context7 (library docs) before using a library API from memory; versions here are newer than most training data.
 
 ## Roles
@@ -134,6 +136,16 @@ Newest first. One entry per change; see rule 2 above.
 
 - Vercel's `pnpm install` failed because `packageManager` pinned pnpm 11.12.0, a broken release (its `@pnpm/exe` shipped without a binary). Bumped the pin to `pnpm@11.28.12`; the lockfile is unchanged and `pnpm install --frozen-lockfile` passes.
 - Files: `package.json`.
+
+### 2026-11-20: Polish pass (logic, desktop and mobile UI)
+
+- **Logic:** cancelling a market that has a proposed/disputed result now settles its disputes and clears the proposal (it used to leave unhandled disputes that blocked `deleteUser` forever; `handleOpenDisputes` moved to `permissions.ts`). New **slippage guard**: the trade form sends `min_out` (quote × 0.98) and `executeTrade` refuses with "The price moved since your quote" if the fill is worse. Sells that would pay under Ⓜ0.01 are rejected. Clearer errors (balance shown on insufficient funds, "Minimum bet is Ⓜ1", readable `/api/quote` errors). Portfolio now shows each user's real refund on cancelled markets, and settled rows are newest-first.
+- **Trade form:** a quote is tagged with the outcome/action/amount it was fetched for and is shown dimmed ("updating") or ignored until it matches what is typed; in-flight requests are aborted; Max/+N round to cents; fixed-height preview; Buy is green, Sell red; long outcome labels no longer overflow.
+- **Formatting:** one set of helpers in `src/lib/format.ts` (`money`, `pct`, `pctPrecise`, `price`, `centsLabel`, `signedMoney`). `format.cents` was renamed `centsLabel` so it can't be confused with `cents()` in `constants.ts` (rounds money). The chart now formats time in school time (`tz` and `now` props from the server, no `Date.now()` in render). Yes/No use `--c0`/`--c1` everywhere (cards used green/red before).
+- **Mobile patterns:** header collapses to logo + balance + a slide-in menu (`mobile-nav.tsx`, `ui/sheet.tsx`) below `md`; the market page puts the trade panel right after the market card on phones and adds a bottom "Bet" bar (`mobile-bet-bar.tsx`) that hides while the panel is visible; wide tables become stacked rows on phones (`mobile-rows.tsx`); home filters scroll horizontally; tap targets are at least 36px.
+- **States and a11y:** `loading.tsx` skeletons (home, market, portfolio, leaderboard, admin), `error.tsx` + `global-error.tsx` (this Next version passes `retry`, which re-fetches; `reset` only clears the boundary), filter-aware empty states, a Cancelled tab, labels tied to inputs via the shared `Field` (`src/components/field.tsx`), `aria-current`/`aria-pressed`/focus rings, one heading scale (h2 = `text-lg`, h3 for sub-labels), footer links, portfolio password form collapsed under "Account".
+- Tests: +3 (cancel with dispute, slippage buy/sell, tiny sell); 88 total. Not done (features, not polish): pagination/search on lists, "sell all in a market", rate limits on quotes/comments, a manual theme toggle.
+- Files: `src/server/services/{trading,markets,permissions,resolution,portfolio}.ts`, `src/lib/{format,validation}.ts`, `src/components/{trade-form,header,nav-links,mobile-nav,mobile-bet-bar,mobile-rows,field,skeletons,price-chart,market-card,auth-forms,market-form,edit-market-form,change-password-form,admin-users-table,manage-dialog,market-admin-panel}.tsx`, `src/components/ui/{sheet,skeleton,native-select}.tsx`, `src/app/{page,layout,error,global-error,loading}.tsx`, `src/app/{market/[id],portfolio,leaderboard,admin,admin/activity}/…`, `tests/{trading,resolution}.test.ts`.
 
 ### 2026-11-20: More admin controls
 

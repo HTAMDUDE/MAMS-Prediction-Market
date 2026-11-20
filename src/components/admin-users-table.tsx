@@ -39,7 +39,7 @@ function Section({ title, hint, children }: { title: string; hint?: string; chil
 export function AdminUsersTable({ data, meId, isOwner }: { data: Users; meId: string; isOwner: boolean }) {
   const { rows, total, page, pages, filter, q } = data;
   return (
-    <Card className="gap-3 p-5" id="users">
+    <Card className="scroll-mt-20 gap-3 p-4 sm:p-5" id="users">
       <h2>Users <span className="ml-1 text-sm font-normal text-muted-foreground">{total}</span></h2>
       <p className="text-sm text-muted-foreground">
         {isOwner ? "You're the owner: you can manage everyone, and only you can add or remove admins."
@@ -58,7 +58,7 @@ export function AdminUsersTable({ data, meId, isOwner }: { data: Users; meId: st
 
       <Table>
         <TableHeader>
-          <TableRow><TableHead>User</TableHead><TableHead>Email</TableHead><TableHead className="text-right">Balance</TableHead><TableHead className="w-24" /></TableRow>
+          <TableRow><TableHead>User</TableHead><TableHead className="hidden sm:table-cell">Email</TableHead><TableHead className="text-right">Balance</TableHead><TableHead className="w-20"><span className="sr-only">Manage</span></TableHead></TableRow>
         </TableHeader>
         <TableBody>
           {rows.map((u) => {
@@ -74,10 +74,11 @@ export function AdminUsersTable({ data, meId, isOwner }: { data: Users; meId: st
                     {u.banned && <Status tone="rejected">Trading off</Status>}
                     {u.muted && <Status tone="pending">Muted</Status>}
                   </div>
+                  <div className="mt-0.5 text-xs break-all text-muted-foreground sm:hidden">{u.legacyEmail ? "no email (imported)" : u.email}{!u.legacyEmail && !u.emailVerified && " · not verified"}</div>
                 </TableCell>
-                <TableCell className="whitespace-normal break-all">
+                <TableCell className="hidden whitespace-normal break-all sm:table-cell">
                   {u.legacyEmail ? <span className="text-sm text-muted-foreground">none (imported)</span> : u.email}
-                  {!u.legacyEmail && (u.emailVerified ? <Status tone="resolved">verified</Status> : <> <Status tone="closed">not verified</Status></>)}
+                  {!u.legacyEmail && <> {u.emailVerified ? <Status tone="resolved">verified</Status> : <Status tone="closed">not verified</Status>}</>}
                 </TableCell>
                 <TableCell className="text-right">Ⓜ{money(u.balance)}</TableCell>
                 <TableCell className="text-right">
@@ -89,7 +90,7 @@ export function AdminUsersTable({ data, meId, isOwner }: { data: Users; meId: st
                         <Section title="Balance">
                           <ActionForm action={grantAction} className="flex gap-2" resetOnSuccess>
                             {hidden}
-                            <Input type="number" name="amount" step="0.01" placeholder="±Ⓜ" required />
+                            <Input type="number" name="amount" aria-label="Amount to add or remove" inputMode="decimal" step="0.01" placeholder="±Ⓜ" required />
                             <Button variant="outline">Apply</Button>
                           </ActionForm>
                           <p className="text-xs text-muted-foreground">Now Ⓜ{money(u.balance)}. Use a negative number to take coins away.</p>
@@ -114,7 +115,7 @@ export function AdminUsersTable({ data, meId, isOwner }: { data: Users; meId: st
                         <Section title="Email" hint={u.legacyEmail ? "This account was imported and has no email. Add one so they can verify and use it." : undefined}>
                           <ActionForm action={updateEmailAction} className="space-y-2">
                             {hidden}
-                            <Input type="email" name="email" defaultValue={u.legacyEmail ? "" : u.email} placeholder="name@example.com" required />
+                            <Input type="email" name="email" aria-label="New email address" defaultValue={u.legacyEmail ? "" : u.email} placeholder="name@example.com" required />
                             <ConfirmButton variant="outline" title={`Change ${u.username}'s email?`} message="We'll send a verification link to the new address, and they can't log in until they use it." confirmLabel="Change email">Change email</ConfirmButton>
                           </ActionForm>
                           {!u.emailVerified && !u.legacyEmail && (

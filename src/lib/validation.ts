@@ -132,6 +132,8 @@ export const tradeSchema = z.object({
   outcome_id: z.string().regex(/^\d+$/).transform(Number),
   value: numberField,
   action: z.enum(["buy", "sell"]),
+  /** Slippage guard: the least shares (buy) or coins (sell) the user will accept. Optional. */
+  min_out: z.string().trim().optional().transform((v) => (v ? Number(v) : null)).refine((v) => v === null || (Number.isFinite(v) && v >= 0)),
 });
 
 export const quoteSchema = z.object({

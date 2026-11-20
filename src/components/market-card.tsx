@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { cents, pct, until } from "@/lib/format";
+import { centsLabel, money, pct, until } from "@/lib/format";
 import type { Bundle } from "@/server/services/markets";
 import { Card } from "@/components/ui/card";
 import { StateBadge, Tag } from "@/components/state-badge";
@@ -7,8 +7,8 @@ import { StateBadge, Tag } from "@/components/state-badge";
 export function MarketCard({ b }: { b: Bundle }) {
   const live = ["open", "closed", "proposed", "disputed"].includes(b.state);
   return (
-    <Link href={`/market/${b.m.id}`} className="block">
-      <Card className="h-full gap-3 p-4 transition-shadow hover:shadow-md">
+    <Link href={`/market/${b.m.id}`} className="group block rounded-xl outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+      <Card className="h-full gap-3 p-4 transition-all group-hover:-translate-y-0.5 group-hover:shadow-md">
         <div className="flex items-center justify-between gap-2 text-sm">
           <span className="flex items-center gap-1.5">
             <Tag>{b.m.category}</Tag>
@@ -24,8 +24,8 @@ export function MarketCard({ b }: { b: Bundle }) {
               <span className="text-sm text-muted-foreground">chance</span>
             </div>
             <div className="flex gap-1.5 text-sm font-semibold">
-              <span className="rounded-md bg-up/15 px-2 py-1 text-up">Yes {cents(b.outcomes[0].price)}</span>
-              <span className="rounded-md bg-down/15 px-2 py-1 text-down">No {cents(b.outcomes[1].price)}</span>
+              <span className="rounded-md bg-c0/15 px-2 py-1 text-c0">Yes {centsLabel(b.outcomes[0].price)}</span>
+              <span className="rounded-md bg-c1/15 px-2 py-1 text-c1">No {centsLabel(b.outcomes[1].price)}</span>
             </div>
           </div>
         ) : (
@@ -43,7 +43,7 @@ export function MarketCard({ b }: { b: Bundle }) {
           </ul>
         )}
         <div className="mt-auto text-sm text-muted-foreground">
-          Ⓜ{b.volume.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} traded · {b.traders} trader{b.traders === 1 ? "" : "s"}
+          Ⓜ{money(b.volume)} traded · {b.traders} trader{b.traders === 1 ? "" : "s"}
         </div>
       </Card>
     </Link>

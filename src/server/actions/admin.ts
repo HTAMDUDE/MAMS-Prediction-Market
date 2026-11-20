@@ -2,6 +2,7 @@
 
 import { redirect } from "next/navigation";
 import { CURRENCY } from "@/lib/constants";
+import { money } from "@/lib/format";
 import { requireUser, toActor } from "@/lib/session";
 import { parseSchoolLocal } from "@/lib/time";
 import { amountSchema, clarifySchema, idSchema, readEditForm, readMarketForm } from "@/lib/validation";
@@ -23,7 +24,6 @@ import { parseForm, run, setFlash, type ActionState } from "./util";
 import { prisma } from "@/lib/db";
 
 const id = (fd: FormData, key: string) => idSchema.parse(fd.get(key));
-const money = (n: number) => n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 async function admin() {
   return toActor(await requireUser());
 }

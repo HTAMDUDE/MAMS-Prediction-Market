@@ -35,7 +35,7 @@ function MarketRow({ b, children }: { b: Bundle; children?: React.ReactNode }) {
           {" "}· Ⓜ{money(b.volume)} traded
         </div>
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         {children}
         <Link href={`/admin/markets/${b.m.id}/edit`} className={buttonVariants({ variant: "outline", size: "sm" })}>Edit</Link>
         <DeleteMarketButton marketId={b.m.id} open={b.m.status === "open"} small />
@@ -66,11 +66,11 @@ export default async function Admin({ searchParams }: { searchParams: Promise<{ 
         <Link href="/admin/activity" className={buttonVariants({ variant: "outline" })}>Activity log</Link>
       </div>
 
-      <Card className="gap-2 p-5" id="announcement">
+      <Card className="gap-2 p-4 sm:p-5" id="announcement">
         <h2>Site announcement</h2>
         <p className="text-sm text-muted-foreground">Shown in a banner at the top of every page until you clear it (e.g. “Betting on the snow-day market closes at noon”).</p>
         <ActionForm action={announcementAction} className="space-y-2">
-          <Textarea name="text" rows={2} maxLength={ANNOUNCEMENT_MAX} defaultValue={announcement ?? ""} placeholder="No announcement right now." />
+          <Textarea name="text" aria-label="Announcement text" rows={2} maxLength={ANNOUNCEMENT_MAX} defaultValue={announcement ?? ""} placeholder="No announcement right now." />
           <div className="flex gap-2">
             <Button size="sm">Publish</Button>
             {announcement && <Button size="sm" variant="outline" name="clear" value="1">Clear</Button>}
@@ -78,11 +78,11 @@ export default async function Admin({ searchParams }: { searchParams: Promise<{ 
         </ActionForm>
       </Card>
 
-      <Card className="gap-2 p-5" id="proposals">
+      <Card className="gap-2 p-4 sm:p-5" id="proposals">
         <h2>Proposals waiting for approval {proposals.length > 0 && <span className="ml-1 rounded-full bg-primary px-2 py-0.5 text-xs text-primary-foreground">{proposals.length}</span>}</h2>
         {proposals.length ? proposals.map((p) => (
-          <div key={p.id} className="flex items-center justify-between gap-2 border-t py-2 first:border-t-0">
-            <div>
+          <div key={p.id} className="flex flex-wrap items-center justify-between gap-2 border-t py-2 first:border-t-0">
+            <div className="min-w-0 flex-1">
               <strong>{p.question}</strong>
               <div className="text-sm text-muted-foreground">{p.category} · {p.outcomes.join(" · ")} · closes {when(p.closesAt)} · by <b>{p.user.displayUsername ?? p.user.username}</b> {ago(p.createdAt)}</div>
             </div>
@@ -92,18 +92,15 @@ export default async function Admin({ searchParams }: { searchParams: Promise<{ 
       </Card>
 
       <div className="grid items-start gap-4 lg:grid-cols-2">
-        <div>
-          <h2 className="mb-2">Create a market</h2>
-          <MarketForm action={createMarketAction} initial={{ closes_at: defaultClose }} showLiquidity submitLabel="Create market" />
-        </div>
-        <Card className="gap-1 p-5">
+        <MarketForm action={createMarketAction} initial={{ closes_at: defaultClose }} showLiquidity submitLabel="Create market" intro={<h2>Create a market</h2>} />
+        <Card className="gap-1 p-4 sm:p-5">
           <h2 className="mb-1">Unresolved markets</h2>
           {markets.length ? markets.map((b) => (
             <MarketRow key={b.m.id} b={b}>
               {b.state === "closed" ? (
                 <ActionForm action={proposeResultAction} className="flex items-center gap-1.5">
                   <input type="hidden" name="market_id" value={b.m.id} />
-                  <NativeSelect name="outcome_id" required defaultValue="" className="h-7 w-32">
+                  <NativeSelect name="outcome_id" required defaultValue="" aria-label={`Winner of ${b.m.question}`} className="w-32">
                     <option value="">Winner…</option>
                     {b.outcomes.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
                   </NativeSelect>

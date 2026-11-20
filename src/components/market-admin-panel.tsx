@@ -14,7 +14,7 @@ import { Textarea } from "@/components/ui/textarea";
 export function MarketAdminPanel({ b, blocked, allUsers }: { b: Bundle; blocked: { id: string; username: string }[]; allUsers: string[] }) {
   const proposedLike = b.state === "proposed" || b.state === "disputed";
   return (
-    <Card className="gap-3 border-primary/40 p-4" id="admin">
+    <Card className="scroll-mt-20 gap-3 border-primary/40 p-4" id="admin">
       <h2>Admin</h2>
 
       <div className="space-y-2">
@@ -45,18 +45,16 @@ export function MarketAdminPanel({ b, blocked, allUsers }: { b: Bundle; blocked:
         <p className="text-sm text-muted-foreground">You can propose a result once betting closes.</p>
       ) : (
         <ActionForm action={proposeResultAction} className="space-y-2">
-          <>
-              <input type="hidden" name="market_id" value={b.m.id} />
-              <label className="text-sm font-medium">{proposedLike ? "Change the proposed result" : "Winning outcome"}
-                <NativeSelect name="outcome_id" required className="mt-1.5 font-normal" defaultValue="">
-                  <option value="">Choose…</option>
-                  {b.outcomes.filter((o) => o.id !== b.m.proposedOutcomeId).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
-                </NativeSelect>
-              </label>
-              <ConfirmButton className="w-full" title="Propose this result?" message="Traders get 24 hours to dispute it before winners are paid." confirmLabel="Propose result">
-                {proposedLike ? "Propose this instead" : "Propose result"}
-              </ConfirmButton>
-          </>
+          <input type="hidden" name="market_id" value={b.m.id} />
+          <label className="text-sm font-medium">{proposedLike ? "Change the proposed result" : "Winning outcome"}
+            <NativeSelect name="outcome_id" required className="mt-1.5 font-normal" defaultValue="">
+              <option value="">Choose…</option>
+              {b.outcomes.filter((o) => o.id !== b.m.proposedOutcomeId).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+            </NativeSelect>
+          </label>
+          <ConfirmButton className="w-full" title="Propose this result?" message="Traders get 24 hours to dispute it before winners are paid." confirmLabel="Propose result">
+            {proposedLike ? "Propose this instead" : "Propose result"}
+          </ConfirmButton>
         </ActionForm>
       )}
 
@@ -79,15 +77,15 @@ export function MarketAdminPanel({ b, blocked, allUsers }: { b: Bundle; blocked:
         </ConfirmButton>
       </ActionForm>
 
-      <h3 className="mt-2 font-semibold">Clarify the rules</h3>
+      <h3 className="mt-2 text-base font-semibold">Clarify the rules</h3>
       <p className="text-sm text-muted-foreground">The written rules are locked once betting starts. Add a dated note instead.</p>
       <ActionForm action={clarifyAction} className="space-y-2" resetOnSuccess>
         <input type="hidden" name="market_id" value={b.m.id} />
-        <Textarea name="body" rows={2} minLength={5} maxLength={500} required placeholder="e.g. A half day counts as a snow day." />
+        <Textarea name="body" aria-label="Clarification text" rows={2} minLength={5} maxLength={500} required placeholder="e.g. A half day counts as a snow day." />
         <Button variant="outline" size="sm">Add clarification</Button>
       </ActionForm>
 
-      <h3 className="mt-2 font-semibold">Blocked from this market</h3>
+      <h3 className="mt-2 text-base font-semibold">Blocked from this market</h3>
       <p className="text-sm text-muted-foreground">For people who know the answer ahead of time. Blocking someone refunds and removes any bets they already placed here.</p>
       {blocked.length ? blocked.map((u) => (
         <ActionForm key={u.id} action={unblockAction} className="flex items-center justify-between gap-2">
@@ -99,7 +97,7 @@ export function MarketAdminPanel({ b, blocked, allUsers }: { b: Bundle; blocked:
       )) : <p className="text-sm text-muted-foreground">Nobody is blocked.</p>}
       <ActionForm action={blockAction} className="flex gap-2" resetOnSuccess>
         <input type="hidden" name="market_id" value={b.m.id} />
-        <Input name="username" list="all-users" placeholder="Username" required autoComplete="off" />
+        <Input name="username" aria-label="Username to block" list="all-users" placeholder="Username" required autoComplete="off" />
         <datalist id="all-users">{allUsers.map((n) => <option key={n} value={n} />)}</datalist>
         <ConfirmButton variant="destructive" size="sm" title="Block this user?" message="Their bets on this market will be refunded and removed." confirmLabel="Block">Block</ConfirmButton>
       </ActionForm>
@@ -109,8 +107,6 @@ export function MarketAdminPanel({ b, blocked, allUsers }: { b: Bundle; blocked:
 
 export function MarketAdminLinks({ marketId }: { marketId: number }) {
   return (
-    <>
-      <Link href={`/admin/markets/${marketId}/edit`} className={buttonVariants({ variant: "outline", className: "w-full" })}>Edit market</Link>
-    </>
+    <Link href={`/admin/markets/${marketId}/edit`} className={buttonVariants({ variant: "outline", className: "w-full" })}>Edit market</Link>
   );
 }

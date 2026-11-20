@@ -131,4 +131,26 @@ describe("quote matches trade", () => {
     await expect(quoteTrade(u.id, mid, yes, "buy", 10)).rejects.toThrow(/blocked/);
     expect((await quoteTrade(null, mid, yes, "buy", 10)).shares).toBeGreaterThan(0);
   });
+  it("slippage guard rejects a trade worse than the quote, for buys and sells", async () => {
+    const gus = await makeUser("gus");
+    const { id: mid, outs } = await makeMarket({ labels: ["Yes", "No"], b: 50 });
+    const q = await quoteTrade(gus.id, mid, outs[0], "buy", 50);
+    // someone else moves the price first
+    const hal = await makeUser("hal");
+    await executeTrade(hal.id, mid, outs[0], "buy", 300);
+    await expect(executeTrade(gus.id, mid, outs[0], "buy", 50, q.shares * 0.98)).rejects.toThrow(/price moved/);
+    expect(await balanceOf(gus.id)).toBeCloseTo(1000);
+    await executeTrade(gus.id, mid, outs[0], "buy", 50, 0); // no real floor: goes through
+    const held = await sharesHeld(gus.id, outs[0]);
+    const sq = await quoteTrade(gus.id, mid, outs[0], "sell", held);
+    await executeTrade(hal.id, mid, outs[0], "sell", await sharesHeld(hal.id, outs[0]));
+    await expect(executeTrade(gus.id, mid, outs[0], "sell", held, sq.coins * 0.98)).rejects.toThrow(/price moved/);
+  });
+
+  it("rejects a sell that would pay less than a cent", async () => {
+    const ivy = await makeUser("ivy");
+    const { id: mid, outs } = await makeMarket({ labels: ["Yes", "No"], b: 100 });
+    await executeTrade(ivy.id, mid, outs[0], "buy", 10);
+    await expect(executeTrade(ivy.id, mid, outs[0], "sell", 0.001)).rejects.toThrow(/less than/);
+  });
 });

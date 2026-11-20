@@ -10,7 +10,7 @@ export function LogoutButton({ username }: { username: string }) {
   const [pending, start] = useTransition();
   return (
     <Button
-      variant="ghost" size="sm" disabled={pending} title={`Log out ${username}`}
+      variant="ghost" size="sm" className="max-md:h-9 max-md:px-3" disabled={pending} title={`Log out ${username}`}
       onClick={() => start(async () => { await authClient.signOut(); router.push("/"); router.refresh(); })}
     >
       Log out

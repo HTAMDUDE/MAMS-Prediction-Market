@@ -17,7 +17,7 @@ export function ManageDialog({ title, description, triggerLabel = "Manage", chil
   const [open, setOpen] = useState(false);
   return (
     <>
-      <Button type="button" variant="outline" size="sm" onClick={() => setOpen(true)}>{triggerLabel}</Button>
+      <Button type="button" variant="outline" size="sm" className="max-sm:h-9 max-sm:px-3" aria-label={`${triggerLabel} ${title}`} onClick={() => setOpen(true)}>{triggerLabel}</Button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
           <DialogHeader>

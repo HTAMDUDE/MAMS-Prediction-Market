@@ -3,7 +3,7 @@ import { marketB, isPreset } from "@/lib/constants";
 import { prisma, type Db } from "@/lib/db";
 import * as lmsr from "@/lib/lmsr";
 import { logAudit } from "./audit";
-import { adjustBalance, assertAdmin, lockMarket, TradeError, type Actor } from "./permissions";
+import { adjustBalance, assertAdmin, handleOpenDisputes, lockMarket, TradeError, type Actor } from "./permissions";
 
 export type MarketState = "open" | "closed" | "proposed" | "disputed" | "resolved" | "cancelled";
 
@@ -116,7 +116,12 @@ export async function cancelMarket(actor: Actor, marketId: number) {
     const m = await tx.market.findUnique({ where: { id: marketId } });
     if (!m || m.status !== "open") throw new TradeError("Only unresolved markets can be cancelled.");
     await refundNetSpend(tx, marketId);
-    await tx.market.update({ where: { id: marketId }, data: { status: "cancelled", resolvedAt: new Date() } });
+    // A proposed/disputed result is moot once cancelled: settle its disputes so they don't block anything later.
+    await handleOpenDisputes(tx, marketId);
+    await tx.market.update({
+      where: { id: marketId },
+      data: { status: "cancelled", resolvedAt: new Date(), proposedOutcomeId: null, proposedAt: null, finalizesAt: null },
+    });
     return m.question;
   }, { timeout: 30000 });
   await logAudit(actor, "market.cancel", { targetType: "market", targetId: marketId, targetLabel: question });

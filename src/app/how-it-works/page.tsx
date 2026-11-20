@@ -9,7 +9,7 @@ export default async function HowItWorks() {
   const user = await getCurrentUser();
   const hours = Math.floor(DISPUTE_WINDOW_MS / 3600000);
   return (
-    <article className="mx-auto max-w-3xl space-y-3 rounded-xl border bg-card p-6 sm:p-8 [&_h2]:mt-6 [&_h2]:text-xl [&_li]:ml-5 [&_ol]:list-decimal [&_ol]:space-y-1 [&_p]:leading-relaxed [&_ul]:list-disc [&_ul]:space-y-1">
+    <article className="mx-auto max-w-3xl space-y-3 rounded-xl border bg-card p-6 sm:p-8 [&_h2]:mt-6 [&_li]:ml-5 [&_ol]:list-decimal [&_ol]:space-y-1 [&_p]:leading-relaxed [&_ul]:list-disc [&_ul]:space-y-1">
       <h1>How MAMS Prediction Market works</h1>
       <p className="text-lg text-muted-foreground">
         A prediction market turns a question about the future into a price. The price is the school&apos;s best guess at how likely it is.

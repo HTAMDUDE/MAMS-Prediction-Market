@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { prisma } from "@/lib/db";
 import { marketState } from "@/server/services/markets";
+import { cancelMarket } from "@/server/services/markets";
+import { deleteUser } from "@/server/services/accounts";
 import { addDispute, confirmResult, finalizeDue, proposeResult, retractResult } from "@/server/services/resolution";
 import { executeTrade } from "@/server/services/trading";
 import { balanceOf, closeMarket, hours, makeActor, makeMarket, makeUser, resetDb, RULES, sharesHeld } from "./helpers";
@@ -90,5 +92,16 @@ describe("optimistic resolution", () => {
     expect(marketState(m)).toBe("closed");
     await finalizeDue();
     expect(await status(id)).toBe("open");
+  });
+  it("cancelling a disputed market settles the dispute and clears the proposal", async () => {
+    const { admin, bob, id, no } = await closedMarketWithBet();
+    await proposeResult(admin.actor, id, no);
+    await addDispute(bob.id, id, "Official page says Yes won");
+    await cancelMarket(admin.actor, id);
+    const m = await prisma.market.findUniqueOrThrow({ where: { id } });
+    expect([m.status, m.proposedOutcomeId, m.finalizesAt]).toEqual(["cancelled", null, null]);
+    expect(await prisma.dispute.count({ where: { handledAt: null } })).toBe(0);
+    await deleteUser(admin.actor, bob.id); // no longer blocked by an open dispute
+    expect(await prisma.user.findUnique({ where: { id: bob.id } })).toBeNull();
   });
 });

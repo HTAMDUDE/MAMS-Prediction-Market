@@ -39,13 +39,31 @@ export default async function Activity({ searchParams }: { searchParams: Promise
 
       <form className="flex gap-2">
         <Input name="q" defaultValue={q} placeholder="Search admin, action, user, market or detail" aria-label="Search the activity log" />
-        <Button variant="outline">Search</Button>
+        <Button variant="outline" className="h-8">Search</Button>
         {q && <Link href="/admin/activity" className={buttonVariants({ variant: "ghost" })}>Clear</Link>}
       </form>
 
       <Card className="p-2">
         {rows.length ? (
-          <Table>
+          <>
+          <ul className="divide-y md:hidden">
+            {rows.map((r) => (
+              <li key={r.id} className="space-y-0.5 px-2 py-3 text-sm">
+                <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+                  <b>{auditLabel(r.action)}</b>
+                  <span className="text-xs text-muted-foreground">{when(r.createdAt)}</span>
+                </div>
+                <div className="break-words">
+                  {r.targetType === "market" && r.targetId && r.action !== "market.delete"
+                    ? <Link href={`/market/${r.targetId}`} className="text-primary hover:underline">{r.targetLabel}</Link>
+                    : r.targetLabel}
+                </div>
+                {r.detail && <div className="break-words text-muted-foreground">{r.detail}</div>}
+                <div className="text-xs text-muted-foreground">by {r.actorName}</div>
+              </li>
+            ))}
+          </ul>
+          <Table className="hidden md:table">
             <TableHeader>
               <TableRow><TableHead>When</TableHead><TableHead>Admin</TableHead><TableHead>Action</TableHead><TableHead>Target</TableHead><TableHead>Details</TableHead></TableRow>
             </TableHeader>
@@ -65,6 +83,7 @@ export default async function Activity({ searchParams }: { searchParams: Promise
               ))}
             </TableBody>
           </Table>
+          </>
         ) : <p className="p-4 text-muted-foreground">{q ? "Nothing matches that search." : "No admin activity yet."}</p>}
       </Card>
 
