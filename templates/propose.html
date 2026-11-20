@@ -20,12 +20,15 @@
           <li><b>Nothing private</b>: no grades, health or questions about individual people.</li>
         </ul>
       </div>
+      {% include "_creator_stake.html" %}
       <div class="fee-box">
-        <strong>Costs Ⓜ{{ CREATION_FEE|int }} to propose.</strong> Refunded if you withdraw it; kept if an admin rejects it.
+        <strong>Costs Ⓜ{{ CREATION_FEE|int }} to propose, plus your opening bet.</strong> Both are held now. If an admin
+        approves, your opening bet is placed in the new market. If they reject it, your bet comes back but the
+        Ⓜ{{ CREATION_FEE|int }} fee is kept. Withdraw it yourself and you get both back.
         Once your market is live, <b>every trader pays you Ⓜ{{ ENTRY_FEE|int }}</b> on their first bet, so a market lots of
         people want to bet on earns you money.
       </div>
-      <button class="btn">Send for approval · Ⓜ{{ CREATION_FEE|int }}</button>
+      <button class="btn">Send for approval · Ⓜ{{ CREATION_FEE|int }} fee + opening bet</button>
     </form>
   </div>
 
@@ -46,6 +49,7 @@
         </div>
         <strong>{{ p.question }}</strong>
         <div class="muted small">{{ p.outcomes|join(' · ') }} — sent {{ p.created_at|ago }}</div>
+        {% if p.stake %}<div class="muted small">Opening bet: Ⓜ{{ p.stake|money }} on “{{ p.stake_label }}”{% if p.status == 'pending' %} (held){% elif p.status == 'rejected' %} (refunded){% else %} (placed){% endif %}</div>{% endif %}
         {% if p.review_note %}<p class="note"><b>Admin note:</b> {{ p.review_note }}</p>{% endif %}
         {% if p.status == 'approved' and p.market_id %}
           <a href="{{ url_for('market', mid=p.market_id) }}">View market →</a>

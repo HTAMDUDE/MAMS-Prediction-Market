@@ -14,7 +14,9 @@ assemblies, and anything else the admins post.
 - Anyone can **propose a market** from the Propose page. It goes live once an admin approves it.
 - **Fees reward good markets:** making a market costs Ⓜ20 (refunded if a proposal is withdrawn, kept if rejected),
   and every trader pays the market's creator Ⓜ10 on their first bet in it. Cancelled or deleted markets return
-  entry fees. Amounts are `CREATION_FEE` and `ENTRY_FEE` in `app.py`; the dispute window is `DISPUTE_WINDOW`.
+  entry fees. Market makers must also place an **opening bet of at least Ⓜ10** on an outcome of their own market
+  (held with a proposal and placed on approval; refunded if rejected or withdrawn). Amounts are `CREATION_FEE`,
+  `ENTRY_FEE` and `CREATOR_MIN_BET` in `app.py`; the dispute window is `DISPUTE_WINDOW`.
 - The **Activity** page lists every trade made on the site (who, what, which market, how much), with filters by
   buys/sells, trader and market. **Your balance history** (linked from it) logs every change to your own balance
   (buys, sells, payouts, losses, refunds, bonuses, admin adjustments) with your balance after each one. Admins can

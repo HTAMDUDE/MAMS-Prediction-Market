@@ -79,7 +79,7 @@ def test_full_flow():
     # admin creates a market
     tok = csrf(admin.get("/admin"))
     closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M")
-    r = admin.post("/admin/markets", data={"csrf_token": tok, "question": "Snow day?", "outcomes": "Yes\nNo",
+    r = admin.post("/admin/markets", data={"stake": "10", "stake_pick": "0", "csrf_token": tok, "question": "Snow day?", "outcomes": "Yes\nNo",
                                            "description": "Resolves YES if the school announces a snow day.", "rules_source": "Principal's email",
                                            "category": "Weather", "closes_at": closes, "liquidity": "medium"})
     assert r.status_code == 302
@@ -96,9 +96,10 @@ def test_full_flow():
     assert "You paid" in r.get_data(as_text=True)
     bal = db.execute("SELECT balance FROM users WHERE username='bob'").fetchone()[0]
     assert bal == pytest.approx(890)  # Ⓜ100 bet + Ⓜ10 entry fee on his first bet in this market
-    # the admin paid Ⓜ20 to create the market and earned Bob's Ⓜ10 entry fee
-    assert db.execute("SELECT balance FROM users WHERE username='teacher'").fetchone()[0] == pytest.approx(990)
-    shares = db.execute("SELECT shares FROM positions WHERE outcome_id=?", (yes,)).fetchone()[0]
+    # the admin paid Ⓜ20 to create the market, bet Ⓜ10 as the opening bet, and earned Bob's Ⓜ10 entry fee
+    assert db.execute("SELECT balance FROM users WHERE username='teacher'").fetchone()[0] == pytest.approx(980)
+    shares = db.execute("SELECT p.shares FROM positions p JOIN users u ON u.id = p.user_id "
+                        "WHERE p.outcome_id=? AND u.username='bob'", (yes,)).fetchone()[0]
     assert shares > 100  # bought below 1 coin/share
 
     # can't overspend
@@ -253,7 +254,7 @@ def test_proposals_flow():
 
         def propose(question):
             tok = csrf(sam.get("/propose"))
-            return sam.post("/propose", data={"csrf_token": tok, "question": question, "description": "Resolves YES if a live band plays.",
+            return sam.post("/propose", data={"stake": "10", "stake_pick": "0", "csrf_token": tok, "question": question, "description": "Resolves YES if a live band plays.",
                                               "outcomes": "Yes\nNo", "category": "Events", "closes_at": closes},
                             follow_redirects=True)
 
@@ -445,7 +446,7 @@ def test_form_market_stores_scaled_b():
         admin = appmod.app.test_client()
         signup(admin, "formboss")
         closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M")
-        admin.post("/admin/markets", data={"csrf_token": csrf(admin.get("/admin")), "question": "Eight?",
+        admin.post("/admin/markets", data={"stake": "10", "stake_pick": "0", "csrf_token": csrf(admin.get("/admin")), "question": "Eight?",
                                            "outcomes": "\n".join("abcdefgh"), "category": "Other",
                                            "description": "The winner is the first letter drawn.",
                                            "closes_at": closes, "liquidity": "medium"})
@@ -573,7 +574,8 @@ def test_undisputed_result_finalizes_once_and_pays_winners():
     old = appmod.DB_PATH
     try:
         db, mid, yes, no, admin, bob, eve = _closed_market_with_bet()
-        shares = db.execute("SELECT shares FROM positions WHERE outcome_id=?", (yes,)).fetchone()[0]
+        shares = db.execute("SELECT p.shares FROM positions p JOIN users u ON u.id = p.user_id "
+                        "WHERE p.outcome_id=? AND u.username='bob'", (yes,)).fetchone()[0]
         _post(admin, f"/admin/markets/{mid}/propose-result", outcome_id=yes)
         m = db.execute("SELECT * FROM markets WHERE id=?", (mid,)).fetchone()
         assert m["status"] == "open" and m["proposed_outcome_id"] == yes and m["finalizes_at"] > appmod.now_str()
@@ -856,7 +858,7 @@ def test_over_under_create_trade_and_resolve():
         signup(admin, "ouboss")
         signup(kid, "oukid")
         closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M")
-        r = admin.post("/admin/markets", data={
+        r = admin.post("/admin/markets", data={"stake": "10", "stake_pick": "0", 
             "csrf_token": csrf(admin.get("/admin")), "kind": "overunder", "ou_line": "85", "ou_unit": "%",
             "question": "Physics test average?", "description": "The class average as announced by the teacher.",
             "category": "Academics", "closes_at": closes, "outcomes": "should be ignored"}, follow_redirects=True)
@@ -905,7 +907,7 @@ def test_over_under_proposal_and_edit():
         signup(kid, "ouproposer")
         closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M")
         assert 'value="overunder"' in kid.get("/propose").get_data(as_text=True)
-        kid.post("/propose", data={"csrf_token": csrf(kid.get("/propose")), "kind": "overunder", "ou_line": "90",
+        kid.post("/propose", data={"stake": "10", "stake_pick": "0", "csrf_token": csrf(kid.get("/propose")), "kind": "overunder", "ou_line": "90",
                                    "ou_unit": "minutes", "question": "How long is the assembly?",
                                    "description": "From scheduled start to dismissal, timed by the admins.",
                                    "category": "Events", "closes_at": closes})
@@ -922,19 +924,34 @@ def test_over_under_proposal_and_edit():
         mid = db.execute("SELECT market_id FROM proposals WHERE id=?", (p["id"],)).fetchone()[0]
         assert [o["label"] for o in appmod.get_outcomes(db, mid)] == ["Over 90 minutes", "Under 90 minutes"]
 
-        # before any bets the line can be edited; afterwards it's locked
-        edit = lambda line: admin.post(f"/admin/markets/{mid}/edit", data={
-            "csrf_token": csrf(admin.get(f"/admin/markets/{mid}/edit")), "question": "How long is the assembly?",
-            "description": "From scheduled start to dismissal, timed by the admins.", "category": "Events",
-            "closes_at": closes, "ou_line": line, "ou_unit": "min"})
-        assert 'name="ou_line"' in admin.get(f"/admin/markets/{mid}/edit").get_data(as_text=True)
-        edit("75.5")
-        assert [o["label"] for o in appmod.get_outcomes(db, mid)] == ["Over 75.5 min", "Under 75.5 min"]
+        # the proposer's opening bet (Ⓜ10 on "Over 90 minutes") was placed when it was approved
         kid_id = db.execute("SELECT id FROM users WHERE username='ouproposer'").fetchone()[0]
-        appmod.execute_trade(db, kid_id, mid, appmod.get_outcomes(db, mid)[1]["id"], "buy", 50)
-        edit("120")
-        assert db.execute("SELECT ou_line FROM markets WHERE id=?", (mid,)).fetchone()[0] == 75.5
-        assert [o["label"] for o in appmod.get_outcomes(db, mid)] == ["Over 75.5 min", "Under 75.5 min"]
+        pos = db.execute("SELECT o.label FROM positions p JOIN outcomes o ON o.id = p.outcome_id WHERE p.user_id=?",
+                         (kid_id,)).fetchall()
+        assert [r[0] for r in pos] == ["Over 90 minutes"]
+
+        def edit(market, line, description):
+            return admin.post(f"/admin/markets/{market}/edit", data={
+                "csrf_token": csrf(admin.get(f"/admin/markets/{market}/edit")), "question": "How long is the assembly?",
+                "description": description, "category": "Events", "closes_at": closes, "ou_line": line, "ou_unit": "min"})
+
+        # with only the creator's bet: the line is locked (shares depend on it) but the rules can still be fixed
+        rules = lambda market: db.execute("SELECT description FROM markets WHERE id=?", (market,)).fetchone()[0]
+        edit(mid, "120", "Timed from the first bell to dismissal by the admins.")
+        assert db.execute("SELECT ou_line FROM markets WHERE id=?", (mid,)).fetchone()[0] == 90
+        assert rules(mid) == "Timed from the first bell to dismissal by the admins."
+        # once someone else bets, the rules lock too
+        other = db.execute("INSERT INTO users (username, password_hash, balance, created_at) VALUES ('ouother', 'x', 500, ?)",
+                           (appmod.now_str(),)).lastrowid
+        appmod.execute_trade(db, other, mid, appmod.get_outcomes(db, mid)[1]["id"], "buy", 50)
+        edit(mid, "120", "Changed after betting?")
+        assert rules(mid) == "Timed from the first bell to dismissal by the admins."
+
+        # a market with no bets at all can still have its line changed
+        fresh = appmod.create_market(db, "How long is the assembly?", RULES, "Events", closes.replace("T", " ") + ":00",
+                                     appmod.ou_labels(90, "min"), 1000, None, "", "", 90, "min")
+        edit(fresh, "75.5", RULES)
+        assert [o["label"] for o in appmod.get_outcomes(db, fresh)] == ["Over 75.5 min", "Under 75.5 min"]
     finally:
         appmod.DB_PATH = old
 
@@ -1182,22 +1199,22 @@ def test_creation_fee_for_proposals_and_admin_markets():
         form = lambda q: {"kind": "yesno", "question": q, "description": RULES, "category": "Events", "closes_at": closes}
 
         def propose(q):
-            return kid.post("/propose", data={"csrf_token": csrf(kid.get("/propose")), **form(q)}, follow_redirects=True)
+            return kid.post("/propose", data={"stake": "10", "stake_pick": "0", "csrf_token": csrf(kid.get("/propose")), **form(q)}, follow_redirects=True)
 
         assert "Costs Ⓜ20 to propose" in kid.get("/propose").get_data(as_text=True)
         assert "You paid the Ⓜ20 fee" in propose("Kept?").get_data(as_text=True)
-        assert bal("feekid") == 980
+        assert bal("feekid") == 970          # Ⓜ20 fee + Ⓜ10 opening bet held
         propose("Withdrawn?")
-        assert bal("feekid") == 960
+        assert bal("feekid") == 940
 
         # withdrawing refunds; rejecting keeps the fee
         pid = db.execute("SELECT id FROM proposals WHERE question='Withdrawn?'").fetchone()[0]
         r = kid.post(f"/propose/{pid}/withdraw", data={"csrf_token": csrf(kid.get("/propose"))}, follow_redirects=True)
-        assert "Ⓜ20 fee was refunded" in r.get_data(as_text=True) and bal("feekid") == 980
+        assert "Ⓜ30.00 was refunded" in r.get_data(as_text=True) and bal("feekid") == 970
         pid = db.execute("SELECT id FROM proposals WHERE question='Kept?'").fetchone()[0]
         admin.post(f"/admin/proposals/{pid}", data={"csrf_token": csrf(admin.get(f"/admin/proposals/{pid}")),
                                                      "decision": "reject", "review_note": "Too vague"})
-        assert bal("feekid") == 980
+        assert bal("feekid") == 980          # opening bet back, fee kept
         assert "fee kept" in kid.get("/propose").get_data(as_text=True)
 
         # approving doesn't charge again
@@ -1205,7 +1222,9 @@ def test_creation_fee_for_proposals_and_admin_markets():
         pid = db.execute("SELECT id FROM proposals WHERE question='Approved?'").fetchone()[0]
         admin.post(f"/admin/proposals/{pid}", data={"csrf_token": csrf(admin.get(f"/admin/proposals/{pid}")),
                                                      "decision": "approve", **form("Approved?")})
-        assert bal("feekid") == 960 and bal("feeboss") == 1000
+        assert bal("feekid") == 950 and bal("feeboss") == 1000   # held Ⓜ10 became a real bet
+        mid = db.execute("SELECT market_id FROM proposals WHERE id=?", (pid,)).fetchone()[0]
+        assert db.execute("SELECT COUNT(*) FROM trades WHERE market_id=?", (mid,)).fetchone()[0] == 1
 
         # can't propose without Ⓜ20
         db.execute("UPDATE users SET balance = 15 WHERE username='feekid'")
@@ -1214,16 +1233,18 @@ def test_creation_fee_for_proposals_and_admin_markets():
         assert bal("feekid") == 15
 
         # admins pay too when creating directly
-        r = admin.post("/admin/markets", data={"csrf_token": csrf(admin.get("/admin")), **form("Admin made?")},
+        r = admin.post("/admin/markets", data={"stake": "10", "stake_pick": "0", "csrf_token": csrf(admin.get("/admin")), **form("Admin made?")},
                        follow_redirects=True)
-        assert "You paid the Ⓜ20 creation fee" in r.get_data(as_text=True) and bal("feeboss") == 980
+        assert "You paid the Ⓜ20 creation fee and bet Ⓜ10.00" in r.get_data(as_text=True) and bal("feeboss") == 970
         db.execute("UPDATE users SET balance = 5 WHERE username='feeboss'")
-        r = admin.post("/admin/markets", data={"csrf_token": csrf(admin.get("/admin")), **form("Too poor?")},
+        r = admin.post("/admin/markets", data={"stake": "10", "stake_pick": "0", "csrf_token": csrf(admin.get("/admin")), **form("Too poor?")},
                        follow_redirects=True)
-        assert "costs Ⓜ20" in r.get_data(as_text=True)
+        assert "You need Ⓜ30.00" in r.get_data(as_text=True)
         assert db.execute("SELECT COUNT(*) FROM markets WHERE question='Too poor?'").fetchone()[0] == 0
         kinds = [r[0] for r in db.execute("SELECT kind FROM activity WHERE user_id=(SELECT id FROM users WHERE username='feekid')")]
         assert kinds.count("fee") == 3 and kinds.count("refund") == 1  # Kept, Withdrawn, Approved; Broke? was blocked
+        # stakes: held x3 (Kept, Withdrawn, Approved), returned x3 (withdrawn, rejected, released to bet)
+        assert kinds.count("stake") == 6 and kinds.count("buy") == 1
     finally:
         appmod.DB_PATH = old
 
@@ -1355,5 +1376,95 @@ def test_pending_results_moved_onto_shorter_dispute_window():
         appmod.app.test_client().get("/")
         status = lambda mid: db.execute("SELECT status FROM markets WHERE id=?", (mid,)).fetchone()[0]
         assert (status(stale), status(recent), status(already)) == ("resolved", "open", "open")
+    finally:
+        appmod.DB_PATH = old
+
+
+# ---------------------------------------------------------------- creator's opening bet
+
+def test_read_stake_rules():
+    labels = ["A", "B", "C"]
+    assert appmod.read_stake({"stake": "10", "stake_pick": "2"}, labels) == (2, 10, None)
+    assert "at least Ⓜ10" in appmod.read_stake({"stake": "9.99", "stake_pick": "0"}, labels)[2]
+    assert "at least Ⓜ10" in appmod.read_stake({"stake": "", "stake_pick": "0"}, labels)[2]
+    assert "at least Ⓜ10" in appmod.read_stake({"stake": "inf", "stake_pick": "0"}, labels)[2]
+    assert "Pick which outcome" in appmod.read_stake({"stake": "10", "stake_pick": "3"}, labels)[2]
+    assert "Pick which outcome" in appmod.read_stake({"stake": "10"}, labels)[2]
+
+
+def test_opening_bet_on_proposals_and_admin_markets():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        admin, kid = appmod.app.test_client(), appmod.app.test_client()
+        signup(admin, "stakeboss")
+        signup(kid, "stakekid")
+        uid = lambda n: db.execute("SELECT id FROM users WHERE username=?", (n,)).fetchone()[0]
+        bal = lambda n: db.execute("SELECT balance FROM users WHERE username=?", (n,)).fetchone()[0]
+        closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M")
+        multi = {"kind": "multi", "outcomes": "December\nJanuary\nFebruary", "question": "First snow day?",
+                 "description": RULES, "category": "Weather", "closes_at": closes}
+
+        page = kid.get("/propose").get_data(as_text=True)
+        assert 'name="stake"' in page and 'name="stake_pick"' in page and "opening bet" in page
+
+        # below the minimum is refused and nothing is charged
+        r = kid.post("/propose", data={"csrf_token": csrf(kid.get("/propose")), **multi, "stake": "5", "stake_pick": "1"},
+                     follow_redirects=True)
+        assert "at least Ⓜ10" in r.get_data(as_text=True) and bal("stakekid") == 1000
+
+        # a Ⓜ25 opening bet on January is held, then placed on approval
+        kid.post("/propose", data={"csrf_token": csrf(kid.get("/propose")), **multi, "stake": "25", "stake_pick": "1"})
+        p = db.execute("SELECT * FROM proposals WHERE question='First snow day?'").fetchone()
+        assert (p["stake"], p["stake_pick"], p["stake_label"]) == (25, 1, "January") and bal("stakekid") == 955
+        assert "Opening bet: Ⓜ25.00 on “January” (held)" in kid.get("/propose").get_data(as_text=True)
+        review = admin.get(f"/admin/proposals/{p['id']}").get_data(as_text=True)
+        assert "Ⓜ25.00 on “January”" in review
+
+        # if the admin removes January while reviewing, approval is refused
+        approve = lambda outcomes: admin.post(f"/admin/proposals/{p['id']}", data={
+            "csrf_token": csrf(admin.get(f"/admin/proposals/{p['id']}")), "decision": "approve",
+            **{**multi, "outcomes": outcomes}}, follow_redirects=True)
+        assert "one of the outcomes any more" in approve("December\nFebruary\nMarch").get_data(as_text=True)
+        assert db.execute("SELECT status FROM proposals WHERE id=?", (p["id"],)).fetchone()[0] == "pending"
+
+        # reordering is fine: the bet follows the name
+        r = approve("February\njanuary\nDecember")
+        assert "opening bet on “january” is placed" in r.get_data(as_text=True)
+        mid = db.execute("SELECT market_id FROM proposals WHERE id=?", (p["id"],)).fetchone()[0]
+        held = db.execute("SELECT o.label, p.cost FROM positions p JOIN outcomes o ON o.id = p.outcome_id "
+                          "WHERE p.user_id=?", (uid("stakekid"),)).fetchall()
+        assert [tuple(h) for h in held] == [("january", 25)] and bal("stakekid") == 955
+        assert db.execute("SELECT created_by FROM markets WHERE id=?", (mid,)).fetchone()[0] == uid("stakekid")
+
+        # yes/no: renaming the side keeps the bet on the same side
+        yn = {"kind": "yesno", "question": "Snow day?", "description": RULES, "category": "Weather", "closes_at": closes}
+        kid.post("/propose", data={"csrf_token": csrf(kid.get("/propose")), **yn, "stake": "10", "stake_pick": "1"})
+        p2 = db.execute("SELECT id FROM proposals WHERE question='Snow day?'").fetchone()[0]
+        assert appmod.match_stake_pick(db.execute("SELECT * FROM proposals WHERE id=?", (p2,)).fetchone(),
+                                       ["Over 2.5", "Under 2.5"]) == 1
+
+        # proposer banned before approval: the market goes live and the held bet is refunded instead
+        db.execute("INSERT INTO trade_bans (user_id, created_at) VALUES (?, ?)", (uid("stakekid"), appmod.now_str()))
+        before = bal("stakekid")
+        r = admin.post(f"/admin/proposals/{p2}", data={"csrf_token": csrf(admin.get(f"/admin/proposals/{p2}")),
+                                                       "decision": "approve", **yn}, follow_redirects=True)
+        assert "be placed (" in r.get_data(as_text=True) and bal("stakekid") == before + 10
+
+        # admins bet when creating directly
+        r = admin.post("/admin/markets", data={"csrf_token": csrf(admin.get("/admin")), **yn, "question": "Admin snow?",
+                                               "stake": "40", "stake_pick": "0"}, follow_redirects=True)
+        assert "bet Ⓜ40.00 on “Yes”" in r.get_data(as_text=True) and bal("stakeboss") == 1000 - 20 - 40
+        r = admin.post("/admin/markets", data={"csrf_token": csrf(admin.get("/admin")), **yn, "question": "No stake?",
+                                               "stake": "0", "stake_pick": "0"}, follow_redirects=True)
+        assert "at least Ⓜ10" in r.get_data(as_text=True)
+        assert db.execute("SELECT COUNT(*) FROM markets WHERE question='No stake?'").fetchone()[0] == 0
+
+        # running balances in everyone's history still add up
+        for name in ("stakekid", "stakeboss"):
+            running = 0
+            for r in db.execute("SELECT amount, balance_after FROM activity WHERE user_id=? ORDER BY id", (uid(name),)):
+                running = round(running + r[0], 2)
+                assert r[1] == pytest.approx(running, abs=0.02)
     finally:
         appmod.DB_PATH = old

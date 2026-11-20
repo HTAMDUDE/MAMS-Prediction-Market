@@ -193,6 +193,7 @@ function setupMarketForm(form) {
   const ouInputs = form.querySelectorAll('input[name=ou_line], input[name=ou_unit]');
   const outcomes = form.querySelector('textarea[name=outcomes]');
   const rulesLabel = form.querySelector('[data-rules-label]');
+  const stakePick = form.querySelector('[data-stake-pick]');
   const rules = form.querySelector('textarea[name=description]');
   const preview = document.querySelector('#market-preview .preview-body');
   const field = name => (form.querySelector(`[name=${name}]`) || {}).value || '';
@@ -223,6 +224,18 @@ function setupMarketForm(form) {
       outcomes.disabled = !multi;
       outcomes.required = multi;
       if (multi && /^\s*yes\s*\n\s*no\s*$/i.test(outcomes.value)) outcomes.value = 'Option A\nOption B';
+    }
+    if (stakePick) {
+      // the creator's opening bet can be on any of the market's outcomes
+      const names = yesno ? ['Yes', 'No']
+        : ou ? [`Over ${ouText()}`, `Under ${ouText()}`]
+        : (outcomes ? outcomes.value.split('\n').map(x => x.trim()).filter(Boolean).slice(0, 8) : []);
+      const keep = stakePick.options.length ? stakePick.value : stakePick.dataset.selected;
+      const current = Array.from(stakePick.options).map(o => o.textContent);
+      if (current.join('\n') !== names.join('\n')) {
+        stakePick.replaceChildren(...names.map((n, i) => { const o = el('option', '', n); o.value = i; return o; }));
+        stakePick.value = Number(keep) < names.length ? keep : 0;
+      }
     }
     const heading = { yesno: 'Resolves YES if…', overunder: 'What number is measured, and how', multi: 'How the winner is decided' }[k];
     if (rulesLabel) rulesLabel.textContent = heading;

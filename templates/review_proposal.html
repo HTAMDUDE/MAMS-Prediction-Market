@@ -6,6 +6,11 @@
   <h1>Review proposal</h1>
   <p class="muted">Proposed by <strong>{{ p.username }}</strong> {{ p.created_at|ago }}.
     {% if p.status == 'pending' %}You can fix the wording or details before approving.{% endif %}</p>
+  {% if p.stake %}
+  <p class="fee-box">{{ p.username }}'s opening bet: <b>Ⓜ{{ p.stake|money }} on “{{ p.stake_label }}”</b>. It's placed when you
+    approve, and refunded if you reject. If you rename outcomes, keep that one (on a two-outcome market the same side
+    is kept).</p>
+  {% endif %}
 
   {% if p.status != 'pending' %}
     <p class="flash flash-error">This proposal was already {{ p.status }}.</p>

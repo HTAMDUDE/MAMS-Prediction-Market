@@ -318,3 +318,6 @@ main { padding-top: 8px; padding-bottom: 32px; }
            color-mix(in srgb, var(--gold) 40%, transparent); border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; }
 .kind-fee { background: color-mix(in srgb, var(--down) 12%, transparent); color: var(--down); }
 .kind-earning { background: color-mix(in srgb, var(--up) 14%, transparent); color: var(--up); }
+.stake-field { margin-top: 14px; }
+.stake-field .row { margin-top: 4px; }
+.stake-field .field { margin-bottom: 0; }

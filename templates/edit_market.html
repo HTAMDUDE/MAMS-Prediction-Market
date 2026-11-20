@@ -12,18 +12,18 @@
     <label class="field"><span>Question</span>
       <input name="question" maxlength="200" required value="{{ m.question }}">
     </label>
-    {% if has_trades %}
+    {% if rules_locked %}
       <p class="muted small">People have already bet, so the written rules are locked. Add a dated clarification
         on the market page instead.</p>
     {% endif %}
     <label class="field"><span>Resolves YES if… / how the winner is decided</span>
-      <textarea name="description" rows="3" {{ 'readonly' if has_trades }}>{{ m.description }}</textarea>
+      <textarea name="description" rows="3" {{ 'readonly' if rules_locked }}>{{ m.description }}</textarea>
     </label>
     <label class="field"><span>Source</span>
-      <input name="rules_source" maxlength="300" value="{{ m.rules_source }}" {{ 'readonly' if has_trades }}>
+      <input name="rules_source" maxlength="300" value="{{ m.rules_source }}" {{ 'readonly' if rules_locked }}>
     </label>
     <label class="field"><span>Otherwise / edge cases</span>
-      <textarea name="rules_otherwise" rows="2" maxlength="1000" {{ 'readonly' if has_trades }}>{{ m.rules_otherwise }}</textarea>
+      <textarea name="rules_otherwise" rows="2" maxlength="1000" {{ 'readonly' if rules_locked }}>{{ m.rules_otherwise }}</textarea>
     </label>
 
     {% if m.ou_line is not none %}

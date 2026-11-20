@@ -50,8 +50,10 @@ DISPUTE_HOURS = int(DISPUTE_WINDOW.total_seconds() // 3600)
 # Making a market costs CREATION_FEE (refunded if you withdraw your proposal, kept if it's rejected), and everyone
 # else pays the market's creator ENTRY_FEE on their first bet in it. Good markets that attract traders earn their
 # creator money; flooding the site with junk proposals costs money.
-CREATION_FEE = 20.0
+CREATION_FEE = 10.0
 ENTRY_FEE = 10.0
+# Whoever makes a market must also bet at least this much on it, so they have skin in the game.
+CREATOR_MIN_BET = 10.0
 CATEGORIES = ["Academics", "Competitions", "Sports", "Events", "Campus Life", "Weather", "Other"]
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,20}$")
 EPS = 1e-9
@@ -126,7 +128,10 @@ NEW_COLUMNS = {
                 ("ou_line", "REAL"), ("ou_unit", "TEXT NOT NULL DEFAULT ''"), ("ou_result", "REAL")],
     "proposals": [("rules_source", "TEXT NOT NULL DEFAULT ''"), ("rules_otherwise", "TEXT NOT NULL DEFAULT ''"),
                   ("ou_line", "REAL"), ("ou_unit", "TEXT NOT NULL DEFAULT ''"),
-                  ("fee", "REAL NOT NULL DEFAULT 0")],  # creation fee paid, refunded on withdrawal
+                  ("fee", "REAL NOT NULL DEFAULT 0"),  # creation fee paid, refunded on withdrawal
+                  # the proposer's opening bet, held until approval (refunded if rejected or withdrawn)
+                  ("stake", "REAL NOT NULL DEFAULT 0"), ("stake_pick", "INTEGER"),
+                  ("stake_label", "TEXT NOT NULL DEFAULT ''")],
 }
 
 
@@ -810,7 +815,8 @@ def inject_globals():
     return {"csrf_token": csrf_token, "user": g.user, "can_bonus": can_bonus, "pending_proposals": pending,
             "owner_id": g.get("owner_id"), "is_owner": is_owner(),
             "CURRENCY": CURRENCY, "DAILY_BONUS": DAILY_BONUS, "CATEGORIES": CATEGORIES,
-            "DISPUTE_HOURS": DISPUTE_HOURS, "CREATION_FEE": CREATION_FEE, "ENTRY_FEE": ENTRY_FEE}
+            "DISPUTE_HOURS": DISPUTE_HOURS, "CREATION_FEE": CREATION_FEE, "ENTRY_FEE": ENTRY_FEE,
+            "CREATOR_MIN_BET": CREATOR_MIN_BET}
 
 
 @app.template_filter("money")
@@ -1301,22 +1307,59 @@ def read_market_form(f):
     }, None
 
 
+def read_stake(f, labels):
+    """The creator's opening bet from a form. Returns (outcome_index, amount, error)."""
+    try:
+        amount = cents(float(str(f.get("stake", "")).replace(",", "").strip()))
+        if not math.isfinite(amount):
+            raise ValueError
+    except ValueError:
+        return None, 0.0, f"Enter your opening bet (at least Ⓜ{CREATOR_MIN_BET:,.0f})."
+    if amount < CREATOR_MIN_BET:
+        return None, 0.0, f"Your opening bet must be at least Ⓜ{CREATOR_MIN_BET:,.0f}."
+    try:
+        pick = int(f.get("stake_pick", ""))
+    except ValueError:
+        pick = -1
+    if not 0 <= pick < len(labels):
+        return None, 0.0, "Pick which outcome your opening bet is on."
+    return pick, amount, None
+
+
+def place_creator_stake(db, mid, user_id, pick, amount):
+    """The creator's opening bet: a normal trade on their own market (no entry fee, since they're the creator)."""
+    outcome_id = get_outcomes(db, mid)[pick]["id"]
+    return execute_trade(db, user_id, mid, outcome_id, "buy", amount)
+
+
 @app.post("/admin/markets")
 @admin_required
 def admin_create():
     fields, error = read_market_form(request.form)
+    if not error:
+        pick, stake, error = read_stake(request.form, fields["labels"])
+    if not error and g.user["balance"] + EPS < CREATION_FEE + stake:
+        error = (f"You need Ⓜ{CREATION_FEE + stake:,.2f} (Ⓜ{CREATION_FEE:,.0f} fee + Ⓜ{stake:,.2f} opening bet) "
+                 f"but have Ⓜ{g.user['balance']:,.2f}.")
     if error:
         flash(error, "error")
         return redirect(url_for("admin"))
+    db = get_db()
     try:
-        mid = create_market(get_db(), fields["question"], fields["description"], fields["category"],
+        mid = create_market(db, fields["question"], fields["description"], fields["category"],
                             fields["closes_at"], fields["labels"], fields["b"], g.user["id"],
                             fields["rules_source"], fields["rules_otherwise"], fields["ou_line"], fields["ou_unit"],
                             charge_fee=True)
     except TradeError as e:
         flash(str(e), "error")
         return redirect(url_for("admin"))
-    flash(f"Market created. You paid the Ⓜ{CREATION_FEE:,.0f} creation fee.", "success")
+    try:
+        place_creator_stake(db, mid, g.user["id"], pick, stake)
+    except TradeError as e:  # e.g. balance changed in between; the market exists, the bet didn't go through
+        flash(f"Market created, but your opening bet failed: {e}", "error")
+        return redirect(url_for("market", mid=mid))
+    flash(f"Market created. You paid the Ⓜ{CREATION_FEE:,.0f} creation fee and bet Ⓜ{stake:,.2f} on "
+          f"“{fields['labels'][pick]}”.", "success")
     return redirect(url_for("market", mid=mid))
 
 
@@ -1335,24 +1378,33 @@ def propose():
         fields, error = read_market_form(request.form)
         if pending >= MAX_PENDING_PROPOSALS:
             error = f"You already have {MAX_PENDING_PROPOSALS} proposals waiting. Wait for an admin to review them."
-        elif not error and g.user["balance"] + EPS < CREATION_FEE:
-            error = f"Proposing a market costs Ⓜ{CREATION_FEE:,.0f}. You have Ⓜ{g.user['balance']:,.2f}."
+        if not error:
+            pick, stake, error = read_stake(request.form, fields["labels"])
+        if not error and g.user["balance"] + EPS < CREATION_FEE + stake:
+            error = (f"Proposing costs Ⓜ{CREATION_FEE:,.0f} plus your Ⓜ{stake:,.2f} opening bet "
+                     f"(Ⓜ{CREATION_FEE + stake:,.2f} total). You have Ⓜ{g.user['balance']:,.2f}.")
         if error:
             flash(error, "error")
             return render_template("propose.html", form=request.form, mine=my_proposals(db))
         db.execute("BEGIN IMMEDIATE")
         try:
             charged = db.execute("UPDATE users SET balance = ROUND(balance - ?, 2) WHERE id = ? AND balance >= ?",
-                                 (CREATION_FEE, g.user["id"], CREATION_FEE - EPS)).rowcount
+                                 (CREATION_FEE + stake, g.user["id"], CREATION_FEE + stake - EPS)).rowcount
             if not charged:
-                raise TradeError(f"Proposing a market costs Ⓜ{CREATION_FEE:,.0f}.")
+                raise TradeError(f"Proposing costs Ⓜ{CREATION_FEE + stake:,.2f} including your opening bet.")
+            db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (stake, g.user["id"]))
             log_activity(db, g.user["id"], "fee", -CREATION_FEE, None, f"Market proposal fee: “{fields['question']}”")
+            db.execute("UPDATE users SET balance = ROUND(balance - ?, 2) WHERE id = ?", (stake, g.user["id"]))
+            log_activity(db, g.user["id"], "stake", -stake, None,
+                         f"Opening bet held: Ⓜ{stake:,.2f} on “{fields['labels'][pick]}” for “{fields['question']}”")
             db.execute(
                 "INSERT INTO proposals (user_id, question, description, category, outcomes, closes_at, created_at, "
-                "rules_source, rules_otherwise, ou_line, ou_unit, fee) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "rules_source, rules_otherwise, ou_line, ou_unit, fee, stake, stake_pick, stake_label) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (g.user["id"], fields["question"], fields["description"], fields["category"],
                  json.dumps(fields["labels"]), fields["closes_at"], now_str(),
-                 fields["rules_source"], fields["rules_otherwise"], fields["ou_line"], fields["ou_unit"], CREATION_FEE))
+                 fields["rules_source"], fields["rules_otherwise"], fields["ou_line"], fields["ou_unit"], CREATION_FEE,
+                 stake, pick, fields["labels"][pick]))
             db.execute("COMMIT")
         except TradeError as e:
             db.execute("ROLLBACK")
@@ -1361,10 +1413,28 @@ def propose():
         except Exception:
             db.execute("ROLLBACK")
             raise
-        flash(f"Thanks! Your market was sent to the admins for approval. You paid the Ⓜ{CREATION_FEE:,.0f} fee.",
-              "success")
+        flash(f"Thanks! Your market was sent to the admins for approval. You paid the Ⓜ{CREATION_FEE:,.0f} fee, "
+              f"and your Ⓜ{stake:,.2f} opening bet is held until it's approved.", "success")
         return redirect(url_for("propose"))
     return render_template("propose.html", form={}, mine=my_proposals(db))
+
+
+def match_stake_pick(p, labels):
+    """Which of the final outcomes the proposer's opening bet goes on, after any edits during review.
+    Same name wins; otherwise a two-outcome market keeps the same side (Yes/Over first, No/Under second)."""
+    lowered = [x.lower() for x in labels]
+    if p["stake_label"].lower() in lowered:
+        return lowered.index(p["stake_label"].lower())
+    if len(labels) == 2 and len(json.loads(p["outcomes"])) == 2 and p["stake_pick"] in (0, 1):
+        return p["stake_pick"]
+    return None
+
+
+def release_stake(db, p, reason):
+    """Give a proposal's held opening bet back to the proposer. Must run inside a transaction."""
+    if p["stake"] > 0:
+        db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (p["stake"], p["user_id"]))
+        log_activity(db, p["user_id"], "stake", p["stake"], None, f"{reason}: “{p['question']}”")
 
 
 def my_proposals(db):
@@ -1384,9 +1454,11 @@ def withdraw_proposal(pid):
         if p["fee"] > 0:
             db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (p["fee"], g.user["id"]))
             log_activity(db, g.user["id"], "refund", p["fee"], None, f"Proposal withdrawn, fee refunded: “{p['question']}”")
+        release_stake(db, p, "Proposal withdrawn, opening bet refunded")
     db.execute("COMMIT")
     if p:
-        flash("Proposal withdrawn." + (f" Your Ⓜ{p['fee']:,.0f} fee was refunded." if p["fee"] > 0 else ""), "success")
+        back = p["fee"] + p["stake"]
+        flash("Proposal withdrawn." + (f" Ⓜ{back:,.2f} was refunded." if back > 0 else ""), "success")
     else:
         flash("That proposal can't be withdrawn.", "error")
     return redirect(url_for("propose"))
@@ -1407,11 +1479,24 @@ def admin_review(pid):
             return redirect(url_for("admin"))
         note = request.form.get("review_note", "").strip()[:500]
         if request.form.get("decision") == "reject":
-            db.execute("UPDATE proposals SET status = 'rejected', review_note = ?, reviewed_by = ?, reviewed_at = ? "
-                       "WHERE id = ? AND status = 'pending'", (note, g.user["id"], now_str(), pid))
-            flash("Proposal rejected.", "success")
+            db.execute("BEGIN IMMEDIATE")
+            done = db.execute("UPDATE proposals SET status = 'rejected', review_note = ?, reviewed_by = ?, "
+                              "reviewed_at = ? WHERE id = ? AND status = 'pending'",
+                              (note, g.user["id"], now_str(), pid)).rowcount
+            if done:
+                release_stake(db, p, "Proposal rejected, opening bet refunded")
+            db.execute("COMMIT")
+            flash("Proposal rejected." + (f" {p['username']}'s Ⓜ{p['stake']:,.2f} opening bet was refunded; "
+                                          f"the Ⓜ{p['fee']:,.0f} fee is kept." if done and p["stake"] else ""),
+                  "success")
             return redirect(url_for("admin") + "#proposals")
         fields, error = read_market_form(request.form)
+        stake_pick = None
+        if not error and p["stake"] > 0:
+            stake_pick = match_stake_pick(p, fields["labels"])
+            if stake_pick is None:
+                error = (f"{p['username']}'s opening bet is on “{p['stake_label']}”, which isn't one of the outcomes "
+                         "any more. Keep that outcome, or reject the proposal.")
         if error:
             flash(error, "error")
             return render_template("review_proposal.html", p=p, form=request.form)
@@ -1425,7 +1510,17 @@ def admin_review(pid):
                             fields["closes_at"], fields["labels"], fields["b"], p["user_id"],
                             fields["rules_source"], fields["rules_otherwise"], fields["ou_line"], fields["ou_unit"])
         db.execute("UPDATE proposals SET market_id = ? WHERE id = ?", (mid, pid))
-        flash(f"Approved! The market is now live. (Proposed by {p['username']}.)", "success")
+        bet_note = ""
+        if p["stake"] > 0:
+            db.execute("BEGIN IMMEDIATE")
+            release_stake(db, p, "Opening bet released to place it")
+            db.execute("COMMIT")
+            try:
+                place_creator_stake(db, mid, p["user_id"], stake_pick, p["stake"])
+                bet_note = f" {p['username']}'s Ⓜ{p['stake']:,.2f} opening bet on “{fields['labels'][stake_pick]}” is placed."
+            except TradeError as e:  # e.g. the proposer was banned meanwhile; they keep the refunded stake
+                bet_note = f" {p['username']}'s opening bet couldn't be placed ({e}), so it was refunded."
+        flash(f"Approved! The market is now live. (Proposed by {p['username']}.){bet_note}", "success")
         return redirect(url_for("market", mid=mid))
 
     form = {"question": p["question"], "description": p["description"], "category": p["category"],
@@ -1593,6 +1688,10 @@ def admin_edit(mid):
         abort(404)
     outs = get_outcomes(db, mid)
     has_trades = db.execute("SELECT 1 FROM trades WHERE market_id = ? LIMIT 1", (mid,)).fetchone() is not None
+    # The written rules lock once someone other than the creator has bet (the creator's own opening bet doesn't
+    # count). Outcomes and the line lock once anyone has bet, since shares are tied to them.
+    rules_locked = db.execute("SELECT 1 FROM trades WHERE market_id = ? AND user_id IS NOT ? LIMIT 1",
+                              (mid, m["created_by"])).fetchone() is not None
 
     if request.method == "POST":
         f = request.form
@@ -1635,7 +1734,7 @@ def admin_edit(mid):
         try:
             db.execute("UPDATE markets SET question = ?, category = ?, closes_at = ? WHERE id = ?",
                        (question, f.get("category") if f.get("category") in CATEGORIES else "Other", closes_at, mid))
-            if not has_trades:  # once anyone has bet the written rules are locked; use a clarification instead
+            if not rules_locked:  # once others have bet the written rules are locked; use a clarification instead
                 db.execute("UPDATE markets SET description = ?, rules_source = ?, rules_otherwise = ? WHERE id = ?",
                            (f.get("description", "").strip()[:2000], f.get("rules_source", "").strip()[:300],
                             f.get("rules_otherwise", "").strip()[:1000], mid))
@@ -1662,7 +1761,7 @@ def admin_edit(mid):
 
     clarifications = db.execute("SELECT * FROM clarifications WHERE market_id = ? ORDER BY id", (mid,)).fetchall()
     ou_line_value = "" if m["ou_line"] is None else fmt_number(m["ou_line"]).replace(",", "")
-    return render_template("edit_market.html", m=m, outcomes=outs, has_trades=has_trades,
+    return render_template("edit_market.html", m=m, outcomes=outs, has_trades=has_trades, rules_locked=rules_locked,
                            clarifications=clarifications, ou_line_value=ou_line_value,
                            closes_value=parse_dt(m["closes_at"]).strftime("%Y-%m-%dT%H:%M"))
 

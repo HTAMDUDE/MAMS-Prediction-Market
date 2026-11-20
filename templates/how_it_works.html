@@ -42,6 +42,9 @@
   <ul>
     <li>Proposing a market costs <b>Ⓜ{{ CREATION_FEE|int }}</b>. You get it back if you withdraw the proposal, but not
       if an admin rejects it, so only propose questions people will want to bet on.</li>
+    <li>You also have to <b>bet at least Ⓜ{{ CREATOR_MIN_BET|int }}</b> on your own market when you propose it. It's
+      held until an admin approves the market, then placed as a normal bet. If the proposal is rejected or withdrawn,
+      it comes back.</li>
     <li>Once your market is live, every trader pays you <b>Ⓜ{{ ENTRY_FEE|int }}</b> on their first bet in it.
       Ten traders earn you Ⓜ{{ (ENTRY_FEE * 10)|int }}.</li>
     <li>If a market is cancelled or deleted, entry fees go back to the traders.</li>
