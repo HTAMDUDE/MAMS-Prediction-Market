@@ -12,7 +12,7 @@ assemblies, and anything else the admins post.
   school's estimated probability.
 - You can sell shares back at the current price any time before the market closes.
 - Anyone can **propose a market** from the Propose page. It goes live once an admin approves it.
-- **Fees reward good markets:** making a market costs Ⓜ20 (refunded if a proposal is withdrawn, kept if rejected),
+- **Fees reward good markets:** making a market costs Ⓜ10 (refunded if a proposal is withdrawn, kept if rejected),
   and every trader pays the market's creator Ⓜ10 on their first bet in it. Cancelled or deleted markets return
   entry fees. Market makers must also place an **opening bet of at least Ⓜ10** on an outcome of their own market
   (held with a proposal and placed on approval; refunded if rejected or withdrawn). Amounts are `CREATION_FEE`,

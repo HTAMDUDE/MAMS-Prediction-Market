@@ -63,7 +63,8 @@ def signup(client, name):
                                           "confirm": "secret1"}, follow_redirects=True)
 
 
-def test_full_flow():
+def test_full_flow(monkeypatch):
+    monkeypatch.setattr(appmod, "CREATION_FEE", 20.0)  # the expected balances below assume a Ⓜ20 fee
     appmod.app.config["TESTING"] = True
     admin, bob = appmod.app.test_client(), appmod.app.test_client()
 
@@ -1187,7 +1188,8 @@ def test_dispute_window_is_two_hours():
         appmod.DB_PATH = old
 
 
-def test_creation_fee_for_proposals_and_admin_markets():
+def test_creation_fee_for_proposals_and_admin_markets(monkeypatch):
+    monkeypatch.setattr(appmod, "CREATION_FEE", 20.0)  # the expected balances below assume a Ⓜ20 fee
     old = appmod.DB_PATH
     try:
         db = _fresh_db()
@@ -1392,7 +1394,8 @@ def test_read_stake_rules():
     assert "Pick which outcome" in appmod.read_stake({"stake": "10"}, labels)[2]
 
 
-def test_opening_bet_on_proposals_and_admin_markets():
+def test_opening_bet_on_proposals_and_admin_markets(monkeypatch):
+    monkeypatch.setattr(appmod, "CREATION_FEE", 20.0)  # the expected balances below assume a Ⓜ20 fee
     old = appmod.DB_PATH
     try:
         db = _fresh_db()
