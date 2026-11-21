@@ -50,10 +50,10 @@ DISPUTE_HOURS = int(DISPUTE_WINDOW.total_seconds() // 3600)
 # Making a market costs CREATION_FEE (refunded if you withdraw your proposal, kept if it's rejected), and everyone
 # else pays the market's creator ENTRY_FEE on their first bet in it. Good markets that attract traders earn their
 # creator money; flooding the site with junk proposals costs money.
-CREATION_FEE = 10.0
-ENTRY_FEE = 10.0
+CREATION_FEE = 0.0
+ENTRY_FEE = 0.0
 # Whoever makes a market must also bet at least this much on it, so they have skin in the game.
-CREATOR_MIN_BET = 10.0
+CREATOR_MIN_BET = 0.0
 CATEGORIES = ["Academics", "Competitions", "Sports", "Events", "Campus Life", "Weather", "Other"]
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,20}$")
 EPS = 1e-9
