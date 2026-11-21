@@ -321,3 +321,15 @@ main { padding-top: 8px; padding-bottom: 32px; }
 .stake-field { margin-top: 14px; }
 .stake-field .row { margin-top: 4px; }
 .stake-field .field { margin-bottom: 0; }
+
+/* confirmation dialog */
+dialog { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text);
+         padding: 20px; max-width: min(28rem, calc(100vw - 32px)); box-shadow: 0 12px 40px rgba(0,0,0,.25); }
+dialog::backdrop { background: rgba(0,0,0,.45); }
+dialog h2 { margin-top: 0; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+           clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.row-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.row-actions form { margin: 0; }
+.btn[disabled] { opacity: .5; cursor: not-allowed; }

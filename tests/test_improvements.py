@@ -1,5 +1,7 @@
 """Tests for the admin controls, safeguards and polish ported from the Next.js branch."""
 import os
+import sqlite3
+import tempfile
 import sys
 from datetime import datetime, timedelta
 
@@ -232,5 +234,142 @@ def test_admin_reset_password_rules():
         assert "Only the site owner" in _post(helper, f"/admin/users/{uid('boss')}/reset-password").get_data(as_text=True)
         assert bob.get("/portfolio").status_code == 302  # bob was signed out
         assert [a[0] for a in _audit(db)].count("user.password_reset") == 1
+    finally:
+        appmod.DB_PATH = old
+
+
+# ---------------------------------------------------------------- 4. users admin and account deletion
+
+def _site(*names):
+    """A fresh DB where the first name is the owner. Returns (db, {name: client}, uid-lookup)."""
+    db = _fresh_db()
+    clients = {}
+    for n in names:
+        clients[n] = appmod.app.test_client()
+        signup(clients[n], n)
+    return db, clients, (lambda n: _q(db, "SELECT id FROM users WHERE username=?", n))
+
+
+def test_users_search_filter_and_paging():
+    db, c, uid = _site("boss", "bob", "bobby", "carol")
+    for i in range(30):
+        _user(db, f"filler{i:02d}")
+    page = c["boss"].get("/admin").get_data(as_text=True)
+    assert "Page 1 of 2" in page and "Manage" in page
+    assert "Page 2 of 2" in c["boss"].get("/admin?upage=2").get_data(as_text=True)
+    found = c["boss"].get("/admin?q=bob").get_data(as_text=True)
+    assert "bobby" in found and "carol" not in found
+    assert "No users match." in c["boss"].get("/admin?q=zzz").get_data(as_text=True)
+    _post(c["boss"], f"/admin/users/{uid('carol')}/trading")
+    _post(c["boss"], f"/admin/users/{uid('bob')}/comment-mute")
+    banned = c["boss"].get("/admin?filter=banned").get_data(as_text=True)
+    assert "carol" in banned and "bobby" not in banned
+    assert "bob</strong>" in c["boss"].get("/admin?filter=muted").get_data(as_text=True)
+    admins = c["boss"].get("/admin?filter=admins").get_data(as_text=True)
+    assert "boss" in admins and "carol" not in admins  # the owner counts even if the flag was never set
+
+
+def test_manage_page_permissions():
+    db, c, uid = _site("boss", "helper", "bob")
+    _post(c["boss"], f"/admin/users/{uid('helper')}/toggle-admin")
+    assert c["bob"].get(f"/admin/users/{uid('bob')}").status_code == 403
+    page = c["helper"].get(f"/admin/users/{uid('boss')}").get_data(as_text=True)
+    assert "Only the site owner can manage this account." in page
+    assert "Delete account" in c["helper"].get(f"/admin/users/{uid('bob')}").get_data(as_text=True)
+    # an admin can't mute the owner or another admin; the owner can't be muted by anyone
+    assert "Only the site owner" in _post(c["helper"], f"/admin/users/{uid('boss')}/comment-mute").get_data(as_text=True)
+    assert "can&#39;t be muted" in _post(c["boss"], f"/admin/users/{uid('boss')}/comment-mute").get_data(as_text=True)
+
+
+def test_delete_account_refusals():
+    db, c, uid = _site("boss", "helper", "bob")
+    _post(c["boss"], f"/admin/users/{uid('helper')}/toggle-admin")
+    say = lambda who, target: _post(c[who], f"/admin/users/{uid(target)}/delete").get_data(as_text=True)
+    assert "can&#39;t delete your own account" in say("boss", "boss")
+    assert "owner&#39;s account can&#39;t be deleted" in say("helper", "boss")
+    assert "Remove their admin role" in say("boss", "helper")
+    # an open dispute blocks deletion
+    closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+    mid = appmod.create_market(db, "Win?", RULES, "Events", closes, ["Yes", "No"], 100, None)
+    yes, no = [o["id"] for o in appmod.get_outcomes(db, mid)]
+    appmod.execute_trade(db, uid("bob"), mid, yes, "buy", 50)
+    db.execute("UPDATE markets SET closes_at = ? WHERE id = ?", (past(), mid))
+    _post(c["boss"], f"/admin/markets/{mid}/propose-result", outcome_id=no)
+    _post(c["bob"], f"/market/{mid}/dispute", reason="The official page says Yes won")
+    assert "open dispute" in say("boss", "bob")
+    assert _q(db, "SELECT COUNT(*) FROM users WHERE username='bob'") == 1
+    # a running market they created blocks it too
+    db.execute("UPDATE disputes SET handled_at = ?", (appmod.now_str(),))
+    appmod.create_market(db, "Bob's market?", RULES, "Events", closes, ["Yes", "No"], 100, uid("bob"))
+    assert "still running" in say("boss", "bob")
+
+
+def test_delete_account_reverses_open_bets_and_keeps_settled_payouts():
+    db, c, uid = _site("boss", "alice", "bob")
+    closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+    open_m = appmod.create_market(db, "Open one?", RULES, "Events", closes, ["Yes", "No"], 100, None)
+    done_m = appmod.create_market(db, "Done one?", RULES, "Events", closes, ["Yes", "No"], 100, None)
+    oy = appmod.get_outcomes(db, open_m)[0]["id"]
+    dy, dn = [o["id"] for o in appmod.get_outcomes(db, done_m)]
+    price_before = appmod.lmsr.prices([o["shares"] for o in appmod.get_outcomes(db, open_m)], 100)[0]
+    appmod.execute_trade(db, uid("bob"), open_m, oy, "buy", 100)
+    appmod.execute_trade(db, uid("bob"), done_m, dn, "buy", 40)
+    appmod.execute_trade(db, uid("alice"), done_m, dy, "buy", 60)
+    db.execute("UPDATE markets SET closes_at = ? WHERE id = ?", (past(), done_m))
+    appmod.propose_result(db, done_m, dy, uid("boss"))
+    db.execute("UPDATE markets SET finalizes_at = ? WHERE id = ?", (past(), done_m))
+    appmod.finalize_due(db)
+    alice_before = _q(db, "SELECT balance FROM users WHERE username='alice'")
+    db.execute("INSERT INTO comments (market_id, user_id, body, created_at) VALUES (?, ?, 'hi', ?)",
+               (open_m, uid("bob"), appmod.now_str()))
+    page = _post(c["boss"], f"/admin/users/{uid('bob')}/delete").get_data(as_text=True)
+    assert "Deleted bob" in page and "Reversed" in page
+    assert _q(db, "SELECT COUNT(*) FROM users WHERE username='bob'") == 0
+    for table in ("trades", "positions", "comments", "activity"):
+        assert _q(db, f"SELECT COUNT(*) FROM {table} WHERE user_id NOT IN (SELECT id FROM users)") == 0
+    # bob's effect on the open market's price is gone, and nobody else's balance moved
+    assert appmod.lmsr.prices([o["shares"] for o in appmod.get_outcomes(db, open_m)], 100)[0] == pytest.approx(price_before)
+    assert _q(db, "SELECT balance FROM users WHERE username='alice'") == pytest.approx(alice_before)
+    log = _audit(db)[-1]
+    assert log[0] == "user.delete" and log[2] == "bob" and "Open bets reversed" in log[3]
+    assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_delete_former_admin_who_wrote_clarifications():
+    db, c, uid = _site("boss", "helper")
+    _post(c["boss"], f"/admin/users/{uid('helper')}/toggle-admin")
+    closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+    mid = appmod.create_market(db, "Clarify?", RULES, "Events", closes, ["Yes", "No"], 100, None)
+    _post(c["helper"], f"/admin/markets/{mid}/clarify", body="A note from the helper admin.")
+    _post(c["boss"], f"/admin/users/{uid('helper')}/toggle-admin")  # demote first
+    assert "Deleted helper" in _post(c["boss"], f"/admin/users/{uid('helper')}/delete").get_data(as_text=True)
+    assert _q(db, "SELECT admin_id FROM clarifications") is None
+    assert "A note from the helper admin." in c["boss"].get(f"/market/{mid}").get_data(as_text=True)
+
+
+def test_migration_makes_clarification_admin_nullable_and_keeps_rows():
+    path = os.path.join(tempfile.mkdtemp(), "old.db")
+    old = appmod.DB_PATH
+    appmod.DB_PATH = path
+    try:
+        raw = sqlite3.connect(path)
+        raw.executescript(open(os.path.join(appmod.BASE_DIR, "schema.sql")).read())
+        raw.executescript("""
+            DROP TABLE clarifications;
+            CREATE TABLE clarifications (id INTEGER PRIMARY KEY AUTOINCREMENT,
+              market_id INTEGER NOT NULL REFERENCES markets(id), admin_id INTEGER NOT NULL REFERENCES users(id),
+              body TEXT NOT NULL, created_at TEXT NOT NULL);
+            CREATE INDEX idx_clarifications_market ON clarifications(market_id);
+            INSERT INTO users (username, password_hash, balance, created_at) VALUES ('a', 'x', 1, 'now');
+            INSERT INTO markets (question, b, closes_at, created_at) VALUES ('Q', 100, 'later', 'now');
+            INSERT INTO clarifications (market_id, admin_id, body, created_at) VALUES (1, 1, 'kept', 'now');""")
+        raw.close()
+        appmod.init_db()
+        appmod.init_db()  # repeatable
+        db = appmod.connect()
+        cols = {r["name"]: r["notnull"] for r in db.execute("PRAGMA table_info(clarifications)")}
+        assert cols["admin_id"] == 0
+        assert _q(db, "SELECT body FROM clarifications") == "kept"
+        assert db.execute("SELECT 1 FROM sqlite_master WHERE name='idx_clarifications_market'").fetchone()
     finally:
         appmod.DB_PATH = old

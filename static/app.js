@@ -288,3 +288,33 @@ function setupMarketForm(form) {
 }
 
 document.querySelectorAll('form[data-market-form]').forEach(setupMarketForm);
+
+
+// Confirmation dialogs: any form with data-confirm="message" (and optionally data-confirm-title /
+// data-confirm-label), or a submit button with its own data-confirm, asks first.
+(function setupConfirm() {
+  const dlg = document.getElementById('confirm-dialog');
+  let pending = null;
+  document.addEventListener('submit', e => {
+    const form = e.target;
+    const src = e.submitter && e.submitter.dataset.confirm ? e.submitter : form;
+    const message = src.dataset.confirm;
+    if (!message || form.dataset.confirmed) return;
+    e.preventDefault();
+    if (!dlg || !dlg.showModal) {
+      if (window.confirm(message)) { form.dataset.confirmed = '1'; form.requestSubmit(e.submitter); }
+      return;
+    }
+    pending = { form, submitter: e.submitter };
+    dlg.querySelector('[data-title]').textContent = src.dataset.confirmTitle || 'Are you sure?';
+    dlg.querySelector('[data-message]').textContent = message;
+    dlg.querySelector('[data-ok]').textContent = src.dataset.confirmLabel || 'Confirm';
+    dlg.showModal();
+  });
+  if (dlg) dlg.addEventListener('close', () => {
+    const p = pending;
+    pending = null;
+    if (p && dlg.returnValue === 'ok') { p.form.dataset.confirmed = '1'; p.form.requestSubmit(p.submitter); }
+    dlg.returnValue = '';
+  });
+})();

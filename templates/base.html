@@ -65,5 +65,15 @@
 </footer>
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 {% block scripts %}{% endblock %}
+<dialog id="confirm-dialog" aria-labelledby="confirm-title">
+  <form method="dialog">
+    <h2 id="confirm-title" data-title>Are you sure?</h2>
+    <p data-message></p>
+    <div class="dialog-actions">
+      <button class="btn btn-ghost" value="cancel">Cancel</button>
+      <button class="btn" value="ok" data-ok>Confirm</button>
+    </div>
+  </form>
+</dialog>
 </body>
 </html>

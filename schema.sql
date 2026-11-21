@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS markets (
     proposed_by         INTEGER,
     proposed_at         TEXT,
     finalizes_at        TEXT,
-    resolved_by         INTEGER
+    resolved_by         INTEGER,
+    featured            INTEGER NOT NULL DEFAULT 0   -- admins can pin a market to the top of the home page
 );
 
 CREATE TABLE IF NOT EXISTS outcomes (
@@ -73,7 +74,8 @@ CREATE TABLE IF NOT EXISTS comments (
     market_id  INTEGER NOT NULL REFERENCES markets(id),
     user_id    INTEGER NOT NULL REFERENCES users(id),
     body       TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    hidden     INTEGER NOT NULL DEFAULT 0   -- hidden by an admin: others see a placeholder
 );
 
 -- Markets suggested by users, waiting for an admin to approve or reject.
@@ -109,7 +111,7 @@ CREATE TABLE IF NOT EXISTS disputes (
 CREATE TABLE IF NOT EXISTS clarifications (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     market_id  INTEGER NOT NULL REFERENCES markets(id),
-    admin_id   INTEGER NOT NULL REFERENCES users(id),
+    admin_id   INTEGER REFERENCES users(id),   -- NULL once that admin's account is deleted
     body       TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -177,3 +179,16 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action);
+
+-- Users an admin has barred from commenting.
+CREATE TABLE IF NOT EXISTS comment_mutes (
+    user_id    INTEGER PRIMARY KEY REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+
+-- Small site-wide settings, e.g. the announcement banner.
+CREATE TABLE IF NOT EXISTS site_settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);

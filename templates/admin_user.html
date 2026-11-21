@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}{{ u.username }} · Manage user · MAMS Prediction Market{% endblock %}
+{% block content %}
+{% set back_url = url_for('admin_user', uid=u.id) %}
+<div class="activity-head">
+  <div>
+    <h1>{{ u.username }}{% if me %} <span class="muted small">(you)</span>{% endif %}</h1>
+    <p class="muted">
+      {% if is_target_owner %}<span class="tag">Owner</span>{% elif u.is_admin %}<span class="tag">Admin</span>{% else %}Regular user{% endif %}
+      · Balance Ⓜ{{ u.balance|money }} · joined {{ u.created_at|when }}
+      {% if u.banned %}· <span class="status status-rejected">Trading off</span>{% endif %}
+      {% if u.muted %}· <span class="status status-closed">Muted</span>{% endif %}
+    </p>
+  </div>
+  <a class="btn btn-small btn-ghost" href="{{ url_for('admin') }}#users">← All users</a>
+</div>
+
+{% if not manageable %}
+<div class="card"><p>Only the site owner can manage this account.</p>
+  <a href="{{ url_for('balance_history', user=u.username) }}">View their balance history →</a></div>
+{% else %}
+<div class="card">
+  <h2>Balance</h2>
+  <form method="post" action="{{ url_for('admin_grant', uid=u.id) }}" class="inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="next" value="{{ back_url }}">
+    <label for="grant-amount" class="sr-only">Amount to add or remove</label>
+    <input id="grant-amount" type="number" name="amount" step="0.01" placeholder="±Ⓜ" class="narrow" required>
+    <button class="btn btn-small">Apply</button>
+    <span class="muted small">Adds (or removes, if negative) from their balance. It never goes below Ⓜ0.</span>
+  </form>
+  <p><a href="{{ url_for('balance_history', user=u.username) }}">View their balance history →</a></p>
+</div>
+
+<div class="card">
+  <h2>Trading and commenting</h2>
+  {% if is_target_owner %}<p class="muted">The owner can't be banned or muted.</p>{% else %}
+  <div class="row-actions">
+    <form method="post" action="{{ url_for('admin_trading', uid=u.id) }}"
+          {% if not u.banned %}data-confirm="{{ 'Turn off trading for ' ~ u.username ~ '? Their bets in all unresolved markets will be refunded and removed.' }}" data-confirm-title="Ban from trading?" data-confirm-label="Ban from trading"{% endif %}>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="next" value="{{ back_url }}">
+      <button class="btn btn-small btn-ghost">{{ 'Allow trading' if u.banned else 'Ban from trading' }}</button>
+    </form>
+    <form method="post" action="{{ url_for('admin_comment_mute', uid=u.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="next" value="{{ back_url }}">
+      <button class="btn btn-small btn-ghost">{{ 'Allow commenting' if u.muted else 'Mute from commenting' }}</button>
+    </form>
+  </div>{% endif %}
+</div>
+
+<div class="card">
+  <h2>Password</h2>
+  <form method="post" action="{{ url_for('admin_reset_password', uid=u.id) }}"
+        data-confirm="Sign {{ u.username }} out everywhere and give them a new temporary password?" data-confirm-title="Reset password?" data-confirm-label="Reset password">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="next" value="{{ back_url }}">
+    <button class="btn btn-small btn-ghost">Reset password</button>
+    <span class="muted small">Shows a temporary password once. Share it privately.</span>
+  </form>
+</div>
+
+{% if is_owner and not is_target_owner and not me %}
+<div class="card">
+  <h2>Role</h2>
+  <form method="post" action="{{ url_for('admin_toggle', uid=u.id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="next" value="{{ back_url }}">
+    <button class="btn btn-small btn-ghost">{{ 'Remove admin role' if u.is_admin else 'Make admin' }}</button>
+  </form>
+</div>
+{% endif %}
+
+{% if not me and not is_target_owner %}
+<div class="card">
+  <h2>Delete account</h2>
+  <p class="muted small">Their bets in unresolved markets are reversed and refunded first. Payouts from settled markets stay where they are. This can't be undone.
+    {% if u.is_admin %}Remove their admin role first.{% endif %}</p>
+  <form method="post" action="{{ url_for('admin_delete_user', uid=u.id) }}"
+        data-confirm="Delete {{ u.username }}'s account for good? Their open bets are reversed and refunded, and their comments and history are removed." data-confirm-title="Delete account?" data-confirm-label="Delete account">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button class="btn btn-small btn-danger" {{ 'disabled' if u.is_admin }}>Delete account</button>
+  </form>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}
