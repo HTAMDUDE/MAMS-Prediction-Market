@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Portfolio · MAMS Prediction Market{% endblock %}
+{% block content %}
+<h1>{{ user.username }}'s portfolio</h1>
+<div class="kpis">
+  <div class="kpi"><span>Net worth</span><strong>Ⓜ{{ worth|money }}</strong></div>
+  <div class="kpi"><span>Cash</span><strong>Ⓜ{{ user.balance|money }}</strong></div>
+  <div class="kpi"><span>In open bets (if sold now)</span><strong>Ⓜ{{ invested|money }}</strong></div>
+</div>
+
+<div class="card">
+  <h2>Open positions</h2>
+  {% if active %}
+  <div class="table-scroll">
+  <table class="table">
+    <thead><tr><th>Market</th><th>Outcome</th><th class="num">Shares</th><th class="num">Spent</th><th class="num" title="What these shares would sell for right now">Sell value</th><th class="num">Gain</th></tr></thead>
+    <tbody>
+    {% for i in active %}
+      {% set gain = i.value - i.r.cost %}
+      <tr>
+        <td><a href="{{ url_for('market', mid=i.r.market_id) }}">{{ i.r.question }}</a>
+          {% if i.b.state == 'closed' %}<span class="status status-closed">awaiting result</span>{% elif i.b.state == 'proposed' %}<span class="status status-pending">result proposed</span>{% elif i.b.state == 'disputed' %}<span class="status status-rejected">disputed</span>{% endif %}</td>
+        <td>{{ i.r.label }} <span class="muted small">{{ i.price|pct }}</span></td>
+        <td class="num">{{ i.r.shares|money }}</td>
+        <td class="num">Ⓜ{{ i.r.cost|money }}</td>
+        <td class="num">Ⓜ{{ i.value|money }}</td>
+        <td class="num {{ 'up' if gain >= 0 else 'down' }}">{{ '+' if gain >= 0 }}{{ gain|money }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% if (rows_total - invested)|abs > 0.01 %}<p class="muted small">Rows add up to Ⓜ{{ rows_total|money }}, but selling several outcomes of one market together is worth Ⓜ{{ invested|money }} in total.</p>{% endif %}
+  {% else %}<p class="muted">No open bets. <a href="{{ url_for('index') }}">Browse markets →</a></p>{% endif %}
+</div>
+
+{% if settled %}
+<div class="card">
+  <h2>Settled</h2>
+  <div class="table-scroll">
+  <table class="table">
+    <thead><tr><th>Market</th><th>Your pick</th><th class="num">Shares</th><th class="num">Spent</th><th class="num">Result</th></tr></thead>
+    <tbody>
+    {% for i in settled %}
+      <tr>
+        <td><a href="{{ url_for('market', mid=i.r.market_id) }}">{{ i.r.question }}</a></td>
+        <td>{{ i.r.label }}</td>
+        <td class="num">{{ i.r.shares|money }}</td>
+        <td class="num">Ⓜ{{ i.r.cost|money }}</td>
+        <td class="num">
+          {% if i.b.state == 'cancelled' %}<span class="muted">Refunded</span>
+          {% elif i.price > 0 %}<span class="up">Won Ⓜ{{ i.value|money }}</span>
+          {% else %}<span class="down">Lost</span>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Trade history <a class="small" href="{{ url_for('balance_history') }}">Full balance history →</a></h2>
+  {% if trades %}
+  <div class="table-scroll">
+  <table class="table">
+    <tbody>
+    {% for t in trades %}
+      <tr>
+        <td>{% if t.shares > 0 %}<span class="buy">Bought</span>{% else %}<span class="sell">Sold</span>{% endif %}
+          {{ t.shares|abs|money }} × {{ t.label }} — <a href="{{ url_for('market', mid=t.market_id) }}">{{ t.question }}</a></td>
+        <td class="num">{{ '−' if t.amount > 0 else '+' }}Ⓜ{{ t.amount|abs|money }}</td>
+        <td class="num muted small">{{ t.created_at|ago }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}<p class="muted">No trades yet.</p>{% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,15 @@
+{# The market maker's required opening bet. The outcome list is rebuilt by setupMarketForm as the type/outcomes change. #}
+<div class="field stake-field">
+  <span>Your opening bet <em class="muted">(at least Ⓜ{{ CREATOR_MIN_BET|int }}: market makers bet on their own market)</em></span>
+  <div class="row">
+    <label class="field"><span class="muted small">On</span>
+      <select name="stake_pick" data-stake-pick data-selected="{{ form.stake_pick or 0 }}" required>
+        <option value="0">Yes</option><option value="1">No</option>
+      </select>
+    </label>
+    <label class="field"><span class="muted small">Amount (Ⓜ)</span>
+      <input type="number" name="stake" min="{{ CREATOR_MIN_BET }}" step="0.01" required
+             value="{{ form.stake or CREATOR_MIN_BET|int }}">
+    </label>
+  </div>
+</div>

@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Balance history · MAMS Prediction Market{% endblock %}
+{% block content %}
+<a class="back" href="{{ url_for('activity') }}">← All trades</a>
+<h1>{{ target.username ~ "'s balance history" if viewing_other else 'Your balance history' }}</h1>
+<p class="muted">Every time {{ (target.username ~ "'s") if viewing_other else 'your' }} balance changed: bets, sales,
+  payouts, refunds and bonuses.</p>
+
+<div class="kpis">
+  <div class="kpi"><span>Spent buying shares</span><strong class="down">Ⓜ{{ (-(totals.buy or 0))|money }}</strong></div>
+  <div class="kpi"><span>Got back from selling</span><strong class="up">Ⓜ{{ (totals.sell or 0)|money }}</strong></div>
+  <div class="kpi"><span>Won in payouts</span><strong class="up">Ⓜ{{ (totals.payout or 0)|money }}</strong></div>
+  <div class="kpi"><span>Earned from your markets</span><strong class="up">Ⓜ{{ (totals.earning or 0)|money }}</strong></div>
+  <div class="kpi"><span>Balance now</span><strong>Ⓜ{{ target.balance|money }}</strong></div>
+</div>
+
+<div class="tabs">
+  {% for key, label in [('', 'All'), ('trades', 'Buys & sells'), ('results', 'Payouts & refunds'), ('fees', 'Fees & earnings'), ('other', 'Bonuses & other')] %}
+    <a href="{{ url_for('balance_history', show=key or None, user=target.username if viewing_other else None) }}" class="tab {{ 'active' if show == key }}">{{ label }}</a>
+  {% endfor %}
+</div>
+
+<div class="card activity-card">
+  {% if rows %}
+  <div class="table-scroll">
+  <table class="table activity">
+    <thead><tr><th>When</th><th>What happened</th><th class="num">Money</th><th class="num">Balance after</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td class="muted small nowrap" title="{{ r.created_at|when }}">{{ r.created_at|ago }}</td>
+        <td>
+          <span class="kind kind-{{ r.kind }}">{{ {'signup': 'Joined', 'bonus': 'Bonus', 'buy': 'Bought', 'sell': 'Sold', 'payout': 'Won', 'loss': 'Lost', 'refund': 'Refund', 'admin': 'Admin', 'fee': 'Fee', 'earning': 'Earned'}[r.kind] or r.kind }}</span>
+          {{ r.detail }}
+          {% if r.market_title %}
+            <div class="muted small">
+              {% if r.market_exists %}<a href="{{ url_for('market', mid=r.market_id) }}">{{ r.market_title }}</a>
+              {% else %}{{ r.market_title }} (deleted){% endif %}
+            </div>
+          {% endif %}
+        </td>
+        <td class="num {{ 'up' if r.amount > 0 else ('down' if r.amount < 0) }}">
+          {% if r.amount > 0 %}+Ⓜ{{ r.amount|money }}{% elif r.amount < 0 %}−Ⓜ{{ (-r.amount)|money }}{% else %}<span class="muted">Ⓜ0.00</span>{% endif %}
+        </td>
+        <td class="num">{% if r.balance_after is not none %}Ⓜ{{ r.balance_after|money }}{% else %}<span class="muted" title="From before the activity log existed">—</span>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% if rows|length == 300 %}<p class="muted small">Showing the latest 300 entries.</p>{% endif %}
+  {% else %}
+    <p class="muted">Nothing here yet.</p>
+  {% endif %}
+</div>
+{% endblock %}

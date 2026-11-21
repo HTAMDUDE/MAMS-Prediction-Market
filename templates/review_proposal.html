@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Review proposal · MAMS Prediction Market{% endblock %}
+{% block content %}
+<a class="back" href="{{ url_for('admin') }}#proposals">← Back to admin</a>
+<div class="card edit-card">
+  <h1>Review proposal</h1>
+  <p class="muted">Proposed by <strong>{{ p.username }}</strong> {{ p.created_at|ago }}.
+    {% if p.status == 'pending' %}You can fix the wording or details before approving.{% endif %}</p>
+  {% if p.stake %}
+  <p class="fee-box">{{ p.username }}'s opening bet: <b>Ⓜ{{ p.stake|money }} on “{{ p.stake_label }}”</b>. It's placed when you
+    approve, and refunded if you reject. If you rename outcomes, keep that one (on a two-outcome market the same side
+    is kept).</p>
+  {% endif %}
+
+  {% if p.status != 'pending' %}
+    <p class="flash flash-error">This proposal was already {{ p.status }}.</p>
+  {% else %}
+  <form method="post" class="stack" data-market-form>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    {% set default_close = '' %}
+    {% include "_market_fields.html" %}
+    <label class="field"><span>Note to {{ p.username }} <em class="muted">(optional, they'll see it)</em></span>
+      <input name="review_note" maxlength="500" value="{{ form.review_note or '' }}"
+             placeholder="e.g. Reworded to make the deadline clearer.">
+    </label>
+    <div class="hero-actions">
+      <button class="btn" name="decision" value="approve">Approve &amp; publish</button>
+      <button class="btn btn-danger" name="decision" value="reject" formnovalidate
+              onclick="return confirm('Reject this proposal?')">Reject</button>
+    </div>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}

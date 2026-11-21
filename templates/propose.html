@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Propose a market · MAMS Prediction Market{% endblock %}
+{% block content %}
+<div class="propose-layout">
+  <div class="card">
+    <h1>Propose a market</h1>
+    <p class="muted">Got a question about something happening at Mass Academy? Suggest it here. An admin will review it,
+      may tweak the wording, and then put it live or explain why not. New to this?
+      <a href="{{ url_for('how_it_works') }}">How markets work</a>.</p>
+    <form method="post" class="stack" data-market-form>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      {% set default_close = '' %}
+      {% include "_market_fields.html" %}
+      <div class="checklist">
+        <strong>A good market has…</strong>
+        <ul>
+          <li>A <b>clear, checkable answer</b>. Anyone reading the rules should reach the same result.</li>
+          <li>A <b>named source</b> for the answer, such as a results page or an announcement.</li>
+          <li>A <b>date</b>, and a rule for what happens if the event is postponed.</li>
+          <li><b>Nothing private</b>: no grades, health or questions about individual people.</li>
+        </ul>
+      </div>
+      {% include "_creator_stake.html" %}
+      <div class="fee-box">
+        <strong>Costs Ⓜ{{ CREATION_FEE|int }} to propose, plus your opening bet.</strong> Both are held now. If an admin
+        approves, your opening bet is placed in the new market. If they reject it, your bet comes back but the
+        Ⓜ{{ CREATION_FEE|int }} fee is kept. Withdraw it yourself and you get both back.
+        Once your market is live, <b>every trader pays you Ⓜ{{ ENTRY_FEE|int }}</b> on their first bet, so a market lots of
+        people want to bet on earns you money.
+      </div>
+      <button class="btn">Send for approval · Ⓜ{{ CREATION_FEE|int }} fee + opening bet</button>
+    </form>
+  </div>
+
+  <div class="propose-side">
+  <div class="card" id="market-preview" aria-live="polite">
+    <h2>Preview</h2>
+    <p class="muted small">This is roughly how your market will look.</p>
+    <div class="preview-body"></div>
+  </div>
+
+  <div class="card">
+    <h2>Your proposals</h2>
+    {% for p in mine %}
+      <div class="proposal">
+        <div class="card-meta">
+          <span class="tag">{{ p.category }}</span>
+          <span class="status status-{{ p.status }}">{{ {'pending': 'Waiting for review', 'approved': 'Approved', 'rejected': 'Not approved'}[p.status] }}{% if p.fee and p.status == 'rejected' %} · Ⓜ{{ p.fee|int }} fee kept{% endif %}</span>
+        </div>
+        <strong>{{ p.question }}</strong>
+        <div class="muted small">{{ p.outcomes|join(' · ') }} — sent {{ p.created_at|ago }}</div>
+        {% if p.stake %}<div class="muted small">Opening bet: Ⓜ{{ p.stake|money }} on “{{ p.stake_label }}”{% if p.status == 'pending' %} (held){% elif p.status == 'rejected' %} (refunded){% else %} (placed){% endif %}</div>{% endif %}
+        {% if p.review_note %}<p class="note"><b>Admin note:</b> {{ p.review_note }}</p>{% endif %}
+        {% if p.status == 'approved' and p.market_id %}
+          <a href="{{ url_for('market', mid=p.market_id) }}">View market →</a>
+        {% elif p.status == 'pending' %}
+          <form method="post" action="{{ url_for('withdraw_proposal', pid=p.id) }}" class="inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="btn btn-small btn-ghost">Withdraw</button>
+          </form>
+        {% endif %}
+      </div>
+    {% else %}
+      <p class="muted">You haven't proposed anything yet.</p>
+    {% endfor %}
+  </div>
+  </div>
+</div>
+{% endblock %}
