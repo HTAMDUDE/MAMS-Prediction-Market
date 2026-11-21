@@ -10,7 +10,7 @@
 </form>
 {% endmacro %}
 
-<h1>Admin</h1>
+<div class="activity-head"><h1>Admin</h1><a class="btn btn-small btn-ghost" href="{{ url_for('admin_log') }}">Admin log →</a></div>
 
 <div class="card" id="proposals">
   <h2>Proposals waiting for approval {% if proposals %}<span class="badge">{{ proposals|length }}</span>{% endif %}</h2>

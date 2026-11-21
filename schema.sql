@@ -161,3 +161,19 @@ CREATE INDEX IF NOT EXISTS idx_history_market  ON price_history(market_id);
 CREATE INDEX IF NOT EXISTS idx_comments_market ON comments(market_id);
 CREATE INDEX IF NOT EXISTS idx_disputes_market ON disputes(market_id);
 CREATE INDEX IF NOT EXISTS idx_clarifications_market ON clarifications(market_id);
+
+-- Every admin action (Admin -> Admin log). Names are copied in with no foreign keys so the log survives
+-- deleted accounts and markets; nothing in the app edits or deletes these rows.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_id     INTEGER,
+    actor_name   TEXT NOT NULL,
+    action       TEXT NOT NULL,       -- key in AUDIT_ACTIONS
+    target_type  TEXT NOT NULL,       -- user | market | comment | proposal | site
+    target_id    TEXT NOT NULL DEFAULT '',
+    target_label TEXT NOT NULL DEFAULT '',
+    detail       TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action);

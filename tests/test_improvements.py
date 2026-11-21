@@ -158,3 +158,79 @@ def test_temporary_password_signs_out_and_clears_lockout(capsys):
     assert reset_password.main(["reset_password.py", "erin"]) == 0
     assert "Temporary password for erin:" in capsys.readouterr().out
     assert reset_password.main(["reset_password.py", "nobody"]) == 1
+
+
+# ---------------------------------------------------------------- 3. audit log
+
+def _audit(db):
+    return [(r["action"], r["actor_name"], r["target_label"], r["detail"])
+            for r in db.execute("SELECT * FROM audit_log ORDER BY id")]
+
+
+def test_admin_actions_are_audited_and_forbidden_ones_are_not():
+    old = appmod.DB_PATH
+    try:
+        db, mid, yes, no, admin, bob, eve = _closed_market_with_bet()
+        bob_id = _q(db, "SELECT id FROM users WHERE username='bob'")
+        _post(admin, f"/admin/markets/{mid}/propose-result", outcome_id=yes)
+        _post(admin, f"/admin/markets/{mid}/result-action", decision="retract")
+        _post(admin, f"/admin/markets/{mid}/clarify", body="A clarification about the source.")
+        _post(admin, f"/admin/users/{bob_id}/grant", amount="5")
+        _post(admin, f"/admin/users/{bob_id}/trading")
+        _post(admin, f"/admin/users/{bob_id}/trading")
+        _post(admin, f"/admin/users/{bob_id}/toggle-admin")
+        log = _audit(db)
+        actions = [a[0] for a in log]
+        assert actions == ["result.propose", "result.retract", "market.clarify", "user.grant", "user.ban",
+                           "user.unban", "user.admin_on"]
+        assert log[0][1] == "chief" and log[0][2] == "Win?" and "Proposed" in log[0][3]
+        assert log[3][3] == "+Ⓜ5.00"
+        # a regular user hitting an admin action is refused and leaves no entry
+        _post(bob, f"/admin/users/{bob_id}/grant", amount="99")
+        assert len(_audit(db)) == 7
+        # delete keeps the entry after the market is gone
+        _post(admin, f"/admin/markets/{mid}/delete")
+        assert _audit(db)[-1][0] == "market.delete" and "Status was open" in _audit(db)[-1][3]
+    finally:
+        appmod.DB_PATH = old
+
+
+def test_admin_log_page_search_pages_and_permissions():
+    old = appmod.DB_PATH
+    try:
+        db, mid, yes, no, admin, bob, eve = _closed_market_with_bet()
+        assert bob.get("/admin/log").status_code == 403
+        assert "No admin activity yet." in admin.get("/admin/log").get_data(as_text=True)
+        _post(admin, f"/admin/markets/{mid}/propose-result", outcome_id=yes)
+        _post(admin, f"/admin/markets/{mid}/cancel")
+        page = admin.get("/admin/log").get_data(as_text=True)
+        assert "Proposed a result" in page and "Cancelled a market" in page and f"/market/{mid}" in page
+        assert "Cancelled a market" not in admin.get("/admin/log?q=proposed").get_data(as_text=True)
+        assert "Nothing matches" in admin.get("/admin/log?q=zzzz").get_data(as_text=True)
+        for i in range(55):
+            db.execute("INSERT INTO audit_log (actor_name, action, target_type, created_at) "
+                       "VALUES ('chief', 'user.grant', 'user', ?)", (appmod.now_str(),))
+        assert "Page 1 of 2" in admin.get("/admin/log").get_data(as_text=True)
+        assert "Page 2 of 2" in admin.get("/admin/log?page=2").get_data(as_text=True)
+    finally:
+        appmod.DB_PATH = old
+
+
+def test_admin_reset_password_rules():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        owner, helper, bob = (appmod.app.test_client() for _ in range(3))
+        signup(owner, "boss")
+        signup(helper, "helper")
+        signup(bob, "bob")
+        uid = lambda n: _q(db, "SELECT id FROM users WHERE username=?", n)
+        _post(owner, f"/admin/users/{uid('helper')}/toggle-admin")
+        # an admin can reset a regular user, but not the owner
+        page = _post(helper, f"/admin/users/{uid('bob')}/reset-password").get_data(as_text=True)
+        assert "Temporary password for bob:" in page
+        assert "Only the site owner" in _post(helper, f"/admin/users/{uid('boss')}/reset-password").get_data(as_text=True)
+        assert bob.get("/portfolio").status_code == 302  # bob was signed out
+        assert [a[0] for a in _audit(db)].count("user.password_reset") == 1
+    finally:
+        appmod.DB_PATH = old
