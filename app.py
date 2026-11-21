@@ -57,7 +57,7 @@ CREATOR_MIN_BET = 10.0
 CATEGORIES = ["Academics", "Competitions", "Sports", "Events", "Campus Life", "Weather", "Other"]
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,20}$")
 EPS = 1e-9
-OWNER_USERNAME = "Kaushik"
+OWNER_USERNAME = os.environ.get("MAMS_OWNER", "Kaushik").strip()
 
 
 def _secret_key():
@@ -462,12 +462,12 @@ def check_trade(m, outs, idx, action, value, balance=None, held=None, fee=0.0):
     if action == "buy":
         amount = cents(value)
         if amount < MIN_BET:
-            raise TradeError(f"Minimum bet is {MIN_BET:.0f} {CURRENCY}.")
+            raise TradeError(f"Minimum bet is Ⓜ{MIN_BET:.0f}.")
         if balance is not None and amount + fee > balance + EPS:
             if fee:
                 raise TradeError(f"You need Ⓜ{amount + fee:,.2f} (Ⓜ{amount:,.2f} bet + Ⓜ{fee:,.0f} entry fee) "
                                  f"but have Ⓜ{balance:,.2f}.")
-            raise TradeError("You don't have enough MAMS Bucks for that bet.")
+            raise TradeError(f"You don't have enough for that bet. Your balance is Ⓜ{balance:,.2f}.")
         return lmsr.shares_for_amount(q, m["b"], idx, amount), amount
     if action == "sell":
         shares = value
@@ -477,12 +477,17 @@ def check_trade(m, outs, idx, action, value, balance=None, held=None, fee=0.0):
             raise TradeError("Enter a number of shares to sell.")
         if held is not None and shares > held + EPS:
             raise TradeError(f"You only own {held:.2f} shares of “{label}”.")
-        return shares, math.floor(lmsr.sell_value(q, m["b"], idx, shares) * 100) / 100
+        coins = math.floor(lmsr.sell_value(q, m["b"], idx, shares) * 100) / 100
+        if coins < 0.01:
+            raise TradeError("That's worth less than Ⓜ0.01. Sell more shares at once.")
+        return shares, coins
     raise TradeError("Unknown action.")
 
 
-def execute_trade(db, user_id, market_id, outcome_id, action, value):
-    """Buy (value = coins to spend) or sell (value = shares to sell). Returns a status message."""
+def execute_trade(db, user_id, market_id, outcome_id, action, value, min_out=None):
+    """Buy (value = coins to spend) or sell (value = shares to sell). Returns a status message.
+    min_out (optional) is the least the trader will accept: shares for a buy, coins for a sell. It guards
+    against the price moving between the quote and the trade."""
     db.execute("BEGIN IMMEDIATE")
     try:
         m = db.execute("SELECT * FROM markets WHERE id = ?", (market_id,)).fetchone()
@@ -508,6 +513,8 @@ def execute_trade(db, user_id, market_id, outcome_id, action, value):
 
         fee = entry_fee_due(db, m, user_id) if action == "buy" else 0.0
         shares, coins = check_trade(m, outs, idx, action, value, user["balance"], held, fee)
+        if min_out is not None and (shares if action == "buy" else coins) < min_out - 1e-9:
+            raise TradeError("The price moved since your quote. Check the new quote and try again.")
         if fee:
             creator = creator_name(db, m)
             db.execute("UPDATE users SET balance = ROUND(balance - ?, 2) WHERE id = ?", (fee, user_id))
@@ -673,7 +680,11 @@ def cancel_market(db, market_id):
                 db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (r["net"], r["user_id"]))
             log_activity(db, r["user_id"], "refund", max(r["net"], 0), m, "Refund: market cancelled")
         refund_entry_fees(db, market_id, reason="Entry fee refunded: market cancelled")
-        db.execute("UPDATE markets SET status = 'cancelled', resolved_at = ? WHERE id = ?", (now_str(), market_id))
+        # A proposed or disputed result is moot once the market is void.
+        db.execute("UPDATE disputes SET handled_at = ? WHERE market_id = ? AND handled_at IS NULL",
+                   (now_str(), market_id))
+        db.execute("UPDATE markets SET status = 'cancelled', resolved_at = ?, proposed_outcome_id = NULL, "
+                   "proposed_by = NULL, proposed_at = NULL, finalizes_at = NULL WHERE id = ?", (now_str(), market_id))
         db.execute("COMMIT")
     except Exception:
         db.execute("ROLLBACK")
@@ -699,7 +710,8 @@ def delete_market(db, market_id):
         db.execute("DELETE FROM positions WHERE outcome_id IN (SELECT id FROM outcomes WHERE market_id = ?)",
                    (market_id,))
         db.execute("UPDATE proposals SET market_id = NULL WHERE market_id = ?", (market_id,))
-        for table in ("trades", "price_history", "comments", "market_blocks", "market_entries", "outcomes"):
+        for table in ("trades", "price_history", "comments", "market_blocks", "market_entries", "disputes",
+                      "clarifications", "outcomes"):
             db.execute(f"DELETE FROM {table} WHERE market_id = ?", (market_id,))
         db.execute("DELETE FROM markets WHERE id = ?", (market_id,))
         db.execute("COMMIT")
@@ -878,7 +890,7 @@ def register():
         else:
             db = get_db()
             first_user = db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
-            is_admin = int((first_user and not OWNER_USERNAME) or username.lower() == OWNER_USERNAME
+            is_admin = int((first_user and not OWNER_USERNAME) or username.lower() == OWNER_USERNAME.lower()
                            or username.lower() in ADMIN_USERNAMES)
             try:
                 db.execute("BEGIN IMMEDIATE")
@@ -903,6 +915,9 @@ def register():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
+        if rate_limited(("login-ip", request.remote_addr), 120, 60):
+            flash("Too many log-in attempts from this network. Wait a minute and try again.", "error")
+            return render_template("login.html")
         name = request.form.get("username", "").strip()
         fail_key = ("login-fail", name.lower())
         recent_fails = [t for t in _hits.get(fail_key, []) if time.time() - t < 300]
@@ -1051,7 +1066,15 @@ def trade(mid):
         flash("Pick an outcome and enter a valid number.", "error")
         return redirect(url_for("market", mid=mid))
     try:
-        flash(execute_trade(get_db(), g.user["id"], mid, outcome_id, request.form.get("action"), value), "success")
+        min_out = request.form.get("min_out", "").strip()
+        min_out = float(min_out) if min_out else None
+        if min_out is not None and (not math.isfinite(min_out) or min_out < 0):
+            min_out = None
+    except ValueError:
+        min_out = None
+    try:
+        flash(execute_trade(get_db(), g.user["id"], mid, outcome_id, request.form.get("action"), value, min_out),
+              "success")
     except TradeError as e:
         flash(str(e), "error")
     return redirect(url_for("market", mid=mid))
@@ -1141,8 +1164,13 @@ def portfolio():
             value = 0.0  # refunded when the market was cancelled
         else:
             value = r["shares"] * price
-        item = {"r": r, "b": b, "price": price, "value": value}
+        refund = None
+        if b["m"]["status"] == "cancelled":
+            refund = cents(max(db.execute("SELECT COALESCE(SUM(amount), 0) FROM trades WHERE user_id = ? AND market_id = ?",
+                                          (uid, r["market_id"])).fetchone()[0], 0.0))
+        item = {"r": r, "b": b, "price": price, "value": value, "refund": refund}
         (active if b["m"]["status"] == "open" else settled).append(item)
+    settled.sort(key=lambda i: i["b"]["m"]["resolved_at"] or "", reverse=True)
     trades = db.execute(
         "SELECT t.*, o.label, m.question FROM trades t JOIN outcomes o ON o.id = t.outcome_id "
         "JOIN markets m ON m.id = t.market_id WHERE t.user_id = ? ORDER BY t.id DESC LIMIT 30", (uid,)).fetchall()
@@ -1636,6 +1664,8 @@ def admin_result_action(mid):
                 raise TradeError("Only a disputed result needs confirming; others finalize on their own.")
             n = resolve_market(db, mid, m["proposed_outcome_id"], g.user["id"])
             flash(f"Result confirmed. Paid out {n} winning position(s).", "success")
+        else:
+            raise TradeError("Unknown action.")
     except TradeError as e:
         flash(str(e), "error")
     return redirect(url_for("market", mid=mid))
@@ -1868,6 +1898,7 @@ def admin_toggle(uid):
 @app.errorhandler(400)
 @app.errorhandler(403)
 @app.errorhandler(404)
+@app.errorhandler(500)
 def error_page(e):
     return render_template("error.html", error=e), e.code
 

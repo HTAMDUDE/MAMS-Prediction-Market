@@ -48,7 +48,7 @@
         <td class="num">{{ i.r.shares|money }}</td>
         <td class="num">Ⓜ{{ i.r.cost|money }}</td>
         <td class="num">
-          {% if i.b.state == 'cancelled' %}<span class="muted">Refunded</span>
+          {% if i.b.state == 'cancelled' %}<span class="muted">{% if i.refund > 0 %}Refunded Ⓜ{{ i.refund|money }}{% else %}Cancelled{% endif %}</span>
           {% elif i.price > 0 %}<span class="up">Won Ⓜ{{ i.value|money }}</span>
           {% else %}<span class="down">Lost</span>{% endif %}
         </td>
