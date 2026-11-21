@@ -90,8 +90,6 @@
   <a href="{{ url_for('how_it_works') }}">How it works</a> · <a href="{{ url_for('leaderboard') }}">Leaderboard</a>
 </footer>
 {% block bottom %}{% endblock %}
-<script src="{{ url_for('static', filename='app.js') }}"></script>
-{% block scripts %}{% endblock %}
 <dialog id="confirm-dialog" aria-labelledby="confirm-title">
   <form method="dialog">
     <h2 id="confirm-title" data-title>Are you sure?</h2>
@@ -102,5 +100,7 @@
     </div>
   </form>
 </dialog>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+{% block scripts %}{% endblock %}
 </body>
 </html>

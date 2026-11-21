@@ -42,11 +42,15 @@ function drawChart(el, history, allLabels, endTime, lines, tz) {
   const tickFmt = new Intl.DateTimeFormat('en-US', shortSpan
     ? { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' } : { month: 'short', day: 'numeric', timeZone: 'UTC' });
   const TICKS = 4;
+  let prevLabel = null;
   for (let i = 0; i < TICKS; i++) {
     const t = t0 + (t1 - t0) * i / (TICKS - 1);
-    const anchor = i === 0 ? 'start' : i === TICKS - 1 ? 'end' : 'middle';
-    svg('text', { x: x(t), y: H - 6, class: 'axis', 'text-anchor': anchor }, root).textContent =
-      i === TICKS - 1 && !endTime ? 'now' : tickFmt.format(t);
+    const last = i === TICKS - 1;
+    const label = last && !endTime ? 'now' : tickFmt.format(t);
+    if (!last && label === prevLabel) continue;  // a short span would repeat the same label
+    if (last && label === prevLabel) { root.lastChild.remove(); }  // keep the end label, drop the duplicate before it
+    prevLabel = label;
+    svg('text', { x: x(t), y: H - 6, class: 'axis', 'text-anchor': i === 0 ? 'start' : last ? 'end' : 'middle' }, root).textContent = label;
   }
 
   labels.forEach((_, i) => {
@@ -141,6 +145,7 @@ function setupTradeForm(form) {
     clearTimeout(timer);
     if (ctrl) ctrl.abort();  // drop any quote still in flight
     minOut.value = '';
+    preview.classList.remove('stale');
     const v = parseFloat(valueInput.value);
     if (!isBuy() && held() <= 0) {
       quoted = null;

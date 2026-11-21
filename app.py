@@ -919,6 +919,18 @@ def money_filter(x):
     return f"{x:,.2f}"
 
 
+@app.template_filter("signed_money")
+def signed_money_filter(x):
+    """+Ⓜ12.00 / −Ⓜ3.50 (a real minus sign)."""
+    return f"{'+' if x >= 0 else '−'}Ⓜ{abs(x):,.2f}"
+
+
+@app.template_filter("cents_label")
+def cents_label_filter(p):
+    """A 0-1 price as cents: 0.42 -> 42¢."""
+    return f"{round(p * 100):.0f}¢"
+
+
 @app.template_filter("pct")
 def pct_filter(p):
     v = p * 100

@@ -24,7 +24,7 @@
         <td class="num" data-label="Shares">{{ i.r.shares|money }}</td>
         <td class="num" data-label="Spent">Ⓜ{{ i.r.cost|money }}</td>
         <td class="num" data-label="Sell value">Ⓜ{{ i.value|money }}</td>
-        <td data-label="Gain" class="num {{ 'up' if gain >= 0 else 'down' }}">{{ '+' if gain >= 0 }}{{ gain|money }}</td>
+        <td data-label="Gain" class="num {{ 'up' if gain >= 0 else 'down' }}">{{ gain|signed_money }}</td>
       </tr>
     {% endfor %}
     </tbody>

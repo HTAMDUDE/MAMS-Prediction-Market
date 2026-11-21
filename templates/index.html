@@ -44,7 +44,7 @@
       {% if b.binary and b.state in ('open', 'closed', 'proposed', 'disputed') %}
       <div class="chance-row">
         <div class="chance"><span class="chance-pct">{{ b.outcomes[0].price|pct }}</span> <span class="muted">chance</span></div>
-        <div class="yn"><span class="yn-yes">{{ 'Over' if b.ou else 'Yes' }} {{ (b.outcomes[0].price * 100)|round|int }}¢</span><span class="yn-no">{{ 'Under' if b.ou else 'No' }} {{ (b.outcomes[1].price * 100)|round|int }}¢</span></div>
+        <div class="yn"><span class="yn-yes">{{ 'Over' if b.ou else 'Yes' }} {{ b.outcomes[0].price|cents_label }}</span><span class="yn-no">{{ 'Under' if b.ou else 'No' }} {{ b.outcomes[1].price|cents_label }}</span></div>
       </div>
       {% else %}
       <ul class="odds">

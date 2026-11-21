@@ -513,3 +513,9 @@ def test_nav_marks_current_page_and_footer_links():
     page = c["boss"].get("/leaderboard").get_data(as_text=True)
     assert 'aria-current="page">Leaderboard' in page and 'aria-current="page">Markets' not in page
     assert page.count("Signed in as") == 1 and "Leaderboard</a>\n" in page
+
+
+def test_format_filters():
+    env = appmod.app.jinja_env
+    assert env.from_string("{{ 12|signed_money }} {{ -3.5|signed_money }}").render() == "+Ⓜ12.00 −Ⓜ3.50"
+    assert env.from_string("{{ 0.424|cents_label }}").render() == "42¢"
