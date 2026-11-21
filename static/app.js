@@ -1,7 +1,15 @@
 // MAMS Prediction Market — front-end helpers (no dependencies).
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
-const parseTime = s => new Date(s.replace(' ', 'T')).getTime();
+// Timestamps from the server are school-time wall-clock strings ("2025-03-04 15:30:00"). Parsing them as UTC and
+// formatting with timeZone "UTC" keeps that wall clock exactly, whatever the viewer's own time zone is.
+const parseTime = s => Date.parse(s.replace(' ', 'T') + 'Z');
+function wallNow(tz) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric',
+    hour: 'numeric', minute: 'numeric', second: 'numeric' }).formatToParts(new Date()).map(x => [x.type, x.value]));
+  return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
+}
 const fmt = n => n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 function svg(tag, attrs, parent) {
@@ -13,12 +21,12 @@ function svg(tag, attrs, parent) {
 
 // Price-over-time chart: one stepped line per outcome.
 // `lines` limits how many outcomes are drawn (a Yes/No market only needs its Yes line).
-function drawChart(el, history, allLabels, endTime, lines) {
+function drawChart(el, history, allLabels, endTime, lines, tz) {
   if (!el || !history.length) return;
   const labels = allLabels.slice(0, lines || allLabels.length);
   const W = 640, H = 220, L = 36, R = 8, T = 10, B = 24;
   const pts = history.map(h => ({ t: parseTime(h.t), p: h.p }));
-  const end = endTime ? parseTime(endTime) : Date.now();
+  const end = endTime ? parseTime(endTime) : wallNow(tz || 'America/New_York');
   pts.push({ t: Math.max(end, pts[pts.length - 1].t), p: pts[pts.length - 1].p });
   const t0 = pts[0].t, t1 = Math.max(pts[pts.length - 1].t, t0 + 1);
   const x = t => L + (t - t0) / (t1 - t0) * (W - L - R);
@@ -29,10 +37,17 @@ function drawChart(el, history, allLabels, endTime, lines) {
     svg('line', { x1: L, x2: W - R, y1: y(g), y2: y(g), class: 'grid' }, root);
     svg('text', { x: L - 6, y: y(g) + 4, class: 'axis', 'text-anchor': 'end' }, root).textContent = `${g * 100}%`;
   }
-  const dateFmt = { month: 'short', day: 'numeric' };
-  svg('text', { x: L, y: H - 6, class: 'axis' }, root).textContent = new Date(t0).toLocaleDateString(undefined, dateFmt);
-  svg('text', { x: W - R, y: H - 6, class: 'axis', 'text-anchor': 'end' }, root).textContent =
-    endTime ? new Date(t1).toLocaleDateString(undefined, dateFmt) : 'now';
+  // Time axis: clock times when the chart spans under a day, dates otherwise; the last tick says "now" while live.
+  const shortSpan = t1 - t0 < 86400000;
+  const tickFmt = new Intl.DateTimeFormat('en-US', shortSpan
+    ? { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' } : { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  const TICKS = 4;
+  for (let i = 0; i < TICKS; i++) {
+    const t = t0 + (t1 - t0) * i / (TICKS - 1);
+    const anchor = i === 0 ? 'start' : i === TICKS - 1 ? 'end' : 'middle';
+    svg('text', { x: x(t), y: H - 6, class: 'axis', 'text-anchor': anchor }, root).textContent =
+      i === TICKS - 1 && !endTime ? 'now' : tickFmt.format(t);
+  }
 
   labels.forEach((_, i) => {
     let d = '';
@@ -67,7 +82,7 @@ function drawChart(el, history, allLabels, endTime, lines) {
     const p = priceAt(t);
     guide.setAttribute('x1', vx); guide.setAttribute('x2', vx); guide.setAttribute('visibility', 'visible');
     tip.hidden = false;
-    tip.innerHTML = `<div class="muted small">${new Date(t).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</div>` +
+    tip.innerHTML = `<div class="muted small">${new Date(t).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'UTC' })}</div>` +
       labels.map((name, i) => `<div><i style="background: var(--c${i})"></i>${name.replace(/</g, '&lt;')} <b>${(p[i] * 100).toFixed(1)}%</b></div>`).join('');
     const left = vx / W * box.width;
     tip.style.left = `${Math.min(Math.max(left + 12, 0), box.width - tip.offsetWidth)}px`;
@@ -87,7 +102,8 @@ function setupTradeForm(form) {
   const quick = form.querySelector('#quick');
   const balance = parseFloat(maxBtn.dataset.balance);
   const entryFee = parseFloat(form.dataset.entryFee) || 0;  // charged on your first bet in this market
-  let timer = null, seq = 0;
+  const minOut = form.querySelector('#min-out');
+  let timer = null, ctrl = null, quoted = null;  // quoted = { key } of the quote the preview shows
 
   const selected = () => form.querySelector('input[name=outcome_id]:checked');
   const outcomeName = () => selected().dataset.label;
@@ -103,6 +119,8 @@ function setupTradeForm(form) {
     valueLabel.textContent = isBuy() ? 'Amount to spend (Ⓜ)' : `Shares to sell (you own ${fmt(held())})`;
     quick.hidden = !isBuy();
     submit.textContent = defaultButton();
+    submit.classList.toggle('btn-buy', isBuy());
+    submit.classList.toggle('btn-sell', !isBuy());
     requestQuote();
   }
 
@@ -112,26 +130,44 @@ function setupTradeForm(form) {
     submit.textContent = buttonText || defaultButton();
   }
 
+  // A quote is only valid for the exact outcome|action|amount it was fetched for.
+  const keyFor = v => `${selected().value}|${actionInput.value}|${v}`;
+  const floor6 = n => Math.floor(n * 1e6) / 1e6;
+  const floor2 = n => Math.floor(n * 100) / 100;
+  const round2 = n => Math.round(n * 100) / 100;
+  const maxBuy = () => Math.max(0, floor2(balance - entryFee));
+
   function requestQuote() {
     clearTimeout(timer);
-    seq++;  // drop any quote still in flight
+    if (ctrl) ctrl.abort();  // drop any quote still in flight
+    minOut.value = '';
     const v = parseFloat(valueInput.value);
     if (!isBuy() && held() <= 0) {
+      quoted = null;
       setPreview(`<span class="muted">You don't own any “${outcomeName()}” shares to sell.</span>`, false);
       return;
     }
     if (!(v > 0)) {
+      quoted = null;
       setPreview(`<span class="muted">${isBuy() ? 'Enter an amount to see your payout.' : 'Enter shares to see what you get back.'}</span>`, false);
       return;
     }
+    const key = keyFor(v);
+    // Same outcome and action, new amount: keep the old numbers on screen but dim them until the new quote lands.
+    const sameKind = quoted && quoted.key.split('|').slice(0, 2).join('|') === key.split('|').slice(0, 2).join('|');
+    if (!sameKind) { preview.innerHTML = '<span class="muted">Getting a quote…</span>'; quoted = null; }
+    preview.classList.toggle('stale', !!sameKind);
     submit.disabled = true;
     timer = setTimeout(async () => {
-      const my = ++seq;
+      ctrl = new AbortController();
       const params = new URLSearchParams({ market: form.dataset.market, outcome: selected().value, action: actionInput.value, value: v });
       try {
-        const res = await (await fetch(`${form.dataset.quote}?${params}`)).json();
-        if (my !== seq) return;
-        if (!res.ok) { setPreview(`<span class="down">${res.error || 'Can\'t quote that trade.'}</span>`, false); return; }
+        const res = await (await fetch(`${form.dataset.quote}?${params}`, { signal: ctrl.signal })).json();
+        if (keyFor(parseFloat(valueInput.value)) !== key) return;  // the input moved on while we waited
+        preview.classList.remove('stale');
+        if (!res.ok) { quoted = null; setPreview(`<span class="down">${res.error || 'Can\'t quote that trade.'}</span>`, false); return; }
+        quoted = { key };
+        minOut.value = floor6((isBuy() ? res.shares : res.coins) * 0.98);  // refuse if the price moves >2% against you
         const newPct = `${(res.new_price * 100).toFixed(1)}%`;
         const name = outcomeName();
         if (isBuy()) {
@@ -160,12 +196,20 @@ function setupTradeForm(form) {
             row('New price', newPct),
             true, `Sell for ${money(res.coins)}`);
         }
-      } catch { if (my === seq) setPreview('<span class="muted">Quote unavailable.</span>', false); }
+      } catch (err) {
+        if (err.name === 'AbortError') return;
+        quoted = null;
+        preview.classList.remove('stale');
+        setPreview('<span class="muted">Quote unavailable. Try again.</span>', false);
+      }
     }, 150);
   }
 
   form.querySelectorAll('.seg button').forEach(btn => btn.addEventListener('click', () => {
-    form.querySelectorAll('.seg button').forEach(b => b.classList.toggle('active', b === btn));
+    form.querySelectorAll('.seg button').forEach(b => {
+      b.classList.toggle('active', b === btn);
+      b.setAttribute('aria-pressed', b === btn ? 'true' : 'false');
+    });
     actionInput.value = btn.dataset.action;
     valueInput.value = '';
     valueInput.step = isBuy() ? '0.01' : 'any';
@@ -174,12 +218,11 @@ function setupTradeForm(form) {
   form.querySelectorAll('input[name=outcome_id]').forEach(r => r.addEventListener('change', refresh));
   valueInput.addEventListener('input', requestQuote);
   maxBtn.addEventListener('click', () => {
-    valueInput.value = isBuy() ? Math.max(0, Math.floor((balance - entryFee) * 100) / 100) : held();
+    valueInput.value = isBuy() ? maxBuy() : floor6(held());
     requestQuote();
   });
   quick.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
-    const next = (parseFloat(valueInput.value) || 0) + parseFloat(b.dataset.amt);
-    valueInput.value = Math.min(next, Math.max(0, Math.floor((balance - entryFee) * 100) / 100));
+    valueInput.value = round2(Math.min((parseFloat(valueInput.value) || 0) + parseFloat(b.dataset.amt), maxBuy()));
     requestQuote();
   }));
   refresh();
@@ -317,4 +360,68 @@ document.querySelectorAll('form[data-market-form]').forEach(setupMarketForm);
     if (p && dlg.returnValue === 'ok') { p.form.dataset.confirmed = '1'; p.form.requestSubmit(p.submitter); }
     dlg.returnValue = '';
   });
+})();
+
+
+// Bottom "Bet" bar on phones: shows the current chance and scrolls to the trade panel; hidden while that panel is on screen.
+function setupBetBar() {
+  const bar = document.getElementById('bet-bar'), panel = document.getElementById('trade');
+  if (!bar || !panel || !('IntersectionObserver' in window)) return;
+  new IntersectionObserver(([entry]) => { bar.hidden = entry.isIntersecting; }, { threshold: 0.15 }).observe(panel);
+}
+
+// Phone menu sheet.
+(function setupMenu() {
+  const btn = document.getElementById('menu-btn'), sheet = document.getElementById('menu-sheet');
+  if (!btn || !sheet || !sheet.showModal) return;
+  btn.addEventListener('click', () => sheet.showModal());
+  sheet.addEventListener('click', e => {
+    if (e.target === sheet || e.target.closest('[data-close-sheet]') || e.target.closest('a')) sheet.close();
+  });
+})();
+
+
+// Home page filters: the server renders every market; tabs and topic chips just hide cards and update the URL
+// (still shareable as ?status=&cat=) without a request. Without JS the links reload the page as before.
+(function setupMarketFilters() {
+  const bar = document.getElementById('market-filters'), grid = document.getElementById('market-grid');
+  if (!bar || !grid) return;
+  const cards = [...grid.querySelectorAll('.market-card')];
+  const empty = document.getElementById('empty-state');
+  const tabs = [...bar.querySelectorAll('[data-status]')], chips = [...bar.querySelectorAll('[data-cat]')];
+  const params = new URLSearchParams(location.search);
+  let status = tabs.some(t => t.dataset.status === params.get('status')) ? params.get('status') : 'open';
+  let cat = chips.some(c => c.dataset.cat === params.get('cat')) ? params.get('cat') : '';
+  const matches = (state, s) => s === 'all' || state === s || (s === 'closed' && ['closed', 'proposed', 'disputed'].includes(state));
+
+  function apply() {
+    let shown = 0;
+    for (const card of cards) {
+      const ok = matches(card.dataset.state, status) && (!cat || card.dataset.cat === cat);
+      card.hidden = !ok;
+      if (ok) shown++;
+    }
+    tabs.forEach(t => { const on = t.dataset.status === status; t.classList.toggle('active', on); t.setAttribute('aria-pressed', on); });
+    chips.forEach(c => { const on = c.dataset.cat === cat; c.classList.toggle('active', on); c.setAttribute('aria-pressed', on); });
+    const filtered = status !== 'open' || !!cat;
+    empty.hidden = shown > 0;
+    document.getElementById('empty-title').innerHTML = `<strong>${filtered ? 'No markets match these filters.' : 'No open markets right now.'}</strong>`;
+    document.getElementById('empty-hint').textContent = filtered ? 'Try another topic or status.' : 'Check back soon, or propose one yourself.';
+    document.getElementById('clear-filters').hidden = !filtered;
+    const q = new URLSearchParams();
+    if (status !== 'open') q.set('status', status);
+    if (cat) q.set('cat', cat);
+    history.replaceState(null, '', location.pathname + (q.toString() ? `?${q}` : ''));
+    // keep each link pointing at the right page for "open in new tab" and no-JS fallbacks
+    tabs.forEach(t => { const p = new URLSearchParams(); p.set('status', t.dataset.status); if (cat) p.set('cat', cat); t.href = `/?${p}`; });
+    chips.forEach(c => { const p = new URLSearchParams(); p.set('status', status); if (c.dataset.cat) p.set('cat', c.dataset.cat); c.href = `/?${p}`; });
+  }
+  bar.addEventListener('click', e => {
+    const tab = e.target.closest('[data-status]'), chip = e.target.closest('[data-cat]');
+    if (!tab && !chip || e.metaKey || e.ctrlKey || e.shiftKey) return;
+    e.preventDefault();
+    if (tab) status = tab.dataset.status; else cat = chip.dataset.cat;
+    apply();
+  });
+  document.getElementById('clear-filters').addEventListener('click', e => { e.preventDefault(); status = 'open'; cat = ''; apply(); });
 })();

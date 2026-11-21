@@ -23,13 +23,13 @@
 <div class="card activity-card">
   {% if rows %}
   <div class="table-scroll">
-  <table class="table activity">
+  <table class="table stack-mobile activity">
     <thead><tr><th>When</th><th>What happened</th><th class="num">Money</th><th class="num">Balance after</th></tr></thead>
     <tbody>
     {% for r in rows %}
       <tr>
-        <td class="muted small nowrap" title="{{ r.created_at|when }}">{{ r.created_at|ago }}</td>
-        <td>
+        <td class="muted small nowrap" title="{{ r.created_at|when }}" data-label="When">{{ r.created_at|ago }}</td>
+        <td data-label="What happened">
           <span class="kind kind-{{ r.kind }}">{{ {'signup': 'Joined', 'bonus': 'Bonus', 'buy': 'Bought', 'sell': 'Sold', 'payout': 'Won', 'loss': 'Lost', 'refund': 'Refund', 'admin': 'Admin', 'fee': 'Fee', 'earning': 'Earned'}[r.kind] or r.kind }}</span>
           {{ r.detail }}
           {% if r.market_title %}
@@ -39,10 +39,10 @@
             </div>
           {% endif %}
         </td>
-        <td class="num {{ 'up' if r.amount > 0 else ('down' if r.amount < 0) }}">
+        <td data-label="Money" class="num {{ 'up' if r.amount > 0 else ('down' if r.amount < 0) }}">
           {% if r.amount > 0 %}+Ⓜ{{ r.amount|money }}{% elif r.amount < 0 %}−Ⓜ{{ (-r.amount)|money }}{% else %}<span class="muted">Ⓜ0.00</span>{% endif %}
         </td>
-        <td class="num">{% if r.balance_after is not none %}Ⓜ{{ r.balance_after|money }}{% else %}<span class="muted" title="From before the activity log existed">—</span>{% endif %}</td>
+        <td class="num" data-label="Balance after">{% if r.balance_after is not none %}Ⓜ{{ r.balance_after|money }}{% else %}<span class="muted" title="From before the activity log existed">—</span>{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>

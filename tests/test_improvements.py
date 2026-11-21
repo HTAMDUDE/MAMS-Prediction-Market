@@ -471,3 +471,45 @@ def test_announcement_banner_limit_and_clear():
     assert 'class="announcement"' not in c["bob"].get("/").get_data(as_text=True)
     assert c["bob"].post("/admin/announcement", data={"csrf_token": csrf(c["bob"].get("/")), "text": "hi"}).status_code == 403
     assert [a[3] for a in _audit(db)] == ["No trading during the assembly.", "(cleared)"]
+
+
+# ---------------------------------------------------------------- 6. front-end markup
+
+def test_home_renders_every_market_and_hides_by_filter():
+    db, c, uid = _site("boss")
+    open_id = _open_market(db, "Still open market?")
+    cancelled = _open_market(db, "Cancelled market?")
+    appmod.cancel_market(db, cancelled)
+    page = c["boss"].get("/").get_data(as_text=True)
+    card = lambda text, html: next(x for x in html.split("<a class=\"card market-card\"")[1:] if text in x)
+    assert " hidden" in card("Cancelled market?", page)[:300]
+    assert " hidden" not in card("Still open market?", page)[:300]
+    assert ">Cancelled</a>" in page  # the new tab
+    page = c["boss"].get("/?status=cancelled").get_data(as_text=True)
+    assert " hidden" not in card("Cancelled market?", page)[:300]
+    assert " hidden" in card("Still open market?", page)[:300]
+    # an unknown status or topic falls back to the defaults instead of hiding everything
+    page = c["boss"].get("/?status=bogus&cat=nope").get_data(as_text=True)
+    assert " hidden" not in card("Still open market?", page)[:300]
+    # filtering to nothing shows the filter-aware empty state
+    page = c["boss"].get("/?cat=Weather").get_data(as_text=True)
+    assert "No markets match these filters." in page
+
+
+def test_market_page_has_quote_guard_bet_bar_and_school_timezone():
+    db, c, uid = _site("boss")
+    mid = _open_market(db)
+    page = c["boss"].get(f"/market/{mid}").get_data(as_text=True)
+    assert 'name="min_out"' in page and 'id="bet-bar"' in page and 'class="market-head"' in page
+    assert os.environ["TZ"] in page  # the chart is told the school time zone
+    assert 'aria-pressed="true">Buy' in page and 'for="value"' in page
+    # logged-out visitors get no trade form but still see the page and the menu
+    anon = appmod.app.test_client().get(f"/market/{mid}").get_data(as_text=True)
+    assert 'id="menu-sheet"' in anon and "Sign up" in anon and 'name="min_out"' not in anon
+
+
+def test_nav_marks_current_page_and_footer_links():
+    db, c, uid = _site("boss")
+    page = c["boss"].get("/leaderboard").get_data(as_text=True)
+    assert 'aria-current="page">Leaderboard' in page and 'aria-current="page">Markets' not in page
+    assert page.count("Signed in as") == 1 and "Leaderboard</a>\n" in page

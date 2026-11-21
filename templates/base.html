@@ -10,45 +10,70 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%237a1f2b'/><text x='16' y='22' font-size='16' font-family='Arial' font-weight='bold' fill='white' text-anchor='middle'>M</text></svg>">
 </head>
 <body>
-<header class="topbar">
-  <div class="wrap topbar-inner">
-    <a class="brand" href="{{ url_for('index') }}">
-      <span class="logo">M</span>
-      <span>MAMS <strong>Prediction Market</strong></span>
-    </a>
-    <nav class="nav">
-      <a href="{{ url_for('index') }}" class="{{ 'active' if request.endpoint in ('index', 'market') }}">Markets</a>
-      <a href="{{ url_for('leaderboard') }}" class="{{ 'active' if request.endpoint == 'leaderboard' }}">Leaderboard</a>
-      <a href="{{ url_for('activity') }}" class="{{ 'active' if request.endpoint in ('activity', 'balance_history') }}">Activity</a>
-      {% if not user or request.endpoint == 'how_it_works' %}<a href="{{ url_for('how_it_works') }}" class="{{ 'active' if request.endpoint == 'how_it_works' }}">How it works</a>{% endif %}
+{% macro nav_links() %}
+      <a href="{{ url_for('index') }}" {% if request.endpoint in ('index', 'market') %}class="active" aria-current="page"{% endif %}>Markets</a>
+      <a href="{{ url_for('leaderboard') }}" {% if request.endpoint == 'leaderboard' %}class="active" aria-current="page"{% endif %}>Leaderboard</a>
+      <a href="{{ url_for('activity') }}" {% if request.endpoint in ('activity', 'balance_history') %}class="active" aria-current="page"{% endif %}>Activity</a>
+      {% if not user or request.endpoint == 'how_it_works' %}<a href="{{ url_for('how_it_works') }}" {% if request.endpoint == 'how_it_works' %}class="active" aria-current="page"{% endif %}>How it works</a>{% endif %}
       {% if user %}
-        <a href="{{ url_for('portfolio') }}" class="{{ 'active' if request.endpoint == 'portfolio' }}">Portfolio</a>
-        <a href="{{ url_for('propose') }}" class="{{ 'active' if request.endpoint == 'propose' }}">Propose</a>
-        {% if user.is_admin %}<a href="{{ url_for('admin') }}" class="{{ 'active' if request.endpoint in ('admin', 'admin_review', 'admin_edit') }}">Admin{% if pending_proposals %} <span class="badge" title="{{ pending_proposals }} proposal(s) waiting">{{ pending_proposals }}</span>{% endif %}</a>{% endif %}
+        <a href="{{ url_for('portfolio') }}" {% if request.endpoint == 'portfolio' %}class="active" aria-current="page"{% endif %}>Portfolio</a>
+        <a href="{{ url_for('propose') }}" {% if request.endpoint == 'propose' %}class="active" aria-current="page"{% endif %}>Propose</a>
+        {% if user.is_admin %}<a href="{{ url_for('admin') }}" {% if request.endpoint in ('admin', 'admin_review', 'admin_edit', 'admin_user', 'admin_log') %}class="active" aria-current="page"{% endif %}>Admin{% if pending_proposals %} <span class="badge" title="{{ pending_proposals }} proposal(s) waiting">{{ pending_proposals }}</span>{% endif %}</a>{% endif %}
       {% endif %}
-    </nav>
-    <div class="account">
-      {% if user %}
+{% endmacro %}
+{% macro bonus_form() %}
         {% if can_bonus %}
           <form method="post" action="{{ url_for('bonus') }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button class="btn btn-small btn-gold" title="Claim your free daily {{ DAILY_BONUS|int }} MAMS Bucks">+{{ DAILY_BONUS|int }} bonus</button>
           </form>
         {% endif %}
+{% endmacro %}
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="brand" href="{{ url_for('index') }}">
+      <span class="logo">M</span>
+      <span class="brand-text">MAMS <strong>Prediction Market</strong></span>
+    </a>
+    <nav class="nav desk-only" aria-label="Main">{{ nav_links() }}</nav>
+    <div class="account">
+      {% if user %}
+        <span class="desk-only">{{ bonus_form() }}</span>
         <a class="balance" href="{{ url_for('portfolio') }}" title="Your {{ CURRENCY }}">
           <span class="coin">Ⓜ</span>{{ user.balance|money }}
         </a>
-        <form method="post" action="{{ url_for('logout') }}">
+        <form method="post" action="{{ url_for('logout') }}" class="desk-only">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <button class="btn btn-small btn-ghost" title="Log out {{ user.username }}">Log out</button>
         </form>
       {% else %}
-        <a class="btn btn-small btn-ghost" href="{{ url_for('login') }}">Log in</a>
-        <a class="btn btn-small" href="{{ url_for('register') }}">Sign up</a>
+        <a class="btn btn-small btn-ghost desk-only" href="{{ url_for('login') }}">Log in</a>
+        <a class="btn btn-small desk-only" href="{{ url_for('register') }}">Sign up</a>
       {% endif %}
+      <button type="button" class="btn btn-small btn-ghost menu-btn" id="menu-btn" aria-label="Open menu" aria-haspopup="dialog" aria-controls="menu-sheet">☰</button>
     </div>
   </div>
 </header>
+<dialog id="menu-sheet" class="sheet" aria-label="Menu">
+  <div class="sheet-head">
+    <strong>Menu</strong>
+    <button type="button" class="btn btn-small btn-ghost" data-close-sheet aria-label="Close menu">✕</button>
+  </div>
+  <nav class="sheet-nav" aria-label="Main">{{ nav_links() }}</nav>
+  <div class="sheet-account">
+    {% if user %}
+      <p class="muted small">Signed in as <strong>{{ user.username }}</strong></p>
+      {{ bonus_form() }}
+      <form method="post" action="{{ url_for('logout') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="btn btn-ghost btn-block">Log out</button>
+      </form>
+    {% else %}
+      <a class="btn btn-block" href="{{ url_for('register') }}">Sign up</a>
+      <a class="btn btn-ghost btn-block" href="{{ url_for('login') }}">Log in</a>
+    {% endif %}
+  </div>
+</dialog>
 {% if announcement %}<div class="announcement" role="status"><div class="wrap">📢 {{ announcement }}</div></div>{% endif %}
 
 <main class="wrap">
@@ -62,8 +87,9 @@
 
 <footer class="wrap footer">
   Play money only — {{ CURRENCY }} have no cash value. Prices are the crowd's estimate of how likely each outcome is.
-  <a href="{{ url_for('how_it_works') }}">How it works</a>
+  <a href="{{ url_for('how_it_works') }}">How it works</a> · <a href="{{ url_for('leaderboard') }}">Leaderboard</a>
 </footer>
+{% block bottom %}{% endblock %}
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 {% block scripts %}{% endblock %}
 <dialog id="confirm-dialog" aria-labelledby="confirm-title">

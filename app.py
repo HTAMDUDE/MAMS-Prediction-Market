@@ -906,6 +906,7 @@ def inject_globals():
     if g.user and g.user["is_admin"]:
         pending = get_db().execute("SELECT COUNT(*) FROM proposals WHERE status = 'pending'").fetchone()[0]
     return {"csrf_token": csrf_token, "user": g.user, "can_bonus": can_bonus, "pending_proposals": pending,
+            "SCHOOL_TZ": os.environ.get("TZ", "America/New_York"),
             "announcement": get_setting(get_db(), "announcement"),
             "owner_id": g.get("owner_id"), "is_owner": is_owner(),
             "CURRENCY": CURRENCY, "DAILY_BONUS": DAILY_BONUS, "CATEGORIES": CATEGORIES,
@@ -1083,23 +1084,41 @@ def bonus():
 
 # ---------------------------------------------------------------- routes: markets
 
+STATE_ORDER = ["open", "closed", "proposed", "disputed", "resolved", "cancelled"]
+STATUS_TABS = [("open", "Open"), ("closed", "Awaiting result"), ("resolved", "Resolved"),
+               ("cancelled", "Cancelled"), ("all", "All")]
+
+
+def matches_status(state, status):
+    if status == "closed":  # "Awaiting result" also covers results that are proposed or disputed
+        return state in ("closed", "proposed", "disputed")
+    return status == "all" or state == status
+
+
 @app.route("/")
 def index():
+    """Every market is rendered (in one fixed order) and the status/topic filters just hide cards: the server
+    marks the ones that don't match the query string hidden, and static/app.js flips them on click with no
+    request. Order: grouped by state; open by featured then volume; awaiting by closing time; settled newest first."""
     db = get_db()
     status = request.args.get("status", "open")
+    status = status if status in dict(STATUS_TABS) else "open"
     cat = request.args.get("cat", "")
+    cat = cat if cat in CATEGORIES else ""
     markets = [bundle(db, m) for m in db.execute("SELECT * FROM markets ORDER BY closes_at").fetchall()]
-    if status == "closed":  # "Awaiting result" also covers results that are proposed or disputed
-        markets = [b for b in markets if b["state"] in ("closed", "proposed", "disputed")]
-    elif status in ("open", "resolved", "cancelled"):
-        markets = [b for b in markets if b["state"] == status]
-    if cat:
-        markets = [b for b in markets if b["m"]["category"] == cat]
-    if status == "open":
-        markets.sort(key=lambda b: (-b["m"]["featured"], -b["volume"]))  # featured markets first
-    elif status in ("resolved", "cancelled"):
-        markets.sort(key=lambda b: b["m"]["resolved_at"] or "", reverse=True)
-    return render_template("index.html", markets=markets, status=status, cat=cat)
+
+    def sort_key(b):
+        rank = STATE_ORDER.index(b["state"])
+        if b["state"] == "open":
+            return (rank, -b["m"]["featured"], -b["volume"], b["m"]["closes_at"])
+        if b["state"] in ("resolved", "cancelled"):  # newest first; ISO strings sort as dates
+            return (rank, 0, 0, "".join(chr(0x10FFFF - ord(ch)) for ch in (b["m"]["resolved_at"] or "")))
+        return (rank, 0, 0, b["m"]["closes_at"])
+    markets.sort(key=sort_key)
+    visible = {b["m"]["id"] for b in markets
+               if matches_status(b["state"], status) and (not cat or b["m"]["category"] == cat)}
+    return render_template("index.html", markets=markets, visible=visible, status=status, cat=cat,
+                           tabs=STATUS_TABS)
 
 
 @app.route("/market/<int:mid>")

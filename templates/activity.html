@@ -32,14 +32,14 @@
 <div class="card activity-card">
   {% if rows %}
   <div class="table-scroll">
-  <table class="table activity">
+  <table class="table stack-mobile activity">
     <thead><tr><th>When</th><th>Trader</th><th>Trade</th><th class="num">Amount</th></tr></thead>
     <tbody>
     {% for r in rows %}
       <tr>
-        <td class="muted small nowrap" title="{{ r.created_at|when }}">{{ r.created_at|ago }}</td>
-        <td><a href="{{ url_for('activity', trader=r.username, show=show or None, market=market_id) }}" title="Only {{ r.username }}'s trades"><strong>{{ r.username }}</strong></a></td>
-        <td>
+        <td class="muted small nowrap" title="{{ r.created_at|when }}" data-label="When">{{ r.created_at|ago }}</td>
+        <td data-label="Trader"><a href="{{ url_for('activity', trader=r.username, show=show or None, market=market_id) }}" title="Only {{ r.username }}'s trades"><strong>{{ r.username }}</strong></a></td>
+        <td data-label="Trade">
           <span class="kind kind-{{ r.kind }}">{{ 'Bought' if r.kind == 'buy' else 'Sold' }}</span>
           {{ r.detail[7:] if r.kind == 'buy' and r.detail.startswith('Bought ') else (r.detail[5:] if r.detail.startswith('Sold ') else r.detail) }}
           <div class="muted small">
@@ -48,7 +48,7 @@
             {% if not market_id and r.market_id %} · <a href="{{ url_for('activity', market=r.market_id, show=show or None, trader=trader or None) }}">only this market</a>{% endif %}
           </div>
         </td>
-        <td class="num {{ 'down' if r.kind == 'buy' else 'up' }}" title="{{ 'Paid' if r.kind == 'buy' else 'Received' }}">
+        <td class="num {{ 'down' if r.kind == 'buy' else 'up' }}" title="{{ 'Paid' if r.kind == 'buy' else 'Received' }}" data-label="Amount">
           {{ 'paid' if r.kind == 'buy' else 'got' }} Ⓜ{{ r.amount|abs|money }}
         </td>
       </tr>
