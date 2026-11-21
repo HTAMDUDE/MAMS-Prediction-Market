@@ -32,7 +32,7 @@
   {% for b in markets %}
     <a class="card market-card" href="{{ url_for('market', mid=b.m.id) }}">
       <div class="card-meta">
-        <span class="tag">{{ b.m.category }}</span>
+        <span class="tag">{{ b.m.category }}</span>{% if b.m.featured %} <span class="featured" title="Featured by the admins">★ Featured</span>{% endif %}
         {% if b.state == 'open' %}<span class="muted">{{ b.m.closes_at|until }}</span>
         {% elif b.state == 'closed' %}<span class="status status-closed">Awaiting result</span>
         {% elif b.state == 'proposed' %}<span class="status status-pending">Result proposed</span>

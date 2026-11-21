@@ -906,6 +906,7 @@ def inject_globals():
     if g.user and g.user["is_admin"]:
         pending = get_db().execute("SELECT COUNT(*) FROM proposals WHERE status = 'pending'").fetchone()[0]
     return {"csrf_token": csrf_token, "user": g.user, "can_bonus": can_bonus, "pending_proposals": pending,
+            "announcement": get_setting(get_db(), "announcement"),
             "owner_id": g.get("owner_id"), "is_owner": is_owner(),
             "CURRENCY": CURRENCY, "DAILY_BONUS": DAILY_BONUS, "CATEGORIES": CATEGORIES,
             "DISPUTE_HOURS": DISPUTE_HOURS, "CREATION_FEE": CREATION_FEE, "ENTRY_FEE": ENTRY_FEE,
@@ -1095,7 +1096,7 @@ def index():
     if cat:
         markets = [b for b in markets if b["m"]["category"] == cat]
     if status == "open":
-        markets.sort(key=lambda b: -b["volume"])
+        markets.sort(key=lambda b: (-b["m"]["featured"], -b["volume"]))  # featured markets first
     elif status in ("resolved", "cancelled"):
         markets.sort(key=lambda b: b["m"]["resolved_at"] or "", reverse=True)
     return render_template("index.html", markets=markets, status=status, cat=cat)
@@ -1123,9 +1124,17 @@ def market(mid):
             traded = db.execute("SELECT 1 FROM trades WHERE user_id = ? AND market_id = ? LIMIT 1",
                                 (g.user["id"], mid)).fetchone()
             can_dispute = bool(traded) and not any(d["user_id"] == g.user["id"] for d in disputes)
-    comments = db.execute(
-        "SELECT c.*, u.username FROM comments c JOIN users u ON u.id = c.user_id "
-        "WHERE c.market_id = ? ORDER BY c.id DESC", (mid,)).fetchall()
+    is_admin = bool(g.user and g.user["is_admin"])
+    comments = []
+    for c in db.execute("SELECT c.*, u.username FROM comments c JOIN users u ON u.id = c.user_id "
+                        "WHERE c.market_id = ? ORDER BY c.id DESC", (mid,)).fetchall():
+        c = dict(c)
+        if c["hidden"] and not is_admin:
+            c["body"] = None  # a hidden comment's text is never sent to non-admins
+        c["can_moderate"] = is_admin and (c["user_id"] == g.user["id"] or can_manage(c["user_id"]))
+        comments.append(c)
+    commenting_off = bool(g.user and db.execute("SELECT 1 FROM comment_mutes WHERE user_id = ?",
+                                                (g.user["id"],)).fetchone())
     my_positions = []
     if g.user:
         by_id = {o["id"]: o for o in b["outcomes"]}
@@ -1152,7 +1161,9 @@ def market(mid):
                            my_positions=my_positions, block_reason=block_reason,
                            creator=creator, my_entry_fee=my_entry_fee,
                            blocked=blocked, all_users=all_users, clarifications=clarifications,
-                           disputes=disputes, proposer=proposer, can_dispute=can_dispute)
+                           disputes=disputes, proposer=proposer, can_dispute=can_dispute,
+                           commenting_off=commenting_off, comments_off_text=COMMENTS_OFF,
+                           reopen_default=(datetime.now() + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M"))
 
 
 @app.post("/market/<int:mid>/dispute")
@@ -1197,6 +1208,9 @@ def trade(mid):
     return redirect(url_for("market", mid=mid))
 
 
+COMMENTS_OFF = "An admin has turned off commenting for your account."
+
+
 @app.post("/market/<int:mid>/comment")
 @login_required
 def comment(mid):
@@ -1205,6 +1219,8 @@ def comment(mid):
         flash("Comment can't be empty.", "error")
     elif len(body) > 500:
         flash("Keep comments under 500 characters.", "error")
+    elif get_db().execute("SELECT 1 FROM comment_mutes WHERE user_id = ?", (g.user["id"],)).fetchone():
+        flash(COMMENTS_OFF, "error")
     elif get_db().execute("SELECT 1 FROM markets WHERE id = ?", (mid,)).fetchone():
         get_db().execute("INSERT INTO comments (market_id, user_id, body, created_at) VALUES (?, ?, ?, ?)",
                          (mid, g.user["id"], body, now_str()))
@@ -2158,6 +2174,133 @@ def admin_delete_user(uid):
               "success")
         return redirect(url_for("admin") + "#users")
     return redirect(url_for("admin_user", uid=uid) if u else url_for("admin") + "#users")
+
+
+def _moderated_comment(cid):
+    """Load a comment for moderation, or None (with a flash) if it's gone or the admin may not act on it."""
+    c = get_db().execute("SELECT c.*, u.username FROM comments c JOIN users u ON u.id = c.user_id WHERE c.id = ?",
+                         (cid,)).fetchone()
+    if c is None:
+        flash("That comment no longer exists.", "error")
+    elif c["user_id"] != g.user["id"] and not can_manage(c["user_id"]):
+        flash(NOT_ALLOWED, "error")
+        return None
+    return c
+
+
+def _comment_detail(c):
+    body = c["body"] if len(c["body"]) <= 80 else c["body"][:80] + "…"
+    return f"Market #{c['market_id']}: “{body}”"
+
+
+@app.post("/admin/comments/<int:cid>/hide")
+@admin_required
+def admin_hide_comment(cid):
+    c = _moderated_comment(cid)
+    if c is None:
+        return redirect(url_for("index"))
+    hide = not c["hidden"]
+    get_db().execute("UPDATE comments SET hidden = ? WHERE id = ?", (int(hide), cid))
+    log_audit("comment.hide" if hide else "comment.unhide", "comment", cid, c["username"], _comment_detail(c))
+    flash("Comment hidden." if hide else "Comment restored.", "success")
+    return redirect(url_for("market", mid=c["market_id"]) + "#discussion")
+
+
+@app.post("/admin/comments/<int:cid>/delete")
+@admin_required
+def admin_delete_comment(cid):
+    c = _moderated_comment(cid)
+    if c:
+        get_db().execute("DELETE FROM comments WHERE id = ?", (cid,))
+        log_audit("comment.delete", "comment", cid, c["username"], _comment_detail(c))
+        flash("Comment deleted.", "success")
+        return redirect(url_for("market", mid=c["market_id"]) + "#discussion")
+    return redirect(url_for("index"))
+
+
+@app.post("/admin/markets/<int:mid>/close")
+@admin_required
+def admin_close_early(mid):
+    db = get_db()
+    m = db.execute("SELECT * FROM markets WHERE id = ?", (mid,)).fetchone()
+    if m is None:
+        abort(404)
+    if m["status"] != "open":
+        flash("Only unresolved markets can be closed.", "error")
+    elif market_state(m) != "open":
+        flash("Betting is already closed on this market.", "error")
+    else:
+        db.execute("UPDATE markets SET closes_at = ? WHERE id = ?", (now_str(), mid))
+        log_audit("market.close_early", "market", mid, m["question"])
+        flash("Betting closed. You can propose a result now.", "success")
+    return redirect(url_for("market", mid=mid))
+
+
+@app.post("/admin/markets/<int:mid>/reopen")
+@admin_required
+def admin_reopen(mid):
+    db = get_db()
+    m = db.execute("SELECT * FROM markets WHERE id = ?", (mid,)).fetchone()
+    if m is None:
+        abort(404)
+    try:
+        closes = datetime.fromisoformat(request.form.get("closes_at", ""))
+    except ValueError:
+        closes = None
+    if closes is None:
+        flash("Pick a valid closing time.", "error")
+    elif closes <= datetime.now():
+        flash("Pick a closing time in the future.", "error")
+    elif m["status"] != "open":
+        flash("Only unresolved markets can be reopened.", "error")
+    elif m["proposed_outcome_id"] is not None:
+        flash("A result is proposed for this market. Withdraw it before reopening betting.", "error")
+    elif market_state(m) != "closed":
+        flash("Betting is still open on this market.", "error")
+    else:
+        stamp = closes.strftime("%Y-%m-%d %H:%M:%S")
+        db.execute("UPDATE markets SET closes_at = ? WHERE id = ?", (stamp, mid))
+        log_audit("market.reopen", "market", mid, m["question"], f"New closing time {stamp}")
+        flash("Betting reopened.", "success")
+    return redirect(url_for("market", mid=mid))
+
+
+@app.post("/admin/markets/<int:mid>/feature")
+@admin_required
+def admin_feature(mid):
+    db = get_db()
+    m = db.execute("SELECT * FROM markets WHERE id = ?", (mid,)).fetchone()
+    if m is None:
+        abort(404)
+    now_featured = not m["featured"]
+    db.execute("UPDATE markets SET featured = ? WHERE id = ?", (int(now_featured), mid))
+    log_audit("market.feature" if now_featured else "market.unfeature", "market", mid, m["question"])
+    flash("Market featured: it now appears first on the home page." if now_featured
+          else "Market removed from featured.", "success")
+    return redirect(url_for("market", mid=mid))
+
+
+ANNOUNCEMENT_MAX = 300
+
+
+@app.post("/admin/announcement")
+@admin_required
+def admin_announcement():
+    db = get_db()
+    text = "" if request.form.get("clear") else request.form.get("text", "").strip()
+    if len(text) > ANNOUNCEMENT_MAX:
+        flash(f"Keep the announcement under {ANNOUNCEMENT_MAX} characters.", "error")
+    elif text:
+        db.execute("INSERT INTO site_settings (key, value, updated_at) VALUES ('announcement', ?, ?) "
+                   "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                   (text, now_str()))
+        log_audit("site.announcement", "site", "announcement", "Announcement", text)
+        flash("Announcement published.", "success")
+    else:
+        db.execute("DELETE FROM site_settings WHERE key = 'announcement'")
+        log_audit("site.announcement", "site", "announcement", "Announcement", "(cleared)")
+        flash("Announcement cleared.", "success")
+    return redirect(url_for("admin") + "#announcement")
 
 
 @app.post("/admin/users/<int:uid>/comment-mute")

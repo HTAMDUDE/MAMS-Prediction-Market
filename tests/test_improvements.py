@@ -373,3 +373,101 @@ def test_migration_makes_clarification_admin_nullable_and_keeps_rows():
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='idx_clarifications_market'").fetchone()
     finally:
         appmod.DB_PATH = old
+
+
+# ---------------------------------------------------------------- 5. comment moderation and market controls
+
+def _open_market(db, question="Moderated?"):
+    closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+    return appmod.create_market(db, question, RULES, "Events", closes, ["Yes", "No"], 100, None)
+
+
+def test_comment_hide_delete_and_visibility():
+    db, c, uid = _site("boss", "helper", "bob", "eve")
+    _post(c["boss"], f"/admin/users/{uid('helper')}/toggle-admin")
+    mid = _open_market(db)
+    _post(c["bob"], f"/market/{mid}/comment", body="SECRET-BOB-TEXT")
+    cid = _q(db, "SELECT id FROM comments")
+    # a regular user can't moderate
+    assert c["eve"].post(f"/admin/comments/{cid}/hide", data={"csrf_token": csrf(c["eve"].get("/"))}).status_code == 403
+    assert "Comment hidden." in _post(c["helper"], f"/admin/comments/{cid}/hide").get_data(as_text=True)
+    page = c["eve"].get(f"/market/{mid}").get_data(as_text=True)
+    assert "SECRET-BOB-TEXT" not in page and "This comment was hidden by an admin." in page
+    assert "SECRET-BOB-TEXT" not in appmod.app.test_client().get(f"/market/{mid}").get_data(as_text=True)
+    admin_page = c["helper"].get(f"/market/{mid}").get_data(as_text=True)
+    assert "SECRET-BOB-TEXT" in admin_page and "hidden</span>" in admin_page
+    assert "Comment restored." in _post(c["helper"], f"/admin/comments/{cid}/hide").get_data(as_text=True)
+    # an admin can't touch the owner's comment; the owner can touch anyone's
+    _post(c["boss"], f"/market/{mid}/comment", body="owner words")
+    boss_cid = _q(db, "SELECT id FROM comments WHERE body='owner words'")
+    assert "Only the site owner" in _post(c["helper"], f"/admin/comments/{boss_cid}/delete").get_data(as_text=True)
+    assert _q(db, "SELECT COUNT(*) FROM comments WHERE id=?", boss_cid) == 1
+    assert "Comment deleted." in _post(c["boss"], f"/admin/comments/{cid}/delete").get_data(as_text=True)
+    assert "That comment no longer exists." in _post(c["boss"], f"/admin/comments/{cid}/delete").get_data(as_text=True)
+    assert [a[0] for a in _audit(db)] == ["user.admin_on", "comment.hide", "comment.unhide", "comment.delete"]
+    # admins can always moderate their own comments
+    _post(c["helper"], f"/market/{mid}/comment", body="helper words")
+    own = _q(db, "SELECT id FROM comments WHERE body='helper words'")
+    assert "Comment hidden." in _post(c["helper"], f"/admin/comments/{own}/hide").get_data(as_text=True)
+
+
+def test_muted_user_cannot_comment():
+    db, c, uid = _site("boss", "bob")
+    mid = _open_market(db)
+    _post(c["boss"], f"/admin/users/{uid('bob')}/comment-mute")
+    assert "turned off commenting" in c["bob"].get(f"/market/{mid}").get_data(as_text=True)
+    assert "turned off commenting" in _post(c["bob"], f"/market/{mid}/comment", body="let me in").get_data(as_text=True)
+    assert _q(db, "SELECT COUNT(*) FROM comments") == 0
+    _post(c["boss"], f"/admin/users/{uid('bob')}/comment-mute")
+    _post(c["bob"], f"/market/{mid}/comment", body="back again")
+    assert _q(db, "SELECT COUNT(*) FROM comments") == 1
+    assert [a[0] for a in _audit(db)] == ["user.comment_mute", "user.comment_unmute"]
+
+
+def test_close_early_and_reopen_preconditions():
+    db, c, uid = _site("boss", "bob")
+    mid = _open_market(db)
+    boss = c["boss"]
+    future = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%dT%H:%M")
+    assert "still open" in _post(boss, f"/admin/markets/{mid}/reopen", closes_at=future).get_data(as_text=True)
+    assert "Betting closed." in _post(boss, f"/admin/markets/{mid}/close").get_data(as_text=True)
+    assert "already closed" in _post(boss, f"/admin/markets/{mid}/close").get_data(as_text=True)
+    assert appmod.market_state(db.execute("SELECT * FROM markets WHERE id=?", (mid,)).fetchone()) == "closed"
+    assert "Pick a valid closing time." in _post(boss, f"/admin/markets/{mid}/reopen", closes_at="soon").get_data(as_text=True)
+    assert "in the future" in _post(boss, f"/admin/markets/{mid}/reopen", closes_at="2001-01-01T00:00").get_data(as_text=True)
+    yes, no = [o["id"] for o in appmod.get_outcomes(db, mid)]
+    appmod.propose_result(db, mid, yes, uid("boss"))
+    assert "Withdraw it before reopening" in _post(boss, f"/admin/markets/{mid}/reopen", closes_at=future).get_data(as_text=True)
+    appmod.retract_result(db, mid)
+    assert "Betting reopened." in _post(boss, f"/admin/markets/{mid}/reopen", closes_at=future).get_data(as_text=True)
+    assert appmod.market_state(db.execute("SELECT * FROM markets WHERE id=?", (mid,)).fetchone()) == "open"
+    # regular users can't
+    assert c["bob"].post(f"/admin/markets/{mid}/close", data={"csrf_token": csrf(c["bob"].get("/"))}).status_code == 403
+    assert [a[0] for a in _audit(db)] == ["market.close_early", "market.reopen"]
+
+
+def test_featured_markets_sort_first_and_show_badge():
+    db, c, uid = _site("boss")
+    first = _open_market(db, "Plain popular market?")
+    second = _open_market(db, "Featured quiet market?")
+    appmod.execute_trade(db, uid("boss"), first, appmod.get_outcomes(db, first)[0]["id"], "buy", 50)
+    page = c["boss"].get("/").get_data(as_text=True)
+    assert page.index("Plain popular") < page.index("Featured quiet") and "★ Featured" not in page
+    assert "Market featured" in _post(c["boss"], f"/admin/markets/{second}/feature").get_data(as_text=True)
+    page = c["boss"].get("/").get_data(as_text=True)
+    assert page.index("Featured quiet") < page.index("Plain popular") and "★ Featured" in page
+    assert "removed from featured" in _post(c["boss"], f"/admin/markets/{second}/feature").get_data(as_text=True)
+    assert [a[0] for a in _audit(db)] == ["market.feature", "market.unfeature"]
+
+
+def test_announcement_banner_limit_and_clear():
+    db, c, uid = _site("boss", "bob")
+    post = lambda **kw: _post(c["boss"], "/admin/announcement", **kw).get_data(as_text=True)
+    assert "under 300 characters" in post(text="x" * 301)
+    assert 'class="announcement"' not in c["bob"].get("/").get_data(as_text=True)
+    assert "Announcement published." in post(text="No trading during the assembly.")
+    assert "No trading during the assembly." in appmod.app.test_client().get("/how-it-works").get_data(as_text=True)
+    assert "Announcement cleared." in post(clear="1")
+    assert 'class="announcement"' not in c["bob"].get("/").get_data(as_text=True)
+    assert c["bob"].post("/admin/announcement", data={"csrf_token": csrf(c["bob"].get("/")), "text": "hi"}).status_code == 403
+    assert [a[3] for a in _audit(db)] == ["No trading during the assembly.", "(cleared)"]

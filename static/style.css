@@ -333,3 +333,10 @@ dialog h2 { margin-top: 0; }
 .row-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .row-actions form { margin: 0; }
 .btn[disabled] { opacity: .5; cursor: not-allowed; }
+
+.announcement { background: color-mix(in srgb, var(--gold) 22%, var(--surface)); border-bottom: 1px solid var(--gold);
+                padding: 8px 0; font-size: .92rem; white-space: pre-line; }
+.featured { color: var(--gold); font-weight: 600; font-size: .85em; }
+.comment-hidden { opacity: .8; }
+.struck { text-decoration: line-through; }
+.mod-actions { margin-top: 6px; }

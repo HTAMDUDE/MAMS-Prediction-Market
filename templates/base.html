@@ -49,6 +49,7 @@
     </div>
   </div>
 </header>
+{% if announcement %}<div class="announcement" role="status"><div class="wrap">📢 {{ announcement }}</div></div>{% endif %}
 
 <main class="wrap">
   {% with messages = get_flashed_messages(with_categories=true) %}

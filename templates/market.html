@@ -95,7 +95,9 @@
 
     <div class="card" id="discussion">
       <h2>Discussion</h2>
-      {% if user %}
+      {% if user and commenting_off %}
+      <p class="muted">{{ comments_off_text }}</p>
+      {% elif user %}
       <form method="post" action="{{ url_for('comment', mid=b.m.id) }}" class="comment-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <textarea name="body" maxlength="500" rows="2" placeholder="Share your reasoning…" required></textarea>
@@ -103,7 +105,25 @@
       </form>
       {% endif %}
       {% for c in comments %}
-        <div class="comment"><strong>{{ c.username }}</strong> <span class="muted small">{{ c.created_at|ago }}</span><p>{{ c.body }}</p></div>
+        <div class="comment {{ 'comment-hidden' if c.hidden }}"><strong>{{ c.username }}</strong> <span class="muted small">{{ c.created_at|ago }}</span>
+          {% if c.hidden and user and user.is_admin %}<span class="tag">hidden</span>{% endif %}
+          {% if c.body is none %}<p class="muted"><em>This comment was hidden by an admin.</em></p>
+          {% else %}<p {% if c.hidden %}class="struck"{% endif %}>{{ c.body }}</p>{% endif %}
+          {% if c.can_moderate %}
+          <div class="row-actions mod-actions">
+            <form method="post" action="{{ url_for('admin_hide_comment', cid=c.id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button class="btn btn-small btn-ghost">{{ 'Unhide' if c.hidden else 'Hide' }}</button>
+            </form>
+            <form method="post" action="{{ url_for('admin_delete_comment', cid=c.id) }}"
+                  data-confirm="It's removed for everyone and can't be restored. Hide it instead to keep a copy for admins."
+                  data-confirm-title="Delete this comment?" data-confirm-label="Delete comment">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button class="btn btn-small btn-danger">Delete</button>
+            </form>
+          </div>
+          {% endif %}
+        </div>
       {% else %}
         <p class="muted">No comments yet.</p>
       {% endfor %}
@@ -199,7 +219,7 @@
         <p class="muted small">You can propose a result once betting closes.</p>
       {% else %}
       <form method="post" action="{{ url_for('admin_propose_result', mid=b.m.id) }}"
-            onsubmit="return confirm('Propose this result? Traders get {{ DISPUTE_HOURS }} hours to dispute it before winners are paid.')">
+            data-confirm="Traders get {{ DISPUTE_HOURS }} hours to dispute it before winners are paid." data-confirm-title="Propose this result?" data-confirm-label="Propose result">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         {% if b.ou %}
         <label class="field"><span>{{ 'Change the actual number' if b.state in ('proposed', 'disputed') else 'Actual number' }}{% if b.m.ou_unit %} <em class="muted">({{ b.m.ou_unit }})</em>{% endif %}</span>
@@ -222,23 +242,44 @@
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         {% if b.state == 'disputed' %}
           <button class="btn btn-block" name="decision" value="confirm"
-                  onclick="return confirm('Confirm the proposed result? Winners are paid immediately and this cannot be undone.')">Confirm result &amp; pay out</button>
+                  data-confirm="Winners are paid immediately and this cannot be undone." data-confirm-title="Confirm the proposed result?" data-confirm-label="Confirm &amp; pay out">Confirm result &amp; pay out</button>
         {% endif %}
         <button class="btn btn-block btn-ghost" name="decision" value="retract">Withdraw proposed result</button>
       </form>
       {% endif %}
       <form method="post" action="{{ url_for('admin_cancel', mid=b.m.id) }}"
-            onsubmit="return confirm('Cancel this market and refund everyone?')">
+            data-confirm="Everyone gets back what they net-spent, including entry fees." data-confirm-title="Cancel this market and refund everyone?" data-confirm-label="Cancel &amp; refund">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <button class="btn btn-block btn-danger">Cancel &amp; refund</button>
       </form>
+
+      <h3 class="spaced">Market controls</h3>
+      <form method="post" action="{{ url_for('admin_feature', mid=b.m.id) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="btn btn-block btn-ghost">{{ '★ Remove from featured' if b.m.featured else '☆ Feature on the home page' }}</button>
+      </form>
+      {% if b.state == 'open' %}
+      <form method="post" action="{{ url_for('admin_close_early', mid=b.m.id) }}"
+            data-confirm="Nobody can bet after this. You can reopen it later if you change your mind." data-confirm-title="Close betting now?" data-confirm-label="Close betting">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="btn btn-block btn-ghost">Close betting now</button>
+      </form>
+      {% elif b.state == 'closed' %}
+      <form method="post" action="{{ url_for('admin_reopen', mid=b.m.id) }}" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label class="field"><span>Reopen betting until</span>
+          <input type="datetime-local" name="closes_at" required value="{{ reopen_default }}">
+        </label>
+        <button class="btn btn-small btn-ghost">Reopen betting</button>
+      </form>
+      {% endif %}
 
       {% if b.binary and not b.ou and b.m.proposed_outcome_id is none %}
       <h3 class="spaced">Convert to Over / Under</h3>
       <p class="muted small">For Yes/No questions about a number. Everyone's bets carry over, and a dated clarification
         explains the change.</p>
       <form method="post" action="{{ url_for('admin_convert_ou', mid=b.m.id) }}" class="stack"
-            onsubmit="return confirm('Convert this market to Over/Under? YES and NO bets will become the sides you picked.')">
+            data-confirm="YES and NO bets will become the sides you picked." data-confirm-title="Convert to Over/Under?" data-confirm-label="Convert">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="row">
           <label class="field"><span>Line</span><input name="ou_line" inputmode="decimal" required placeholder="85"></label>
@@ -278,7 +319,7 @@
         <p class="muted small">Nobody is blocked.</p>
       {% endfor %}
       <form method="post" action="{{ url_for('admin_block', mid=b.m.id) }}" class="inline block-form"
-            onsubmit="return confirm('Block ' + this.username.value + ' from this market? Their bets here will be refunded and removed.')">
+            data-confirm="Their bets here will be refunded and removed." data-confirm-title="Block this user from the market?" data-confirm-label="Block user">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input name="username" list="all-users" placeholder="Username" required autocomplete="off">
         <datalist id="all-users">{% for name in all_users %}<option value="{{ name }}">{% endfor %}</datalist>
@@ -289,7 +330,7 @@
     {% if user and user.is_admin %}
     <a class="btn btn-block btn-ghost" href="{{ url_for('admin_edit', mid=b.m.id) }}">Edit market</a>
     <form method="post" action="{{ url_for('admin_delete', mid=b.m.id) }}"
-          onsubmit="return confirm('Delete this market permanently? This cannot be undone.')">
+          data-confirm="This cannot be undone." data-confirm-title="Delete this market permanently?" data-confirm-label="Delete market">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <button class="btn btn-block btn-danger">Delete market</button>
     </form>

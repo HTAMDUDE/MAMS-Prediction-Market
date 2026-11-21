@@ -4,7 +4,7 @@
 {% macro delete_button(b) %}
 <a class="btn btn-small btn-ghost" href="{{ url_for('admin_edit', mid=b.m.id) }}">Edit</a>
 <form method="post" action="{{ url_for('admin_delete', mid=b.m.id) }}" class="inline"
-      onsubmit="return confirm({{ ('Delete this market permanently? ' ~ ('Everyone who bet gets their money back. ' if b.m.status == 'open' else 'Payouts already made are kept. ') ~ 'This cannot be undone.')|tojson|forceescape }})">
+      data-confirm="{{ ('Everyone who bet gets their money back. ' if b.m.status == 'open' else 'Payouts already made are kept. ') ~ 'This cannot be undone.' }}" data-confirm-title="Delete this market permanently?" data-confirm-label="Delete market">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <button class="btn btn-small btn-danger">Delete</button>
 </form>
@@ -58,7 +58,7 @@
         </div>
         {% if b.state == 'closed' %}
         <form method="post" action="{{ url_for('admin_propose_result', mid=b.m.id) }}" class="inline"
-              onsubmit="return confirm('Propose this result? Traders get {{ DISPUTE_HOURS }} hours to dispute it before winners are paid.')">
+              data-confirm="Traders get {{ DISPUTE_HOURS }} hours to dispute it before winners are paid." data-confirm-title="Propose this result?" data-confirm-label="Propose result">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <select name="outcome_id" required>
             <option value="">Winner…</option>
@@ -89,6 +89,20 @@
     {% endif %}
   </div>
 </div>
+<div class="card" id="announcement">
+  <h2>Site announcement</h2>
+  <p class="muted small">Shown to everyone under the top bar (up to 300 characters). People see a new one on their next page load.</p>
+  <form method="post" action="{{ url_for('admin_announcement') }}" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label for="announcement-text" class="sr-only">Announcement</label>
+    <textarea id="announcement-text" name="text" maxlength="300" rows="2" placeholder="e.g. Trading pauses during the assembly.">{{ announcement }}</textarea>
+    <div class="row-actions">
+      <button class="btn btn-small">{{ 'Update' if announcement else 'Publish' }}</button>
+      {% if announcement %}<button class="btn btn-small btn-ghost" name="clear" value="1">Clear</button>{% endif %}
+    </div>
+  </form>
+</div>
+
 <div class="card" id="users">
   <h2>Users</h2>
   <p class="muted small">
