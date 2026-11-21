@@ -115,3 +115,46 @@ def test_min_bet_and_balance_messages():
         appmod.execute_trade(db, a, mid, o0, "buy", 0.5)
     with pytest.raises(appmod.TradeError, match="Your balance is Ⓜ50.00"):
         appmod.execute_trade(db, a, mid, o0, "buy", 500)
+
+
+# ---------------------------------------------------------------- 2. password tools
+
+def _login(client, name, pw):
+    return client.post("/login", data={"csrf_token": csrf(client.get("/login")), "username": name, "password": pw},
+                       follow_redirects=True)
+
+
+def test_change_password_and_other_sessions_are_signed_out():
+    _fresh_db()
+    laptop, phone = appmod.app.test_client(), appmod.app.test_client()
+    signup(laptop, "dana")
+    _login(phone, "dana", "secret1")
+    assert phone.get("/portfolio").status_code == 200
+
+    def change(cur, new, conf=None):
+        return _post(laptop, "/account/password", current=cur, new=new, confirm=conf or new).get_data(as_text=True)
+
+    assert "current password is wrong" in change("nope", "newsecret")
+    assert "at least 6" in change("secret1", "abc")
+    assert "don&#39;t match" in change("secret1", "newsecret", "different")
+    assert "Password changed." in change("secret1", "newsecret")
+    assert laptop.get("/portfolio").status_code == 200       # this device stays signed in
+    assert phone.get("/portfolio").status_code == 302        # the other one is signed out
+    assert "Wrong username" in _login(appmod.app.test_client(), "dana", "secret1").get_data(as_text=True)
+    assert "Wrong username" not in _login(appmod.app.test_client(), "dana", "newsecret").get_data(as_text=True)
+
+
+def test_temporary_password_signs_out_and_clears_lockout(capsys):
+    db = _fresh_db()
+    u = _user(db, "erin")
+    for _ in range(10):
+        appmod.rate_limited(("login-fail", "erin"), 10, 300)
+    pw = appmod.set_temporary_password(db, u)
+    assert len(pw) == 12
+    assert ("login-fail", "erin") not in appmod._hits
+    assert appmod.check_password_hash(db.execute("SELECT password_hash FROM users WHERE id=?", (u,)).fetchone()[0], pw)
+    assert _q(db, "SELECT session_gen FROM users WHERE id=?", u) == 1
+    import reset_password
+    assert reset_password.main(["reset_password.py", "erin"]) == 0
+    assert "Temporary password for erin:" in capsys.readouterr().out
+    assert reset_password.main(["reset_password.py", "nobody"]) == 1

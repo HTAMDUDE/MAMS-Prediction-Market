@@ -121,6 +121,8 @@ def close_db(_exc):
 # Columns added after the first release. schema.sql only creates missing tables, so databases
 # created earlier get these through ALTER TABLE (see migrate).
 NEW_COLUMNS = {
+    # session_gen: bumping it signs a user out everywhere (password change/reset).
+    "users": [("session_gen", "INTEGER NOT NULL DEFAULT 0")],
     "markets": [("rules_source", "TEXT NOT NULL DEFAULT ''"), ("rules_otherwise", "TEXT NOT NULL DEFAULT ''"),
                 ("proposed_outcome_id", "INTEGER"), ("proposed_by", "INTEGER"), ("proposed_at", "TEXT"),
                 ("finalizes_at", "TEXT"), ("resolved_by", "INTEGER"),
@@ -763,6 +765,9 @@ def load_user_and_check_csrf():
         g.user = db.execute("SELECT * FROM users WHERE id = ?", (session["uid"],)).fetchone()
         if g.user is None:
             session.pop("uid")
+        elif session.get("gen", 0) != g.user["session_gen"]:
+            session.clear()  # password changed elsewhere: this session is no longer valid
+            g.user = None
         elif g.user["id"] == g.owner_id and not g.user["is_admin"]:
             db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (g.user["id"],))  # owner is always admin
             g.user = db.execute("SELECT * FROM users WHERE id = ?", (g.user["id"],)).fetchone()
@@ -906,6 +911,7 @@ def register():
                 session.clear()
                 session.permanent = True
                 session["uid"] = cur.lastrowid
+                session["gen"] = 0
                 flash(f"Welcome! You start with {STARTING_BALANCE:,.0f} {CURRENCY}."
                       + (" You're an admin, so you can create and resolve markets." if is_admin else ""), "success")
                 return redirect(url_for("index"))
@@ -930,11 +936,46 @@ def login():
             session.clear()
             session.permanent = True
             session["uid"] = u["id"]
+            session["gen"] = u["session_gen"]
             nxt = request.args.get("next", "")
             return redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else url_for("index"))
         rate_limited(fail_key, 10, 300)  # record the failure
         flash("Wrong username or password.", "error")
     return render_template("login.html")
+
+
+def set_temporary_password(db, user_id):
+    """Give a user a new random password, sign them out everywhere and clear their login lockout.
+    Returns the password (shown once to whoever reset it)."""
+    pw = secrets.token_urlsafe(9)  # 12 URL-safe characters
+    name = db.execute("SELECT username FROM users WHERE id = ?", (user_id,)).fetchone()["username"]
+    db.execute("UPDATE users SET password_hash = ?, session_gen = session_gen + 1 WHERE id = ?",
+               (generate_password_hash(pw), user_id))
+    _hits.pop(("login-fail", name.lower()), None)
+    return pw
+
+
+@app.post("/account/password")
+@login_required
+def change_password():
+    cur, new = request.form.get("current", ""), request.form.get("new", "")
+    if rate_limited(("change-password", request.remote_addr), 30, 60):
+        flash("Too many attempts. Wait a minute and try again.", "error")
+    elif not cur:
+        flash("Enter your current password.", "error")
+    elif not check_password_hash(g.user["password_hash"], cur):
+        flash("Your current password is wrong.", "error")
+    elif len(new) < 6:
+        flash("Password must be at least 6 characters.", "error")
+    elif new != request.form.get("confirm", ""):
+        flash("Passwords don't match.", "error")
+    else:
+        db = get_db()
+        db.execute("UPDATE users SET password_hash = ?, session_gen = session_gen + 1 WHERE id = ?",
+                   (generate_password_hash(new), g.user["id"]))
+        session["gen"] = g.user["session_gen"] + 1  # keep this device signed in; every other one is signed out
+        flash("Password changed.", "success")
+    return redirect(url_for("portfolio") + "#account")
 
 
 @app.post("/logout")
@@ -1892,6 +1933,22 @@ def admin_toggle(uid):
         flash("You can't remove your own admin access.", "error")
     else:
         get_db().execute("UPDATE users SET is_admin = 1 - is_admin WHERE id = ?", (uid,))
+    return redirect(url_for("admin") + "#users")
+
+
+@app.post("/admin/users/<int:uid>/reset-password")
+@admin_required
+def admin_reset_password(uid):
+    db = get_db()
+    u = db.execute("SELECT id, username FROM users WHERE id = ?", (uid,)).fetchone()
+    if u is None:
+        abort(404)
+    if not can_manage(uid):
+        flash(NOT_ALLOWED, "error")
+    else:
+        pw = set_temporary_password(db, uid)
+        flash(f"Temporary password for {u['username']}: {pw}. Share it privately; they can change it on their "
+              "Portfolio page.", "success")
     return redirect(url_for("admin") + "#users")
 
 

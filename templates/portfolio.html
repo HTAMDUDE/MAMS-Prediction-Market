@@ -60,6 +60,22 @@
 </div>
 {% endif %}
 
+<div class="card" id="account">
+  <details {{ 'open' if get_flashed_messages() }}>
+    <summary><strong>Account: change password</strong></summary>
+    <form method="post" action="{{ url_for('change_password') }}" class="stack" style="max-width:22rem;margin-top:.75rem">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label for="pw-current">Current password</label>
+      <input id="pw-current" type="password" name="current" autocomplete="current-password" required>
+      <label for="pw-new">New password (at least 6 characters)</label>
+      <input id="pw-new" type="password" name="new" autocomplete="new-password" minlength="6" required>
+      <label for="pw-confirm">Confirm new password</label>
+      <input id="pw-confirm" type="password" name="confirm" autocomplete="new-password" minlength="6" required>
+      <button class="btn">Change password</button>
+    </form>
+  </details>
+</div>
+
 <div class="card">
   <h2>Trade history <a class="small" href="{{ url_for('balance_history') }}">Full balance history →</a></h2>
   {% if trades %}

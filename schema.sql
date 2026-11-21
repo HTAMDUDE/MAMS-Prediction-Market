@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS users (
     balance       REAL NOT NULL,
     is_admin      INTEGER NOT NULL DEFAULT 0,
     last_bonus    TEXT,
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    session_gen   INTEGER NOT NULL DEFAULT 0   -- bump to sign the user out everywhere
 );
 
 CREATE TABLE IF NOT EXISTS markets (
