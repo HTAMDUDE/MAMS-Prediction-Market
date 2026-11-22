@@ -59,7 +59,7 @@ CREATOR_MIN_BET = 10.0
 # P is the trade's average price per share; T depends on how long is left before betting closes.
 LATE_FEE_RATE = 0.07
 LATE_FEE_TIERS = [  # (less than this much time left, T), checked in order
-    (timedelta(minutes=30), 8.0),
+    (timedelta(minutes=30), 6.0),
     (timedelta(hours=1), 4.0),
     (timedelta(hours=2), 2.0),
 ]  # more than 2 hours left: T = 0, no fee. Keep these sorted from shortest to longest.

@@ -94,7 +94,10 @@ function setupTradeForm(form) {
     const p = parseFloat(selected().dataset.price) || 0;
     return Math.max(0, Math.floor((balance - entryFee) / (1 + 0.07 * lateT * (1 - p)) * 100) / 100);
   };
-  const lateLabel = r => `Late trading fee (×${r.late_multiplier})`;
+  // always shown in the summary: Ⓜ0.00 until the last 2 hours before betting closes
+  const lateRow = (r, late, sign = '') => late
+    ? row(`Late fee (×${r.late_multiplier})`, `${sign}${money(late)}`, 'down')
+    : row('Late fee', money(0));
   let timer = null, seq = 0;
 
   const selected = () => form.querySelector('input[name=outcome_id]:checked');
@@ -147,9 +150,9 @@ function setupTradeForm(form) {
           const total = res.coins + fee + late;
           setPreview(
             row('You pay', money(total), 'total down') +
-            (fee || late ? row('Bet', money(res.coins)) : '') +
+            row('Bet', money(res.coins)) +
             (fee ? row(`Entry fee (first bet${res.creator ? `, to ${res.creator}` : ''})`, money(fee)) : '') +
-            (late ? row(lateLabel(res), money(late), 'down') : '') +
+            lateRow(res, late) +
             row('You get', `${fmt(res.shares)} shares`) +
             row('Avg price per share', money(res.avg_price)) +
             row('If it wins', `you get ${money(res.shares)} (${signed(res.shares - total)})`, 'up') +
@@ -162,7 +165,8 @@ function setupTradeForm(form) {
           const late = res.late_fee || 0, got = res.coins - late;
           setPreview(
             row('You receive', money(got), 'total up') +
-            (late ? row('Sale value', money(res.coins)) + row(lateLabel(res), `−${money(late)}`, 'down') : '') +
+            row('Sale value', money(res.coins)) +
+            lateRow(res, late, '−') +
             row('You sell', `${fmt(res.shares)} of your ${fmt(held())} shares`) +
             row('Avg price per share', money(res.avg_price)) +
             row('You paid for these', money(costOfThese)) +
