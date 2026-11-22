@@ -1741,7 +1741,7 @@ def test_estimated_bonus_shown_before_resolution():
         # if Yes won now there'd be Ⓜ9.10 left over (all Ann's); if No won the pot would be short, so no estimate
         assert "+ ~Ⓜ9.10 bonus if it ended now" in ann.get(f"/market/{mid}").get_data(as_text=True)
         assert "bonus if it ended now" not in ben.get(f"/market/{mid}").get_data(as_text=True)
-        assert appmod.estimated_bonus(db, mid, no, 209.02) == 0
+        assert appmod.estimated_bonus(db, mid, no, uid("estben")) == 0
 
         # the estimate matches what's actually paid if nothing changes
         before = db.execute("SELECT balance FROM users WHERE id=?", (uid("estann"),)).fetchone()[0]
@@ -1750,5 +1750,67 @@ def test_estimated_bonus_shown_before_resolution():
         after = db.execute("SELECT balance FROM users WHERE id=?", (uid("estann"),)).fetchone()[0]
         assert after - before - held == pytest.approx(9.10, abs=0.01)
         assert "bonus if it ended now" not in ann.get(f"/market/{mid}").get_data(as_text=True)
+    finally:
+        appmod.DB_PATH = old
+
+
+def test_hedged_shares_earn_no_leftover_bonus():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        ids = {n: db.execute("INSERT INTO users (username, password_hash, balance, created_at) VALUES (?, 'x', ?, ?)",
+                             (n, 5000 if n == "whale" else 1000, appmod.now_str())).lastrowid
+               for n in ("ann", "ben", "cat", "whale")}
+        bal = lambda n: db.execute("SELECT balance FROM users WHERE id=?", (ids[n],)).fetchone()[0]
+        later = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+        mid = appmod.create_market(db, "Whale?", RULES, "Other", later, ["Yes", "No"], 1000)
+        yes, no = [o["id"] for o in appmod.get_outcomes(db, mid)]
+        appmod.execute_trade(db, ids["ann"], mid, yes, "buy", 100)
+        appmod.execute_trade(db, ids["ben"], mid, no, "buy", 300)
+        appmod.execute_trade(db, ids["cat"], mid, no, "buy", 200)
+        left_before, _ = appmod.leftover_and_weights(db, mid, yes)
+        assert left_before == pytest.approx(409.10, abs=0.01)
+
+        # the whale buys 2,000 of each side: exactly Ⓜ2,000 in, Ⓜ2,000 out whatever happens, and no bonus
+        q = [o["shares"] for o in appmod.get_outcomes(db, mid)]
+        cost_yes = appmod.lmsr.cost_for_shares(q, 1000, 0, 2000)
+        appmod.execute_trade(db, ids["whale"], mid, yes, "buy", round(cost_yes, 2))
+        held_yes = db.execute("SELECT shares FROM positions WHERE user_id=? AND outcome_id=?", (ids["whale"], yes)).fetchone()[0]
+        q = [o["shares"] for o in appmod.get_outcomes(db, mid)]
+        cost_no = appmod.lmsr.cost_for_shares(q, 1000, 1, held_yes)
+        appmod.execute_trade(db, ids["whale"], mid, no, "buy", round(cost_no, 2))
+        held_no = db.execute("SELECT shares FROM positions WHERE user_id=? AND outcome_id=?", (ids["whale"], no)).fetchone()[0]
+        assert held_yes == pytest.approx(held_no, abs=0.05)
+        spent = 5000 - bal("whale")
+        assert spent == pytest.approx(held_yes, abs=0.05)                 # a full set costs Ⓜ1 each
+
+        _, weights = appmod.leftover_and_weights(db, mid, yes)
+        assert ids["whale"] not in weights or weights[ids["whale"]] < 0.05  # fully hedged: (almost) no weight
+        assert appmod.estimated_bonus(db, mid, yes, ids["whale"]) < 0.1
+
+        ann_before = bal("ann")
+        ann_shares = db.execute("SELECT shares FROM positions WHERE user_id=?", (ids["ann"],)).fetchone()[0]
+        appmod.resolve_market(db, mid, yes)
+        assert bal("whale") == pytest.approx(5000 - spent + held_yes, abs=0.2)   # back to even, nothing extra
+        assert bal("ann") - ann_before - ann_shares == pytest.approx(409.10, abs=0.2)  # Ann keeps the leftover
+
+        # a partial hedge earns a bonus only on the unhedged part; holding some but not all outcomes isn't a hedge
+        m2 = appmod.create_market(db, "Partial?", RULES, "Other", later, ["A", "B", "C"], 1585)
+        a, b_, c = [o["id"] for o in appmod.get_outcomes(db, m2)]
+        appmod.execute_trade(db, ids["ann"], m2, a, "buy", 150)
+        appmod.execute_trade(db, ids["ann"], m2, b_, "buy", 50)
+        appmod.execute_trade(db, ids["cat"], m2, a, "buy", 50)
+        appmod.execute_trade(db, ids["cat"], m2, b_, "buy", 50)
+        appmod.execute_trade(db, ids["cat"], m2, c, "buy", 50)
+        h = lambda n: {o: db.execute("SELECT COALESCE(SUM(shares), 0) FROM positions WHERE user_id=? AND outcome_id=?",
+                                     (ids[n], o)).fetchone()[0] for o in (a, b_, c)}
+        ann_h, cat_h = h("ann"), h("cat")
+        _, weights = appmod.leftover_and_weights(db, m2, a)
+        assert weights[ids["ann"]] == pytest.approx(ann_h[a])                          # no C shares: not hedged
+        # only the unhedged part counts (zero if A is cat's smallest holding)
+        assert weights.get(ids["cat"], 0.0) == pytest.approx(max(cat_h[a] - min(cat_h.values()), 0.0), abs=1e-6)
+        _, weights_b = appmod.leftover_and_weights(db, m2, b_)
+        assert weights_b.get(ids["cat"], 0.0) == pytest.approx(max(cat_h[b_] - min(cat_h.values()), 0.0), abs=1e-6)
+        assert min(cat_h.values()) > 0      # cat really does hold some of every outcome
     finally:
         appmod.DB_PATH = old

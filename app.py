@@ -406,15 +406,38 @@ def leftover_bonus(db, user_id, market_id):
                       "AND kind = 'payout' AND detail LIKE 'Bonus:%'", (user_id, market_id)).fetchone()[0]
 
 
-def estimated_bonus(db, market_id, outcome_id, my_shares):
-    """If this outcome won right now, roughly what my share of the leftover pot would be. Changes with every trade."""
+def leftover_and_weights(db, market_id, outcome_id):
+    """If outcome_id wins: (leftover, {user_id: unhedged winning shares}).
+
+    leftover = the pot (money traders put in minus what they took out selling) minus Ⓜ1 per winning share,
+    rounded to the cent. It's shared by *unhedged* winning shares: your winning shares minus the shares you hold
+    on every outcome at once. A full set of outcomes always costs exactly Ⓜ1 and always pays exactly Ⓜ1, so it
+    carries no risk and earns no bonus; otherwise anyone could buy big equal sets and take the leftover from
+    the people who actually bet on an outcome."""
     pot = db.execute("SELECT COALESCE(SUM(amount), 0) FROM trades WHERE market_id = ?", (market_id,)).fetchone()[0]
-    winning = db.execute("SELECT COALESCE(SUM(shares), 0) FROM positions WHERE outcome_id = ?",
-                         (outcome_id,)).fetchone()[0]
-    leftover = cents(pot - winning)  # rounded exactly like resolve_market does, so the estimate matches the payout
-    if winning <= EPS or leftover < 0.01:
+    outcome_ids = [o["id"] for o in get_outcomes(db, market_id)]
+    held = {}
+    for p in db.execute("SELECT p.user_id, p.outcome_id, p.shares FROM positions p JOIN outcomes o "
+                        "ON o.id = p.outcome_id WHERE o.market_id = ?", (market_id,)):
+        held.setdefault(p["user_id"], {})[p["outcome_id"]] = p["shares"]
+    winning = sum(h.get(outcome_id, 0.0) for h in held.values())
+    weights = {}
+    for uid, h in held.items():
+        hedged = min(h.get(oid, 0.0) for oid in outcome_ids)
+        unhedged = h.get(outcome_id, 0.0) - hedged
+        if unhedged > EPS:
+            weights[uid] = unhedged
+    return cents(pot - winning), weights
+
+
+def estimated_bonus(db, market_id, outcome_id, user_id):
+    """If this outcome won right now, roughly what this user's share of the leftover pot would be. It's computed
+    exactly like the real payout, but changes with every trade."""
+    leftover, weights = leftover_and_weights(db, market_id, outcome_id)
+    total = sum(weights.values())
+    if leftover < 0.01 or user_id not in weights:
         return 0.0
-    return math.floor(leftover * my_shares / winning * 100) / 100
+    return math.floor(leftover * weights[user_id] / total * 100) / 100
 
 
 def trade_block_reason(db, user_id, market_id):
@@ -645,19 +668,18 @@ def resolve_market(db, market_id, outcome_id, resolved_by=None, automatic=False)
             db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (w["shares"], w["user_id"]))
             log_activity(db, w["user_id"], "payout", w["shares"], m,
                          f"Won: {w['shares']:,.2f} “{outs[outcome_id]}” shares paid Ⓜ1 each")
-        # The pot is everything traders put in minus what they took out by selling (fees aren't part of it).
-        # Whatever is left after paying Ⓜ1 per winning share goes to the winners in proportion to their shares.
-        # If the pot is short, the house covers the gap as before.
-        pot = db.execute("SELECT COALESCE(SUM(amount), 0) FROM trades WHERE market_id = ?", (market_id,)).fetchone()[0]
-        winning_shares = sum(w["shares"] for w in winners)
-        leftover = cents(pot - winning_shares)
+        # Whatever is left in the pot after paying Ⓜ1 per winning share goes to the winners in proportion to their
+        # unhedged winning shares (see leftover_and_weights). If the pot is short, the house covers the gap.
+        # Positions aren't changed by paying out, so computing this after the Ⓜ1 payments above is fine.
+        leftover, weights = leftover_and_weights(db, market_id, outcome_id)
+        total_weight = sum(weights.values())
         leftover_paid = 0.0
-        if leftover >= 0.01 and winning_shares > EPS:
-            for w in winners:
-                cut = math.floor(leftover * w["shares"] / winning_shares * 100) / 100
+        if leftover >= 0.01 and total_weight > EPS:
+            for uid, weight in weights.items():
+                cut = math.floor(leftover * weight / total_weight * 100) / 100
                 if cut >= 0.01:
-                    db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (cut, w["user_id"]))
-                    log_activity(db, w["user_id"], "payout", cut, m,
+                    db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (cut, uid))
+                    log_activity(db, uid, "payout", cut, m,
                                  f"Bonus: your share of the Ⓜ{leftover:,.2f} left in the pot")
                     leftover_paid += cut
         for p in db.execute("SELECT p.user_id, p.shares, p.outcome_id FROM positions p JOIN outcomes o "
@@ -1096,7 +1118,7 @@ def market(mid):
                      else lmsr.sell_value(q, b["m"]["b"], index[p["outcome_id"]], p["shares"]))
             my_positions.append({"outcome": o, "shares": p["shares"], "cost": p["cost"], "value": value,
                                  "bonus": 0.0,
-                                 "est_bonus": estimated_bonus(db, mid, p["outcome_id"], p["shares"])
+                                 "est_bonus": estimated_bonus(db, mid, p["outcome_id"], g.user["id"])
                                  if b["m"]["status"] == "open" else 0.0})
         if b["m"]["status"] == "resolved":  # the leftover-pot bonus belongs with the winning position
             bonus = leftover_bonus(db, g.user["id"], mid)

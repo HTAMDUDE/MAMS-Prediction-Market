@@ -19,7 +19,8 @@ assemblies, and anything else the admins post.
   `ENTRY_FEE` and `CREATOR_MIN_BET` in `app.py`; the dispute window is `DISPUTE_WINDOW`.
 - **Leftover pot goes to winners:** when a market resolves, each winning share pays Ⓜ1 out of the pot (everything
   traders put in, minus what they got back by selling). Anything left over is split among the winners in proportion
-  to their winning shares. If the pot is short, the house covers it.
+  to their *unhedged* winning shares: shares held on every outcome at once are risk-free (a full set always costs
+  and pays exactly Ⓜ1), so they don't earn a bonus. If the pot is short, the house covers it.
 - A **late trading fee** discourages trading right before betting closes: `0.07 × shares × P × (1 − P) × T`, where P
   is the trade's average price per share and T is 0 with more than 2 hours left, 2 at 1–2 hours, 4 at 30–60 minutes
   and 6 in the last 30 minutes. Charged on buys (added) and sells (deducted) and paid to the market's creator (on markets with no
