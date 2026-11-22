@@ -1471,3 +1471,96 @@ def test_opening_bet_on_proposals_and_admin_markets(monkeypatch):
                 assert r[1] == pytest.approx(running, abs=0.02)
     finally:
         appmod.DB_PATH = old
+
+
+# ---------------------------------------------------------------- late trading fee
+
+def test_late_multiplier_tiers_and_formula(monkeypatch):
+    monkeypatch.setattr(appmod, "LATE_FEE_TIERS", [(timedelta(minutes=30), 3.0), (timedelta(hours=1), 2.0), (timedelta(hours=2), 1.5)])  # values this test was written for
+    now = datetime(2026, 11, 22, 12, 0, 0)
+    m = lambda left: {"closes_at": (now + left).strftime("%Y-%m-%d %H:%M:%S")}
+    T = lambda left: appmod.late_multiplier(m(left), now)
+    assert T(timedelta(hours=5)) == 0
+    assert T(timedelta(hours=2)) == 0              # "more than 2 hours" starts at exactly 2h
+    assert T(timedelta(hours=1, minutes=59)) == 1.5
+    assert T(timedelta(hours=1)) == 1.5
+    assert T(timedelta(minutes=59)) == 2
+    assert T(timedelta(minutes=30)) == 2
+    assert T(timedelta(minutes=29)) == 3
+    assert T(timedelta(seconds=1)) == 3
+    # F = 0.07 x C x P(1-P) x T
+    assert appmod.late_fee(100, 0.5, 3) == 5.25
+    assert appmod.late_fee(100, 0.9, 1.5) == pytest.approx(0.945, abs=0.006)  # 0.07 x 100 x 0.09 x 1.5
+    assert appmod.late_fee(100, 0.5, 0) == 0
+    assert appmod.late_fee(0, 0.5, 3) == 0
+
+
+def test_late_fee_charged_on_buys_and_sells_near_the_deadline(monkeypatch):
+    monkeypatch.setattr(appmod, "LATE_FEE_TIERS", [(timedelta(minutes=30), 3.0), (timedelta(hours=1), 2.0), (timedelta(hours=2), 1.5)])  # values this test was written for
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        client = appmod.app.test_client()
+        signup(client, "latecomer")
+        uid = db.execute("SELECT id FROM users WHERE username='latecomer'").fetchone()[0]
+        bal = lambda: db.execute("SELECT balance FROM users WHERE id=?", (uid,)).fetchone()[0]
+        closes = lambda left: (datetime.now() + left).strftime("%Y-%m-%d %H:%M:%S")
+        mid = appmod.create_market(db, "Late?", RULES, "Other", closes(timedelta(days=1)), ["Yes", "No"], 1000)
+        yes = appmod.get_outcomes(db, mid)[0]["id"]
+        url = lambda a, v: f"/api/quote?market={mid}&outcome={yes}&action={a}&value={v}"
+
+        # far from the deadline: no fee, no warning
+        q = client.get(url("buy", 100)).get_json()
+        assert q["late_fee"] == 0 and q["late_multiplier"] == 0
+        assert "Late trading fee is on" not in client.get(f"/market/{mid}").get_data(as_text=True)
+
+        # 20 minutes left: T = 3
+        db.execute("UPDATE markets SET closes_at = ? WHERE id = ?", (closes(timedelta(minutes=20)), mid))
+        assert "Late trading fee is on (×3)" in client.get(f"/market/{mid}").get_data(as_text=True)
+        q = client.get(url("buy", 100)).get_json()
+        expected = appmod.late_fee(q["shares"], 100 / q["shares"], 3)
+        assert q["late_multiplier"] == 3 and q["late_fee"] == pytest.approx(expected) and q["late_fee"] > 0
+        msg = appmod.execute_trade(db, uid, mid, yes, "buy", 100)
+        assert "Late trading fee" in msg
+        assert bal() == pytest.approx(1000 - 100 - q["late_fee"])
+        fee_row = db.execute("SELECT amount, detail FROM activity WHERE user_id=? AND kind='fee'", (uid,)).fetchone()
+        assert fee_row["amount"] == pytest.approx(-q["late_fee"]) and "×3" in fee_row["detail"]
+
+        # selling 45 minutes out: T = 2, taken out of what you receive
+        db.execute("UPDATE markets SET closes_at = ? WHERE id = ?", (closes(timedelta(minutes=45)), mid))
+        held = db.execute("SELECT shares FROM positions WHERE user_id=?", (uid,)).fetchone()[0]
+        sq = client.get(url("sell", held / 2)).get_json()
+        assert sq["late_multiplier"] == 2 and sq["late_fee"] > 0
+        before = bal()
+        appmod.execute_trade(db, uid, mid, yes, "sell", held / 2)
+        assert bal() == pytest.approx(before + sq["coins"] - sq["late_fee"], abs=0.01)
+
+        # the fee counts towards what you can afford
+        db.execute("UPDATE users SET balance = 100 WHERE id = ?", (uid,))
+        with pytest.raises(appmod.TradeError, match="late trading fee"):
+            appmod.execute_trade(db, uid, mid, yes, "buy", 100)
+        assert bal() == 100
+
+        # history still adds up
+        running = 0
+        for r in db.execute("SELECT amount, balance_after, kind FROM activity WHERE user_id=? ORDER BY id", (uid,)):
+            running = round(running + r[0], 2)
+            if r[2] != "admin":
+                assert r[1] == pytest.approx(running, abs=0.02)
+            running = r[1]
+        assert "Late trading fee" in client.get("/how-it-works").get_data(as_text=True)
+    finally:
+        appmod.DB_PATH = old
+
+
+def test_how_it_works_late_fee_table_follows_settings(monkeypatch):
+    rows = lambda: appmod.late_fee_table()
+    monkeypatch.setattr(appmod, "LATE_FEE_TIERS",
+                        [(timedelta(minutes=30), 8.0), (timedelta(hours=1), 4.0), (timedelta(hours=2), 2.0)])
+    assert rows() == [("More than 2 hours", 0.0), ("1–2 hours", 2.0), ("30–60 minutes", 4.0),
+                      ("Less than 30 minutes", 8.0)]
+    page = appmod.app.test_client().get("/how-it-works").get_data(as_text=True)
+    assert "<td>30–60 minutes</td><td class=\"num\">4</td>" in page
+    assert "0.07 × 100 × 0.25 × 8 = <b>Ⓜ14.00</b>" in page
+    monkeypatch.setattr(appmod, "LATE_FEE_TIERS", [(timedelta(minutes=15), 5.0), (timedelta(hours=3), 1.0)])
+    assert rows() == [("More than 3 hours", 0.0), ("15–180 minutes", 1.0), ("Less than 15 minutes", 5.0)]

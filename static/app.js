@@ -87,6 +87,14 @@ function setupTradeForm(form) {
   const quick = form.querySelector('#quick');
   const balance = parseFloat(maxBtn.dataset.balance);
   const entryFee = parseFloat(form.dataset.entryFee) || 0;  // charged on your first bet in this market
+  const lateT = parseFloat(form.dataset.lateT) || 0;        // late-trading multiplier T (0 = no fee)
+  // Biggest bet you can afford. The late fee is 0.07 x T x bet x (1 - P), and buying only pushes P up from the
+  // current price, so using the current price leaves just enough room for the fee.
+  const maxBet = () => {
+    const p = parseFloat(selected().dataset.price) || 0;
+    return Math.max(0, Math.floor((balance - entryFee) / (1 + 0.07 * lateT * (1 - p)) * 100) / 100);
+  };
+  const lateLabel = r => `Late trading fee (×${r.late_multiplier})`;
   let timer = null, seq = 0;
 
   const selected = () => form.querySelector('input[name=outcome_id]:checked');
@@ -135,12 +143,13 @@ function setupTradeForm(form) {
         const newPct = `${(res.new_price * 100).toFixed(1)}%`;
         const name = outcomeName();
         if (isBuy()) {
-          const fee = res.entry_fee || 0;
-          const total = res.coins + fee;
+          const fee = res.entry_fee || 0, late = res.late_fee || 0;
+          const total = res.coins + fee + late;
           setPreview(
             row('You pay', money(total), 'total down') +
-            (fee ? row('Bet', money(res.coins)) +
-                   row(`Entry fee (first bet${res.creator ? `, to ${res.creator}` : ''})`, money(fee)) : '') +
+            (fee || late ? row('Bet', money(res.coins)) : '') +
+            (fee ? row(`Entry fee (first bet${res.creator ? `, to ${res.creator}` : ''})`, money(fee)) : '') +
+            (late ? row(lateLabel(res), money(late), 'down') : '') +
             row('You get', `${fmt(res.shares)} shares`) +
             row('Avg price per share', money(res.avg_price)) +
             row('If it wins', `you get ${money(res.shares)} (${signed(res.shares - total)})`, 'up') +
@@ -150,15 +159,17 @@ function setupTradeForm(form) {
             true, `Pay ${money(total)} for “${name}”`);
         } else {
           const costOfThese = held() > 0 ? paid() * Math.min(res.shares / held(), 1) : 0;
+          const late = res.late_fee || 0, got = res.coins - late;
           setPreview(
-            row('You receive', money(res.coins), 'total up') +
+            row('You receive', money(got), 'total up') +
+            (late ? row('Sale value', money(res.coins)) + row(lateLabel(res), `−${money(late)}`, 'down') : '') +
             row('You sell', `${fmt(res.shares)} of your ${fmt(held())} shares`) +
             row('Avg price per share', money(res.avg_price)) +
             row('You paid for these', money(costOfThese)) +
-            row('Profit / loss', signed(res.coins - costOfThese), res.coins >= costOfThese ? 'up' : 'down') +
-            row('Balance after', money(balance + res.coins)) +
+            row('Profit / loss', signed(got - costOfThese), got >= costOfThese ? 'up' : 'down') +
+            row('Balance after', money(balance + got)) +
             row('New price', newPct),
-            true, `Sell for ${money(res.coins)}`);
+            true, `Sell for ${money(got)}`);
         }
       } catch { if (my === seq) setPreview('<span class="muted">Quote unavailable.</span>', false); }
     }, 150);
@@ -174,12 +185,12 @@ function setupTradeForm(form) {
   form.querySelectorAll('input[name=outcome_id]').forEach(r => r.addEventListener('change', refresh));
   valueInput.addEventListener('input', requestQuote);
   maxBtn.addEventListener('click', () => {
-    valueInput.value = isBuy() ? Math.max(0, Math.floor((balance - entryFee) * 100) / 100) : held();
+    valueInput.value = isBuy() ? maxBet() : held();
     requestQuote();
   });
   quick.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
     const next = (parseFloat(valueInput.value) || 0) + parseFloat(b.dataset.amt);
-    valueInput.value = Math.min(next, Math.max(0, Math.floor((balance - entryFee) * 100) / 100));
+    valueInput.value = Math.min(next, maxBet());
     requestQuote();
   }));
   refresh();

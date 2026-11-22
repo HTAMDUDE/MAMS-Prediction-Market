@@ -54,6 +54,17 @@ CREATION_FEE = 10.0
 ENTRY_FEE = 10.0
 # Whoever makes a market must also bet at least this much on it, so they have skin in the game.
 CREATOR_MIN_BET = 10.0
+# Late-trading fee, to discourage piling in once the answer is nearly known:
+#   fee = LATE_FEE_RATE x shares traded x P x (1 - P) x T
+# P is the trade's average price per share; T depends on how long is left before betting closes.
+LATE_FEE_RATE = 0.07
+LATE_FEE_TIERS = [  # (less than this much time left, T), checked in order
+    (timedelta(minutes=30), 8.0),
+    (timedelta(hours=1), 4.0),
+    (timedelta(hours=2), 2.0),
+]  # more than 2 hours left: T = 0, no fee. Keep these sorted from shortest to longest.
+
+
 CATEGORIES = ["Academics", "Competitions", "Sports", "Events", "Campus Life", "Weather", "Other"]
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,20}$")
 EPS = 1e-9
@@ -453,22 +464,48 @@ def ban_user_from_trading(db, user_id):
         raise
 
 
+def late_multiplier(m, now=None):
+    """T in the late-trading fee for the time left before betting closes (see LATE_FEE_TIERS); 0 if none applies."""
+    left = parse_dt(m["closes_at"]) - (now or datetime.now())
+    for limit, t in LATE_FEE_TIERS:
+        if left < limit:
+            return t
+    return 0.0
+
+
+def late_fee(shares, avg_price, t):
+    """F = LATE_FEE_RATE x C x P(1 - P) x T, rounded to the cent."""
+    if t <= 0 or shares <= 0:
+        return 0.0
+    p = min(max(avg_price, 0.0), 1.0)
+    return cents(LATE_FEE_RATE * shares * p * (1 - p) * t)
+
+
 def check_trade(m, outs, idx, action, value, balance=None, held=None, fee=0.0):
-    """Validate a trade and price it. Returns (shares, coins): shares bought/sold and coins spent/received.
-    Raises TradeError with a user-facing message. balance/held may be None to skip those checks
-    (used for logged-out quotes). Shared by execute_trade and the /api/quote preview so they always agree."""
+    """Validate a trade and price it. Returns (shares, coins, late): shares bought/sold, coins spent/received
+    before fees, and the late-trading fee. Raises TradeError with a user-facing message. balance/held may be None
+    to skip those checks (used for logged-out quotes). Shared by execute_trade and the /api/quote preview so they
+    always agree. `fee` is the entry fee owed on this buy, if any."""
     q = [o["shares"] for o in outs]
     label = outs[idx]["label"]
+    t = late_multiplier(m)
     if action == "buy":
         amount = cents(value)
         if amount < MIN_BET:
             raise TradeError(f"Minimum bet is {MIN_BET:.0f} {CURRENCY}.")
-        if balance is not None and amount + fee > balance + EPS:
+        shares = lmsr.shares_for_amount(q, m["b"], idx, amount)
+        late = late_fee(shares, amount / shares, t)
+        if balance is not None and amount + fee + late > balance + EPS:
+            extras = [f"Ⓜ{amount:,.2f} bet"]
             if fee:
-                raise TradeError(f"You need Ⓜ{amount + fee:,.2f} (Ⓜ{amount:,.2f} bet + Ⓜ{fee:,.0f} entry fee) "
+                extras.append(f"Ⓜ{fee:,.0f} entry fee")
+            if late:
+                extras.append(f"Ⓜ{late:,.2f} late trading fee")
+            if len(extras) > 1:
+                raise TradeError(f"You need Ⓜ{amount + fee + late:,.2f} ({' + '.join(extras)}) "
                                  f"but have Ⓜ{balance:,.2f}.")
             raise TradeError("You don't have enough MAMS Bucks for that bet.")
-        return lmsr.shares_for_amount(q, m["b"], idx, amount), amount
+        return shares, amount, late
     if action == "sell":
         shares = value
         if held is not None and abs(shares - held) < 1e-6:
@@ -477,7 +514,8 @@ def check_trade(m, outs, idx, action, value, balance=None, held=None, fee=0.0):
             raise TradeError("Enter a number of shares to sell.")
         if held is not None and shares > held + EPS:
             raise TradeError(f"You only own {held:.2f} shares of “{label}”.")
-        return shares, math.floor(lmsr.sell_value(q, m["b"], idx, shares) * 100) / 100
+        coins = math.floor(lmsr.sell_value(q, m["b"], idx, shares) * 100) / 100
+        return shares, coins, min(late_fee(shares, coins / shares, t), coins)
     raise TradeError("Unknown action.")
 
 
@@ -507,7 +545,7 @@ def execute_trade(db, user_id, market_id, outcome_id, action, value):
         held_cost = pos["cost"] if pos else 0.0
 
         fee = entry_fee_due(db, m, user_id) if action == "buy" else 0.0
-        shares, coins = check_trade(m, outs, idx, action, value, user["balance"], held, fee)
+        shares, coins, late = check_trade(m, outs, idx, action, value, user["balance"], held, fee)
         if fee:
             creator = creator_name(db, m)
             db.execute("UPDATE users SET balance = ROUND(balance - ?, 2) WHERE id = ?", (fee, user_id))
@@ -535,6 +573,12 @@ def execute_trade(db, user_id, market_id, outcome_id, action, value):
         db.execute("UPDATE outcomes SET shares = shares + ? WHERE id = ?", (d_shares, outcome_id))
         db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (d_cash, user_id))
         log_activity(db, user_id, action, d_cash, m, detail)
+        if late:
+            t = late_multiplier(m)
+            db.execute("UPDATE users SET balance = ROUND(balance - ?, 2) WHERE id = ?", (late, user_id))
+            log_activity(db, user_id, "fee", -late, m,
+                         f"Late trading fee (×{fmt_number(t)}, {shares:,.2f} shares at {coins / shares * 100:.0f}¢)")
+            msg += f" Late trading fee: Ⓜ{late:,.2f}."
         msg += f" Balance: Ⓜ{db.execute('SELECT balance FROM users WHERE id = ?', (user_id,)).fetchone()[0]:,.2f}."
         if new_shares <= 1e-9:
             db.execute("DELETE FROM positions WHERE user_id = ? AND outcome_id = ?", (user_id, outcome_id))
@@ -816,7 +860,7 @@ def inject_globals():
             "owner_id": g.get("owner_id"), "is_owner": is_owner(),
             "CURRENCY": CURRENCY, "DAILY_BONUS": DAILY_BONUS, "CATEGORIES": CATEGORIES,
             "DISPUTE_HOURS": DISPUTE_HOURS, "CREATION_FEE": CREATION_FEE, "ENTRY_FEE": ENTRY_FEE,
-            "CREATOR_MIN_BET": CREATOR_MIN_BET}
+            "CREATOR_MIN_BET": CREATOR_MIN_BET, "LATE_FEE_RATE": LATE_FEE_RATE}
 
 
 @app.template_filter("money")
@@ -1019,6 +1063,7 @@ def market(mid):
     return render_template("market.html", b=b, history=history, trades=trades, comments=comments,
                            my_positions=my_positions, block_reason=block_reason,
                            creator=creator, my_entry_fee=my_entry_fee,
+                           late_t=late_multiplier(m) if b["state"] == "open" else 0.0,
                            blocked=blocked, all_users=all_users, clarifications=clarifications,
                            disputes=disputes, proposer=proposer, can_dispute=can_dispute)
 
@@ -1034,9 +1079,35 @@ def dispute(mid):
     return redirect(url_for("market", mid=mid))
 
 
+def late_fee_table():
+    """LATE_FEE_TIERS as rows for the How it works page: [(time left, T), ...], longest time first."""
+    def say(d, unit):
+        mins = int(d.total_seconds() // 60)
+        return f"{mins // 60:g}" if unit == "hours" else f"{mins}"
+
+    def unit_for(d):
+        return "hours" if d.total_seconds() >= 3600 and d.total_seconds() % 3600 == 0 else "minutes"
+
+    def one(d):
+        u = unit_for(d)
+        n = say(d, u)
+        return f"{n} {u[:-1] if n == '1' else u}"
+
+    tiers = LATE_FEE_TIERS
+    rows = [(f"More than {one(tiers[-1][0])}", 0.0)]
+    for (lo, _), (hi, t) in reversed(list(zip(tiers, tiers[1:]))):
+        u = unit_for(hi) if unit_for(lo) == unit_for(hi) else "minutes"
+        rows.append((f"{say(lo, u)}–{say(hi, u)} {u}", t))
+    rows.append((f"Less than {one(tiers[0][0])}", tiers[0][1]))
+    return rows
+
+
 @app.route("/how-it-works")
 def how_it_works():
-    return render_template("how_it_works.html", window_hours=DISPUTE_HOURS)
+    top = LATE_FEE_TIERS[0][1]
+    return render_template("how_it_works.html", window_hours=DISPUTE_HOURS, late_rows=late_fee_table(),
+                           late_top=top, late_example=cents(LATE_FEE_RATE * 100 * 0.25 * top),
+                           late_first_limit=late_fee_table()[-1][0].replace("Less than ", ""))
 
 
 @app.post("/market/<int:mid>/trade")
@@ -1104,12 +1175,13 @@ def quote():
             fee = entry_fee_due(db, m, g.user["id"]) if action == "buy" else 0.0
         else:
             fee = ENTRY_FEE if action == "buy" and m["created_by"] is not None else 0.0
-        shares, coins = check_trade(m, outs, i, action, value, balance, held, fee)
+        shares, coins, late = check_trade(m, outs, i, action, value, balance, held, fee)
     except TradeError as e:
         return jsonify(ok=False, error=str(e))
     q = [o["shares"] for o in outs]
     q[i] += shares if action == "buy" else -shares
     return jsonify(ok=True, shares=round(shares, 4), coins=coins, entry_fee=fee, creator=creator_name(db, m),
+                   late_fee=late, late_multiplier=late_multiplier(m),
                    avg_price=coins / shares if shares else 0,
                    new_price=lmsr.prices(q, m["b"])[i])
 

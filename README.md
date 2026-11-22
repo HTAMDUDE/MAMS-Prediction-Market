@@ -17,6 +17,10 @@ assemblies, and anything else the admins post.
   entry fees. Market makers must also place an **opening bet of at least Ⓜ10** on an outcome of their own market
   (held with a proposal and placed on approval; refunded if rejected or withdrawn). Amounts are `CREATION_FEE`,
   `ENTRY_FEE` and `CREATOR_MIN_BET` in `app.py`; the dispute window is `DISPUTE_WINDOW`.
+- A **late trading fee** discourages trading right before betting closes: `0.07 × shares × P × (1 − P) × T`, where P
+  is the trade's average price per share and T is 0 with more than 2 hours left, 2 at 1–2 hours, 4 at 30–60 minutes
+  and 8 in the last 30 minutes. Charged on buys (added) and sells (deducted); it isn't paid to anyone. Set by
+  `LATE_FEE_RATE` and `LATE_FEE_TIERS` in `app.py`.
 - The **Activity** page lists every trade made on the site (who, what, which market, how much), with filters by
   buys/sells, trader and market. **Your balance history** (linked from it) logs every change to your own balance
   (buys, sells, payouts, losses, refunds, bonuses, admin adjustments) with your balance after each one. Admins can
