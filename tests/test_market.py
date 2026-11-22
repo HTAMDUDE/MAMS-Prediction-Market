@@ -1564,3 +1564,54 @@ def test_how_it_works_late_fee_table_follows_settings(monkeypatch):
     assert "0.07 × 100 × 0.25 × 8 = <b>Ⓜ14.00</b>" in page
     monkeypatch.setattr(appmod, "LATE_FEE_TIERS", [(timedelta(minutes=15), 5.0), (timedelta(hours=3), 1.0)])
     assert rows() == [("More than 3 hours", 0.0), ("15–180 minutes", 1.0), ("Less than 15 minutes", 5.0)]
+
+
+def test_late_fee_paid_to_market_creator(monkeypatch):
+    monkeypatch.setattr(appmod, "LATE_FEE_TIERS",
+                        [(timedelta(minutes=30), 6.0), (timedelta(hours=1), 4.0), (timedelta(hours=2), 2.0)])
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        ids = {n: db.execute("INSERT INTO users (username, password_hash, balance, created_at) VALUES (?, 'x', 1000, ?)",
+                             (n, appmod.now_str())).lastrowid for n in ("maker", "trader")}
+        bal = lambda n: db.execute("SELECT balance FROM users WHERE id=?", (ids[n],)).fetchone()[0]
+        soon = (datetime.now() + timedelta(minutes=20)).strftime("%Y-%m-%d %H:%M:%S")
+        mid = appmod.create_market(db, "Late paid?", RULES, "Other", soon, ["Yes", "No"], 1000, ids["maker"])
+        yes = appmod.get_outcomes(db, mid)[0]["id"]
+
+        # trader's first, late bet: entry fee and late fee both go to the maker
+        msg = appmod.execute_trade(db, ids["trader"], mid, yes, "buy", 100)
+        late = -db.execute("SELECT amount FROM activity WHERE user_id=? AND kind='fee' AND detail LIKE 'Late%'",
+                           (ids["trader"],)).fetchone()[0]
+        assert late > 0 and "(paid to maker)" in msg
+        assert bal("trader") == pytest.approx(1000 - 100 - appmod.ENTRY_FEE - late)
+        assert bal("maker") == pytest.approx(1000 + appmod.ENTRY_FEE + late)
+        earned = [r[0] for r in db.execute("SELECT detail FROM activity WHERE user_id=? AND kind='earning'", (ids["maker"],))]
+        assert "Late trading fee from trader" in earned
+
+        # selling late also pays the maker
+        held = db.execute("SELECT shares FROM positions WHERE user_id=?", (ids["trader"],)).fetchone()[0]
+        before = bal("maker")
+        appmod.execute_trade(db, ids["trader"], mid, yes, "sell", held / 2)
+        assert bal("maker") > before
+
+        # the maker trading their own market late doesn't pay themselves: the fee leaves the game
+        before = bal("maker")
+        appmod.execute_trade(db, ids["maker"], mid, yes, "buy", 50)
+        paid = -db.execute("SELECT amount FROM activity WHERE user_id=? AND kind='fee' ORDER BY id DESC LIMIT 1",
+                           (ids["maker"],)).fetchone()[0]
+        assert paid > 0 and bal("maker") == pytest.approx(before - 50 - paid)
+
+        # no maker: nobody is paid
+        free = appmod.create_market(db, "Nobody's?", RULES, "Other", soon, ["Yes", "No"], 1000)
+        total = lambda: db.execute("SELECT SUM(balance) FROM users").fetchone()[0]
+        t0 = total()
+        appmod.execute_trade(db, ids["trader"], free, appmod.get_outcomes(db, free)[0]["id"], "buy", 50)
+        assert total() < t0 - 50
+
+        # the preview names who gets it
+        client = appmod.app.test_client()
+        q = client.get(f"/api/quote?market={mid}&outcome={yes}&action=buy&value=10").get_json()
+        assert q["late_fee_to"] == "maker" and q["late_fee"] > 0
+    finally:
+        appmod.DB_PATH = old

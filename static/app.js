@@ -96,7 +96,7 @@ function setupTradeForm(form) {
   };
   // always shown in the summary: Ⓜ0.00 until the last 2 hours before betting closes
   const lateRow = (r, late, sign = '') => late
-    ? row(`Late fee (×${r.late_multiplier})`, `${sign}${money(late)}`, 'down')
+    ? row(`Late fee (×${r.late_multiplier}${r.late_fee_to ? `, to ${r.late_fee_to}` : ''})`, `${sign}${money(late)}`, 'down')
     : row('Late fee', money(0));
   let timer = null, seq = 0;
 

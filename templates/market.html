@@ -117,7 +117,8 @@
       {% if late_t %}
         <p class="late-note"><b>Late trading fee is on (×{{ late_t|round(1)|string|replace('.0', '') }}).</b>
           Only {{ b.m.closes_at|until }} before betting closes, so buying or selling now costs extra. The closer to the
-          deadline, the bigger the fee. <a href="{{ url_for('how_it_works') }}#late-fee">Why?</a></p>
+          deadline, the bigger the fee{% if creator and not (user and user.username == creator) %}, which goes to {{ creator }}{% endif %}.
+          <a href="{{ url_for('how_it_works') }}#late-fee">Why?</a></p>
       {% endif %}
       {% if creator %}
         <p class="fee-note">Market by <b>{{ creator }}</b>.

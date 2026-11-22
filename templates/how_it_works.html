@@ -52,7 +52,8 @@
 
   <h2 id="late-fee">Late trading fee</h2>
   <p>Trading right before betting closes, when the answer may already be obvious, costs a fee. It's charged on buys
-    and sells and doesn't go to anyone:</p>
+    and sells and paid to the person who made the market (on markets without a maker, or when makers trade their
+    own market late, it isn't paid to anyone):</p>
   <p class="formula">fee = {{ '%g'|format(LATE_FEE_RATE) }} × shares traded × P × (1 − P) × T</p>
   <p class="muted small">P is the average price per share in your trade (so 55¢ means P = 0.55). P × (1 − P) is largest at
     50¢ and small near 0¢ or 100¢.</p>

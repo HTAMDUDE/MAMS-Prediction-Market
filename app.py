@@ -575,10 +575,18 @@ def execute_trade(db, user_id, market_id, outcome_id, action, value):
         log_activity(db, user_id, action, d_cash, m, detail)
         if late:
             t = late_multiplier(m)
+            # Paid to the market's creator; on markets without one, or when the creator trades their own market
+            # late, it leaves the game instead (paying yourself would cancel the penalty).
+            payee = m["created_by"] if m["created_by"] not in (None, user_id) else None
+            payee_name = creator_name(db, m) if payee else None
             db.execute("UPDATE users SET balance = ROUND(balance - ?, 2) WHERE id = ?", (late, user_id))
             log_activity(db, user_id, "fee", -late, m,
-                         f"Late trading fee (×{fmt_number(t)}, {shares:,.2f} shares at {coins / shares * 100:.0f}¢)")
-            msg += f" Late trading fee: Ⓜ{late:,.2f}."
+                         f"Late trading fee (×{fmt_number(t)}, {shares:,.2f} shares at {coins / shares * 100:.0f}¢)"
+                         + (f", paid to {payee_name}" if payee else ""))
+            if payee:
+                db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (late, payee))
+                log_activity(db, payee, "earning", late, m, f"Late trading fee from {user['username']}")
+            msg += f" Late trading fee: Ⓜ{late:,.2f}" + (f" (paid to {payee_name})." if payee else ".")
         msg += f" Balance: Ⓜ{db.execute('SELECT balance FROM users WHERE id = ?', (user_id,)).fetchone()[0]:,.2f}."
         if new_shares <= 1e-9:
             db.execute("DELETE FROM positions WHERE user_id = ? AND outcome_id = ?", (user_id, outcome_id))
@@ -1180,8 +1188,9 @@ def quote():
         return jsonify(ok=False, error=str(e))
     q = [o["shares"] for o in outs]
     q[i] += shares if action == "buy" else -shares
+    late_to = creator_name(db, m) if m["created_by"] is not None and not (g.user and g.user["id"] == m["created_by"]) else None
     return jsonify(ok=True, shares=round(shares, 4), coins=coins, entry_fee=fee, creator=creator_name(db, m),
-                   late_fee=late, late_multiplier=late_multiplier(m),
+                   late_fee=late, late_multiplier=late_multiplier(m), late_fee_to=late_to,
                    avg_price=coins / shares if shares else 0,
                    new_price=lmsr.prices(q, m["b"])[i])
 
