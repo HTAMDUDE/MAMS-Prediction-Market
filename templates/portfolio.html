@@ -50,6 +50,7 @@
         <td class="num">
           {% if i.b.state == 'cancelled' %}<span class="muted">Refunded</span>
           {% elif i.price > 0 %}<span class="up">Won Ⓜ{{ i.value|money }}</span>
+            {% if i.bonus %}<div class="muted small">incl. Ⓜ{{ i.bonus|money }} pot bonus</div>{% endif %}
           {% else %}<span class="down">Lost</span>{% endif %}
         </td>
       </tr>

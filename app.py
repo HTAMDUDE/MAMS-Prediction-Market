@@ -136,7 +136,9 @@ NEW_COLUMNS = {
                 ("proposed_outcome_id", "INTEGER"), ("proposed_by", "INTEGER"), ("proposed_at", "TEXT"),
                 ("finalizes_at", "TEXT"), ("resolved_by", "INTEGER"),
                 # Over/Under markets: the line, an optional unit ("%", "minutes"), and the measured result.
-                ("ou_line", "REAL"), ("ou_unit", "TEXT NOT NULL DEFAULT ''"), ("ou_result", "REAL")],
+                ("ou_line", "REAL"), ("ou_unit", "TEXT NOT NULL DEFAULT ''"), ("ou_result", "REAL"),
+                # money left in the pot after paying Ⓜ1 per winning share, shared out among the winners
+                ("leftover_paid", "REAL NOT NULL DEFAULT 0")],
     "proposals": [("rules_source", "TEXT NOT NULL DEFAULT ''"), ("rules_otherwise", "TEXT NOT NULL DEFAULT ''"),
                   ("ou_line", "REAL"), ("ou_unit", "TEXT NOT NULL DEFAULT ''"),
                   ("fee", "REAL NOT NULL DEFAULT 0"),  # creation fee paid, refunded on withdrawal
@@ -398,6 +400,23 @@ def refund_entry_fees(db, market_id, user_id=None, reason="Entry fee refunded"):
         db.execute("DELETE FROM market_entries WHERE market_id = ? AND user_id = ?", (market_id, e["user_id"]))
 
 
+def leftover_bonus(db, user_id, market_id):
+    """The user's share of a resolved market's leftover pot (0 if none)."""
+    return db.execute("SELECT COALESCE(SUM(amount), 0) FROM activity WHERE user_id = ? AND market_id = ? "
+                      "AND kind = 'payout' AND detail LIKE 'Bonus:%'", (user_id, market_id)).fetchone()[0]
+
+
+def estimated_bonus(db, market_id, outcome_id, my_shares):
+    """If this outcome won right now, roughly what my share of the leftover pot would be. Changes with every trade."""
+    pot = db.execute("SELECT COALESCE(SUM(amount), 0) FROM trades WHERE market_id = ?", (market_id,)).fetchone()[0]
+    winning = db.execute("SELECT COALESCE(SUM(shares), 0) FROM positions WHERE outcome_id = ?",
+                         (outcome_id,)).fetchone()[0]
+    leftover = cents(pot - winning)  # rounded exactly like resolve_market does, so the estimate matches the payout
+    if winning <= EPS or leftover < 0.01:
+        return 0.0
+    return math.floor(leftover * my_shares / winning * 100) / 100
+
+
 def trade_block_reason(db, user_id, market_id):
     """Why this user can't trade in this market, or None if they can."""
     if db.execute("SELECT 1 FROM trade_bans WHERE user_id = ?", (user_id,)).fetchone():
@@ -626,13 +645,29 @@ def resolve_market(db, market_id, outcome_id, resolved_by=None, automatic=False)
             db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (w["shares"], w["user_id"]))
             log_activity(db, w["user_id"], "payout", w["shares"], m,
                          f"Won: {w['shares']:,.2f} “{outs[outcome_id]}” shares paid Ⓜ1 each")
+        # The pot is everything traders put in minus what they took out by selling (fees aren't part of it).
+        # Whatever is left after paying Ⓜ1 per winning share goes to the winners in proportion to their shares.
+        # If the pot is short, the house covers the gap as before.
+        pot = db.execute("SELECT COALESCE(SUM(amount), 0) FROM trades WHERE market_id = ?", (market_id,)).fetchone()[0]
+        winning_shares = sum(w["shares"] for w in winners)
+        leftover = cents(pot - winning_shares)
+        leftover_paid = 0.0
+        if leftover >= 0.01 and winning_shares > EPS:
+            for w in winners:
+                cut = math.floor(leftover * w["shares"] / winning_shares * 100) / 100
+                if cut >= 0.01:
+                    db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (cut, w["user_id"]))
+                    log_activity(db, w["user_id"], "payout", cut, m,
+                                 f"Bonus: your share of the Ⓜ{leftover:,.2f} left in the pot")
+                    leftover_paid += cut
         for p in db.execute("SELECT p.user_id, p.shares, p.outcome_id FROM positions p JOIN outcomes o "
                             "ON o.id = p.outcome_id WHERE o.market_id = ? AND p.outcome_id != ? AND p.shares > 1e-9",
                             (market_id, outcome_id)).fetchall():
             log_activity(db, p["user_id"], "loss", 0, m,
                          f"Lost: {p['shares']:,.2f} “{outs[p['outcome_id']]}” shares paid nothing")
         db.execute("UPDATE markets SET status = 'resolved', resolved_outcome_id = ?, resolved_at = ?, "
-                   "resolved_by = ? WHERE id = ?", (outcome_id, now_str(), resolved_by, market_id))
+                   "resolved_by = ?, leftover_paid = ? WHERE id = ?",
+                   (outcome_id, now_str(), resolved_by, cents(leftover_paid), market_id))
         db.execute("UPDATE disputes SET handled_at = ? WHERE market_id = ? AND handled_at IS NULL",
                    (now_str(), market_id))
         db.execute("COMMIT")
@@ -1059,7 +1094,16 @@ def market(mid):
             value = (p["shares"] * o["price"] if b["m"]["status"] == "resolved"
                      else 0.0 if b["m"]["status"] == "cancelled"
                      else lmsr.sell_value(q, b["m"]["b"], index[p["outcome_id"]], p["shares"]))
-            my_positions.append({"outcome": o, "shares": p["shares"], "cost": p["cost"], "value": value})
+            my_positions.append({"outcome": o, "shares": p["shares"], "cost": p["cost"], "value": value,
+                                 "bonus": 0.0,
+                                 "est_bonus": estimated_bonus(db, mid, p["outcome_id"], p["shares"])
+                                 if b["m"]["status"] == "open" else 0.0})
+        if b["m"]["status"] == "resolved":  # the leftover-pot bonus belongs with the winning position
+            bonus = leftover_bonus(db, g.user["id"], mid)
+            for p in my_positions:
+                if p["outcome"]["id"] == b["m"]["resolved_outcome_id"]:
+                    p["bonus"] = bonus
+                    p["value"] += bonus
     block_reason = trade_block_reason(db, g.user["id"], mid) if g.user else None
     blocked, all_users = [], []
     if g.user and g.user["is_admin"]:
@@ -1222,7 +1266,8 @@ def portfolio():
             value = 0.0  # refunded when the market was cancelled
         else:
             value = r["shares"] * price
-        item = {"r": r, "b": b, "price": price, "value": value}
+        bonus = leftover_bonus(db, uid, r["market_id"]) if b["m"]["status"] == "resolved" and price > 0 else 0.0
+        item = {"r": r, "b": b, "price": price, "value": value + bonus, "bonus": bonus}
         (active if b["m"]["status"] == "open" else settled).append(item)
     trades = db.execute(
         "SELECT t.*, o.label, m.question FROM trades t JOIN outcomes o ON o.id = t.outcome_id "
