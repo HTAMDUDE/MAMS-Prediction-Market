@@ -406,8 +406,11 @@ def leftover_bonus(db, user_id, market_id):
                       "AND kind = 'payout' AND detail LIKE 'Bonus:%'", (user_id, market_id)).fetchone()[0]
 
 
-def leftover_and_weights(db, market_id, outcome_id):
+def leftover_and_weights(db, market_id, outcome_id, extra=None):
     """If outcome_id wins: (leftover, {user_id: unhedged winning shares}).
+
+    `extra` = (user_key, bought_outcome_id, shares, money) adds a hypothetical buy on top of the real positions,
+    used to preview the bonus a bet would get. user_key can be a user id or any placeholder for a visitor.
 
     leftover = the pot (money traders put in minus what they took out selling) minus Ⓜ1 per winning share,
     rounded to the cent. It's shared by *unhedged* winning shares: your winning shares minus the shares you hold
@@ -420,6 +423,11 @@ def leftover_and_weights(db, market_id, outcome_id):
     for p in db.execute("SELECT p.user_id, p.outcome_id, p.shares FROM positions p JOIN outcomes o "
                         "ON o.id = p.outcome_id WHERE o.market_id = ?", (market_id,)):
         held.setdefault(p["user_id"], {})[p["outcome_id"]] = p["shares"]
+    if extra:
+        who, bought, shares, money = extra
+        mine = held.setdefault(who, {})
+        mine[bought] = mine.get(bought, 0.0) + shares
+        pot += money
     winning = sum(h.get(outcome_id, 0.0) for h in held.values())
     weights = {}
     for uid, h in held.items():
@@ -430,10 +438,10 @@ def leftover_and_weights(db, market_id, outcome_id):
     return cents(pot - winning), weights
 
 
-def estimated_bonus(db, market_id, outcome_id, user_id):
+def estimated_bonus(db, market_id, outcome_id, user_id, extra=None):
     """If this outcome won right now, roughly what this user's share of the leftover pot would be. It's computed
-    exactly like the real payout, but changes with every trade."""
-    leftover, weights = leftover_and_weights(db, market_id, outcome_id)
+    exactly like the real payout, but changes with every trade. Pass `extra` to include a bet not yet placed."""
+    leftover, weights = leftover_and_weights(db, market_id, outcome_id, extra)
     total = sum(weights.values())
     if leftover < 0.01 or user_id not in weights:
         return 0.0
@@ -1255,8 +1263,12 @@ def quote():
     q = [o["shares"] for o in outs]
     q[i] += shares if action == "buy" else -shares
     late_to = creator_name(db, m) if m["created_by"] is not None and not (g.user and g.user["id"] == m["created_by"]) else None
+    est_bonus = 0.0
+    if action == "buy":  # the leftover-pot bonus this bet would get if its outcome won right after it
+        who = g.user["id"] if g.user else "visitor"
+        est_bonus = estimated_bonus(db, mid, oid, who, (who, oid, shares, coins))
     return jsonify(ok=True, shares=round(shares, 4), coins=coins, entry_fee=fee, creator=creator_name(db, m),
-                   late_fee=late, late_multiplier=late_multiplier(m), late_fee_to=late_to,
+                   late_fee=late, late_multiplier=late_multiplier(m), late_fee_to=late_to, est_bonus=est_bonus,
                    avg_price=coins / shares if shares else 0,
                    new_price=lmsr.prices(q, m["b"])[i])
 

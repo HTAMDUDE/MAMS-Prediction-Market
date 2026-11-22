@@ -1814,3 +1814,35 @@ def test_hedged_shares_earn_no_leftover_bonus():
         assert min(cat_h.values()) > 0      # cat really does hold some of every outcome
     finally:
         appmod.DB_PATH = old
+
+
+def test_bet_preview_shows_estimated_bonus():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        bettor = appmod.app.test_client()
+        signup(bettor, "underdog")
+        uid = db.execute("SELECT id FROM users WHERE username='underdog'").fetchone()[0]
+        crowd = db.execute("INSERT INTO users (username, password_hash, balance, created_at) VALUES ('crowd', 'x', 5000, ?)",
+                           (appmod.now_str(),)).lastrowid
+        later = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+        mid = appmod.create_market(db, "Lopsided?", RULES, "Other", later, ["Yes", "No"], 1000)
+        yes, no = [o["id"] for o in appmod.get_outcomes(db, mid)]
+        appmod.execute_trade(db, crowd, mid, no, "buy", 1500)
+        url = lambda o, v: f"/api/quote?market={mid}&outcome={o}&action=buy&value={v}"
+
+        q = bettor.get(url(yes, 50)).get_json()
+        assert q["ok"] and q["est_bonus"] > 1000               # betting the underdog: a big share of the pot
+        assert bettor.get(url(no, 50)).get_json()["est_bonus"] == 0   # betting the favourite: pot would be short
+        assert appmod.app.test_client().get(url(yes, 50)).get_json()["est_bonus"] == pytest.approx(q["est_bonus"], abs=0.01)
+        assert bettor.get(f"/api/quote?market={mid}&outcome={no}&action=sell&value=1").get_json().get("est_bonus", 0) == 0
+
+        # the estimate is what you'd actually get if the market resolved right after the bet
+        appmod.execute_trade(db, uid, mid, yes, "buy", 50)
+        shares = db.execute("SELECT shares FROM positions WHERE user_id=?", (uid,)).fetchone()[0]
+        before = db.execute("SELECT balance FROM users WHERE id=?", (uid,)).fetchone()[0]
+        appmod.resolve_market(db, mid, yes)
+        after = db.execute("SELECT balance FROM users WHERE id=?", (uid,)).fetchone()[0]
+        assert after - before - shares == pytest.approx(q["est_bonus"], abs=0.02)
+    finally:
+        appmod.DB_PATH = old

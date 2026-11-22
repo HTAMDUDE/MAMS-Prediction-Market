@@ -156,6 +156,8 @@ function setupTradeForm(form) {
             row('You get', `${fmt(res.shares)} shares`) +
             row('Avg price per share', money(res.avg_price)) +
             row('If it wins', `you get ${money(res.shares)} (${signed(res.shares - total)})`, 'up') +
+            (res.est_bonus ? row('<span title="Your share of the money that would be left in the pot if this outcome won right now. It changes as people trade.">+ est. pot bonus</span>',
+                                 `~${money(res.est_bonus)}`, 'up') : '') +
             row('If it loses', `you lose ${money(total)}`, 'down') +
             row('Balance after', money(balance - total)) +
             row('New price', newPct),
