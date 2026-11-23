@@ -60,6 +60,22 @@
     <div class="card">
       <h2>Your position</h2>
       <table class="table">
+        {% if b.state == 'resolved' %}
+        <thead><tr><th>Outcome</th><th class="num">Shares</th><th class="num">Spent</th><th class="num">Paid out</th><th class="num">Profit</th></tr></thead>
+        <tbody>
+        {% for p in my_positions %}
+          {% set profit = p.value - p.cost %}
+          <tr>
+            <td>{{ p.outcome.label }}{% if p.outcome.id == b.m.resolved_outcome_id %} <span class="up">✓</span>{% endif %}</td>
+            <td class="num">{{ p.shares|money }}</td>
+            <td class="num">Ⓜ{{ p.cost|money }}</td>
+            <td class="num">Ⓜ{{ p.value|money }}
+              {% if p.bonus %}<div class="muted small">Ⓜ{{ (p.value - p.bonus)|money }} + Ⓜ{{ p.bonus|money }} pot bonus</div>{% endif %}</td>
+            <td class="num {{ 'up' if profit >= 0 else 'down' }}">{{ '+' if profit >= 0 else '−' }}Ⓜ{{ profit|abs|money }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+        {% else %}
         <thead><tr><th>Outcome</th><th class="num">Shares</th><th class="num">Spent</th><th class="num" title="What these shares would sell for right now">Sell value</th><th class="num">Pays if right</th></tr></thead>
         <tbody>
         {% for p in my_positions %}
@@ -68,10 +84,12 @@
             <td class="num">{{ p.shares|money }}</td>
             <td class="num">Ⓜ{{ p.cost|money }}</td>
             <td class="num">Ⓜ{{ p.value|money }}</td>
-            <td class="num">Ⓜ{{ p.shares|money }}</td>
+            <td class="num">Ⓜ{{ p.shares|money }}
+              {% if p.est_bonus %}<div class="muted small" title="Your share of what would be left in the pot if this outcome won right now. It changes as people trade.">+ ~Ⓜ{{ p.est_bonus|money }} bonus if it ended now</div>{% endif %}</td>
           </tr>
         {% endfor %}
         </tbody>
+        {% endif %}
       </table>
     </div>
     {% endif %}
@@ -139,6 +157,12 @@
     {% if b.state == 'open' %}
     <div class="card trade-card" id="trade">
       <h2>Place a bet</h2>
+      {% if late_t %}
+        <p class="late-note"><b>Late trading fee is on (×{{ late_t|round(1)|string|replace('.0', '') }}).</b>
+          Only {{ b.m.closes_at|until }} before betting closes, so buying or selling now costs extra. The closer to the
+          deadline, the bigger the fee{% if creator and not (user and user.username == creator) %}, which goes to {{ creator }}{% endif %}.
+          <a href="{{ url_for('how_it_works') }}#late-fee">Why?</a></p>
+      {% endif %}
       {% if creator %}
         <p class="fee-note">Market by <b>{{ creator }}</b>.
           {% if my_entry_fee %}Your first bet here includes a <b>Ⓜ{{ my_entry_fee|int }} entry fee</b> that goes to {{ creator }}.
@@ -149,7 +173,7 @@
         <p class="muted">{{ block_reason }}</p>
       {% elif user %}
       <form method="post" action="{{ url_for('trade', mid=b.m.id) }}" id="trade-form"
-            data-market="{{ b.m.id }}" data-quote="{{ url_for('quote') }}" data-entry-fee="{{ my_entry_fee }}">
+            data-market="{{ b.m.id }}" data-quote="{{ url_for('quote') }}" data-entry-fee="{{ my_entry_fee }}" data-late-t="{{ late_t }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="action" value="buy">
         <input type="hidden" name="min_out" id="min-out" value="">
@@ -162,7 +186,7 @@
             {% set held = (my_positions|selectattr('outcome.id', 'equalto', o.id)|map(attribute='shares')|first) or 0 %}
             {% set paid = (my_positions|selectattr('outcome.id', 'equalto', o.id)|map(attribute='cost')|first) or 0 %}
             <label>
-              <input type="radio" name="outcome_id" value="{{ o.id }}" data-held="{{ held }}" data-paid="{{ paid }}" data-label="{{ o.label }}" {{ 'checked' if loop.first }}>
+              <input type="radio" name="outcome_id" value="{{ o.id }}" data-held="{{ held }}" data-paid="{{ paid }}" data-price="{{ o.price }}" data-label="{{ o.label }}" {{ 'checked' if loop.first }}>
               <span><i style="background: var(--c{{ loop.index0 }})"></i>{{ o.label }}<b>{% if b.binary %}{{ (o.price * 100)|round|int }}¢{% else %}Ⓜ{{ '%.2f'|format(o.price) }}{% endif %}</b></span>
             </label>
           {% endfor %}
@@ -190,6 +214,7 @@
       <h2>Result</h2>
       {% for o in b.outcomes if o.id == b.m.resolved_outcome_id %}<p class="result">{{ o.label }}</p>{% endfor %}
       <p class="muted small">Every “{% for o in b.outcomes if o.id == b.m.resolved_outcome_id %}{{ o.label }}{% endfor %}” share paid Ⓜ1.
+        {% if b.m.leftover_paid %}The Ⓜ{{ b.m.leftover_paid|money }} left in the pot was shared among the winners by shares held.{% endif %}
         {% if b.m.proposed_at %}Proposed {{ b.m.proposed_at|when }} · finalized {{ b.m.resolved_at|when }}.{% endif %}</p>
     </div>
     {% elif b.state == 'closed' %}

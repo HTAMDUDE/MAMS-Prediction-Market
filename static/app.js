@@ -108,6 +108,18 @@ function setupTradeForm(form) {
   const entryFee = parseFloat(form.dataset.entryFee) || 0;  // charged on your first bet in this market
   const minOut = form.querySelector('#min-out');
   let timer = null, ctrl = null, quoted = null;  // quoted = { key } of the quote the preview shows
+  const lateT = parseFloat(form.dataset.lateT) || 0;        // late-trading multiplier T (0 = no fee)
+  // Biggest bet you can afford. The late fee is 0.07 x T x bet x (1 - P), and buying only pushes P up from the
+  // current price, so using the current price leaves just enough room for the fee.
+  const maxBet = () => {
+    const p = parseFloat(selected().dataset.price) || 0;
+    return Math.max(0, Math.floor((balance - entryFee) / (1 + 0.07 * lateT * (1 - p)) * 100) / 100);
+  };
+  // always shown in the summary: Ⓜ0.00 until the last 2 hours before betting closes
+  const lateRow = (r, late, sign = '') => late
+    ? row(`Late fee (×${r.late_multiplier}${r.late_fee_to ? `, to ${r.late_fee_to}` : ''})`, `${sign}${money(late)}`, 'down')
+    : row('Late fee', money(0));
+  let timer = null, seq = 0;
 
   const selected = () => form.querySelector('input[name=outcome_id]:checked');
   const outcomeName = () => selected().dataset.label;
@@ -176,30 +188,36 @@ function setupTradeForm(form) {
         const newPct = `${(res.new_price * 100).toFixed(1)}%`;
         const name = outcomeName();
         if (isBuy()) {
-          const fee = res.entry_fee || 0;
-          const total = res.coins + fee;
+          const fee = res.entry_fee || 0, late = res.late_fee || 0;
+          const total = res.coins + fee + late;
           setPreview(
             row('You pay', money(total), 'total down') +
-            (fee ? row('Bet', money(res.coins)) +
-                   row(`Entry fee (first bet${res.creator ? `, to ${res.creator}` : ''})`, money(fee)) : '') +
+            row('Bet', money(res.coins)) +
+            (fee ? row(`Entry fee (first bet${res.creator ? `, to ${res.creator}` : ''})`, money(fee)) : '') +
+            lateRow(res, late) +
             row('You get', `${fmt(res.shares)} shares`) +
             row('Avg price per share', money(res.avg_price)) +
             row('If it wins', `you get ${money(res.shares)} (${signed(res.shares - total)})`, 'up') +
+            (res.est_bonus ? row('<span title="Your share of the money that would be left in the pot if this outcome won right now. It changes as people trade.">+ est. pot bonus</span>',
+                                 `~${money(res.est_bonus)}`, 'up') : '') +
             row('If it loses', `you lose ${money(total)}`, 'down') +
             row('Balance after', money(balance - total)) +
             row('New price', newPct),
             true, `Pay ${money(total)} for “${name}”`);
         } else {
           const costOfThese = held() > 0 ? paid() * Math.min(res.shares / held(), 1) : 0;
+          const late = res.late_fee || 0, got = res.coins - late;
           setPreview(
-            row('You receive', money(res.coins), 'total up') +
+            row('You receive', money(got), 'total up') +
+            row('Sale value', money(res.coins)) +
+            lateRow(res, late, '−') +
             row('You sell', `${fmt(res.shares)} of your ${fmt(held())} shares`) +
             row('Avg price per share', money(res.avg_price)) +
             row('You paid for these', money(costOfThese)) +
-            row('Profit / loss', signed(res.coins - costOfThese), res.coins >= costOfThese ? 'up' : 'down') +
-            row('Balance after', money(balance + res.coins)) +
+            row('Profit / loss', signed(got - costOfThese), got >= costOfThese ? 'up' : 'down') +
+            row('Balance after', money(balance + got)) +
             row('New price', newPct),
-            true, `Sell for ${money(res.coins)}`);
+            true, `Sell for ${money(got)}`);
         }
       } catch (err) {
         if (err.name === 'AbortError') return;
@@ -223,11 +241,12 @@ function setupTradeForm(form) {
   form.querySelectorAll('input[name=outcome_id]').forEach(r => r.addEventListener('change', refresh));
   valueInput.addEventListener('input', requestQuote);
   maxBtn.addEventListener('click', () => {
-    valueInput.value = isBuy() ? maxBuy() : floor6(held());
+    valueInput.value = isBuy() ? maxBet() : held();
     requestQuote();
   });
   quick.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
-    valueInput.value = round2(Math.min((parseFloat(valueInput.value) || 0) + parseFloat(b.dataset.amt), maxBuy()));
+    const next = (parseFloat(valueInput.value) || 0) + parseFloat(b.dataset.amt);
+    valueInput.value = Math.min(next, maxBet());
     requestQuote();
   }));
   refresh();

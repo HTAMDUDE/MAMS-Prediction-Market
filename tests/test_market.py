@@ -1471,3 +1471,378 @@ def test_opening_bet_on_proposals_and_admin_markets(monkeypatch):
                 assert r[1] == pytest.approx(running, abs=0.02)
     finally:
         appmod.DB_PATH = old
+
+
+# ---------------------------------------------------------------- late trading fee
+
+def test_late_multiplier_tiers_and_formula(monkeypatch):
+    monkeypatch.setattr(appmod, "LATE_FEE_TIERS", [(timedelta(minutes=30), 3.0), (timedelta(hours=1), 2.0), (timedelta(hours=2), 1.5)])  # values this test was written for
+    now = datetime(2026, 11, 22, 12, 0, 0)
+    m = lambda left: {"closes_at": (now + left).strftime("%Y-%m-%d %H:%M:%S")}
+    T = lambda left: appmod.late_multiplier(m(left), now)
+    assert T(timedelta(hours=5)) == 0
+    assert T(timedelta(hours=2)) == 0              # "more than 2 hours" starts at exactly 2h
+    assert T(timedelta(hours=1, minutes=59)) == 1.5
+    assert T(timedelta(hours=1)) == 1.5
+    assert T(timedelta(minutes=59)) == 2
+    assert T(timedelta(minutes=30)) == 2
+    assert T(timedelta(minutes=29)) == 3
+    assert T(timedelta(seconds=1)) == 3
+    # F = 0.07 x C x P(1-P) x T
+    assert appmod.late_fee(100, 0.5, 3) == 5.25
+    assert appmod.late_fee(100, 0.9, 1.5) == pytest.approx(0.945, abs=0.006)  # 0.07 x 100 x 0.09 x 1.5
+    assert appmod.late_fee(100, 0.5, 0) == 0
+    assert appmod.late_fee(0, 0.5, 3) == 0
+
+
+def test_late_fee_charged_on_buys_and_sells_near_the_deadline(monkeypatch):
+    monkeypatch.setattr(appmod, "LATE_FEE_TIERS", [(timedelta(minutes=30), 3.0), (timedelta(hours=1), 2.0), (timedelta(hours=2), 1.5)])  # values this test was written for
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        client = appmod.app.test_client()
+        signup(client, "latecomer")
+        uid = db.execute("SELECT id FROM users WHERE username='latecomer'").fetchone()[0]
+        bal = lambda: db.execute("SELECT balance FROM users WHERE id=?", (uid,)).fetchone()[0]
+        closes = lambda left: (datetime.now() + left).strftime("%Y-%m-%d %H:%M:%S")
+        mid = appmod.create_market(db, "Late?", RULES, "Other", closes(timedelta(days=1)), ["Yes", "No"], 1000)
+        yes = appmod.get_outcomes(db, mid)[0]["id"]
+        url = lambda a, v: f"/api/quote?market={mid}&outcome={yes}&action={a}&value={v}"
+
+        # far from the deadline: no fee, no warning
+        q = client.get(url("buy", 100)).get_json()
+        assert q["late_fee"] == 0 and q["late_multiplier"] == 0
+        assert "Late trading fee is on" not in client.get(f"/market/{mid}").get_data(as_text=True)
+
+        # 20 minutes left: T = 3
+        db.execute("UPDATE markets SET closes_at = ? WHERE id = ?", (closes(timedelta(minutes=20)), mid))
+        assert "Late trading fee is on (×3)" in client.get(f"/market/{mid}").get_data(as_text=True)
+        q = client.get(url("buy", 100)).get_json()
+        expected = appmod.late_fee(q["shares"], 100 / q["shares"], 3)
+        assert q["late_multiplier"] == 3 and q["late_fee"] == pytest.approx(expected) and q["late_fee"] > 0
+        msg = appmod.execute_trade(db, uid, mid, yes, "buy", 100)
+        assert "Late trading fee" in msg
+        assert bal() == pytest.approx(1000 - 100 - q["late_fee"])
+        fee_row = db.execute("SELECT amount, detail FROM activity WHERE user_id=? AND kind='fee'", (uid,)).fetchone()
+        assert fee_row["amount"] == pytest.approx(-q["late_fee"]) and "×3" in fee_row["detail"]
+
+        # selling 45 minutes out: T = 2, taken out of what you receive
+        db.execute("UPDATE markets SET closes_at = ? WHERE id = ?", (closes(timedelta(minutes=45)), mid))
+        held = db.execute("SELECT shares FROM positions WHERE user_id=?", (uid,)).fetchone()[0]
+        sq = client.get(url("sell", held / 2)).get_json()
+        assert sq["late_multiplier"] == 2 and sq["late_fee"] > 0
+        before = bal()
+        appmod.execute_trade(db, uid, mid, yes, "sell", held / 2)
+        assert bal() == pytest.approx(before + sq["coins"] - sq["late_fee"], abs=0.01)
+
+        # the fee counts towards what you can afford
+        db.execute("UPDATE users SET balance = 100 WHERE id = ?", (uid,))
+        with pytest.raises(appmod.TradeError, match="late trading fee"):
+            appmod.execute_trade(db, uid, mid, yes, "buy", 100)
+        assert bal() == 100
+
+        # history still adds up
+        running = 0
+        for r in db.execute("SELECT amount, balance_after, kind FROM activity WHERE user_id=? ORDER BY id", (uid,)):
+            running = round(running + r[0], 2)
+            if r[2] != "admin":
+                assert r[1] == pytest.approx(running, abs=0.02)
+            running = r[1]
+        assert "Late trading fee" in client.get("/how-it-works").get_data(as_text=True)
+    finally:
+        appmod.DB_PATH = old
+
+
+def test_how_it_works_late_fee_table_follows_settings(monkeypatch):
+    rows = lambda: appmod.late_fee_table()
+    monkeypatch.setattr(appmod, "LATE_FEE_TIERS",
+                        [(timedelta(minutes=30), 8.0), (timedelta(hours=1), 4.0), (timedelta(hours=2), 2.0)])
+    assert rows() == [("More than 2 hours", 0.0), ("1–2 hours", 2.0), ("30–60 minutes", 4.0),
+                      ("Less than 30 minutes", 8.0)]
+    page = appmod.app.test_client().get("/how-it-works").get_data(as_text=True)
+    assert "<td>30–60 minutes</td><td class=\"num\">4</td>" in page
+    assert "0.07 × 100 × 0.25 × 8 = <b>Ⓜ14.00</b>" in page
+    monkeypatch.setattr(appmod, "LATE_FEE_TIERS", [(timedelta(minutes=15), 5.0), (timedelta(hours=3), 1.0)])
+    assert rows() == [("More than 3 hours", 0.0), ("15–180 minutes", 1.0), ("Less than 15 minutes", 5.0)]
+
+
+def test_late_fee_paid_to_market_creator(monkeypatch):
+    monkeypatch.setattr(appmod, "LATE_FEE_TIERS",
+                        [(timedelta(minutes=30), 6.0), (timedelta(hours=1), 4.0), (timedelta(hours=2), 2.0)])
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        ids = {n: db.execute("INSERT INTO users (username, password_hash, balance, created_at) VALUES (?, 'x', 1000, ?)",
+                             (n, appmod.now_str())).lastrowid for n in ("maker", "trader")}
+        bal = lambda n: db.execute("SELECT balance FROM users WHERE id=?", (ids[n],)).fetchone()[0]
+        soon = (datetime.now() + timedelta(minutes=20)).strftime("%Y-%m-%d %H:%M:%S")
+        mid = appmod.create_market(db, "Late paid?", RULES, "Other", soon, ["Yes", "No"], 1000, ids["maker"])
+        yes = appmod.get_outcomes(db, mid)[0]["id"]
+
+        # trader's first, late bet: entry fee and late fee both go to the maker
+        msg = appmod.execute_trade(db, ids["trader"], mid, yes, "buy", 100)
+        late = -db.execute("SELECT amount FROM activity WHERE user_id=? AND kind='fee' AND detail LIKE 'Late%'",
+                           (ids["trader"],)).fetchone()[0]
+        assert late > 0 and "(paid to maker)" in msg
+        assert bal("trader") == pytest.approx(1000 - 100 - appmod.ENTRY_FEE - late)
+        assert bal("maker") == pytest.approx(1000 + appmod.ENTRY_FEE + late)
+        earned = [r[0] for r in db.execute("SELECT detail FROM activity WHERE user_id=? AND kind='earning'", (ids["maker"],))]
+        assert "Late trading fee from trader" in earned
+
+        # selling late also pays the maker
+        held = db.execute("SELECT shares FROM positions WHERE user_id=?", (ids["trader"],)).fetchone()[0]
+        before = bal("maker")
+        appmod.execute_trade(db, ids["trader"], mid, yes, "sell", held / 2)
+        assert bal("maker") > before
+
+        # the maker trading their own market late doesn't pay themselves: the fee leaves the game
+        before = bal("maker")
+        appmod.execute_trade(db, ids["maker"], mid, yes, "buy", 50)
+        paid = -db.execute("SELECT amount FROM activity WHERE user_id=? AND kind='fee' ORDER BY id DESC LIMIT 1",
+                           (ids["maker"],)).fetchone()[0]
+        assert paid > 0 and bal("maker") == pytest.approx(before - 50 - paid)
+
+        # no maker: nobody is paid
+        free = appmod.create_market(db, "Nobody's?", RULES, "Other", soon, ["Yes", "No"], 1000)
+        total = lambda: db.execute("SELECT SUM(balance) FROM users").fetchone()[0]
+        t0 = total()
+        appmod.execute_trade(db, ids["trader"], free, appmod.get_outcomes(db, free)[0]["id"], "buy", 50)
+        assert total() < t0 - 50
+
+        # the preview names who gets it
+        client = appmod.app.test_client()
+        q = client.get(f"/api/quote?market={mid}&outcome={yes}&action=buy&value=10").get_json()
+        assert q["late_fee_to"] == "maker" and q["late_fee"] > 0
+    finally:
+        appmod.DB_PATH = old
+
+
+# ---------------------------------------------------------------- leftover pot
+
+def test_leftover_pot_shared_among_winners_by_shares():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        ids = {n: db.execute("INSERT INTO users (username, password_hash, balance, created_at) VALUES (?, 'x', 1000, ?)",
+                             (n, appmod.now_str())).lastrowid for n in ("ann", "ben", "cat", "dan")}
+        bal = lambda n: db.execute("SELECT balance FROM users WHERE id=?", (ids[n],)).fetchone()[0]
+        later = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+
+        # Ann Ⓜ100 on Yes, Ben Ⓜ100 on No, Yes wins: Ann gets her 190.90 shares plus the Ⓜ9.10 left over
+        m1 = appmod.create_market(db, "Ann vs Ben?", RULES, "Other", later, ["Yes", "No"], 1000)
+        yes, no = [o["id"] for o in appmod.get_outcomes(db, m1)]
+        appmod.execute_trade(db, ids["ann"], m1, yes, "buy", 100)
+        appmod.execute_trade(db, ids["ben"], m1, no, "buy", 100)
+        appmod.resolve_market(db, m1, yes)
+        assert bal("ann") == pytest.approx(1100, abs=0.01)   # the whole Ⓜ200 pot
+        assert bal("ben") == 900
+        assert db.execute("SELECT leftover_paid FROM markets WHERE id=?", (m1,)).fetchone()[0] == pytest.approx(9.10)
+        bonus = db.execute("SELECT amount, detail FROM activity WHERE user_id=? AND detail LIKE 'Bonus%'",
+                           (ids["ann"],)).fetchone()
+        assert bonus["amount"] == pytest.approx(9.10) and "Ⓜ9.10 left in the pot" in bonus["detail"]
+        page = appmod.app.test_client().get(f"/market/{m1}").get_data(as_text=True)
+        assert "Ⓜ9.10 left in the pot was shared among the winners" in page
+
+        # several winners: the leftover is split by winning shares, never more than the pot
+        m2 = appmod.create_market(db, "Split?", RULES, "Other", later, ["Yes", "No"], 1000)
+        yes, no = [o["id"] for o in appmod.get_outcomes(db, m2)]
+        appmod.execute_trade(db, ids["cat"], m2, yes, "buy", 50)
+        appmod.execute_trade(db, ids["dan"], m2, yes, "buy", 150)
+        appmod.execute_trade(db, ids["ben"], m2, no, "buy", 400)
+        sh = {n: db.execute("SELECT shares FROM positions WHERE user_id=? AND outcome_id=?", (ids[n], yes)).fetchone()[0]
+              for n in ("cat", "dan")}
+        before = {n: bal(n) for n in ("cat", "dan")}
+        appmod.resolve_market(db, m2, yes)
+        left = 600 - sh["cat"] - sh["dan"]
+        assert left > 0
+        got = {n: bal(n) - before[n] - sh[n] for n in ("cat", "dan")}
+        assert got["cat"] == pytest.approx(left * sh["cat"] / (sh["cat"] + sh["dan"]), abs=0.02)
+        assert got["dan"] == pytest.approx(left * sh["dan"] / (sh["cat"] + sh["dan"]), abs=0.02)
+        assert sum(got.values()) <= left + 1e-9
+        assert sum(before.values()) + 600 - (bal("cat") + bal("dan")) < 0.05   # winners took the whole pot
+
+        # pot short (everyone on the winning side): no bonus, the house covers the gap as before
+        m3 = appmod.create_market(db, "All on yes?", RULES, "Other", later, ["Yes", "No"], 1000)
+        yes = appmod.get_outcomes(db, m3)[0]["id"]
+        appmod.execute_trade(db, ids["cat"], m3, yes, "buy", 100)
+        appmod.resolve_market(db, m3, yes)
+        assert db.execute("SELECT leftover_paid FROM markets WHERE id=?", (m3,)).fetchone()[0] == 0
+
+        # money taken out by selling isn't in the pot
+        m4 = appmod.create_market(db, "Sold out?", RULES, "Other", later, ["Yes", "No"], 1000)
+        yes, no = [o["id"] for o in appmod.get_outcomes(db, m4)]
+        appmod.execute_trade(db, ids["ann"], m4, yes, "buy", 100)
+        appmod.execute_trade(db, ids["ben"], m4, no, "buy", 100)
+        held = db.execute("SELECT shares FROM positions WHERE user_id=? AND outcome_id=?", (ids["ben"], no)).fetchone()[0]
+        appmod.execute_trade(db, ids["ben"], m4, no, "sell", held)
+        pot = db.execute("SELECT SUM(amount) FROM trades WHERE market_id=?", (m4,)).fetchone()[0]
+        ann_shares = db.execute("SELECT shares FROM positions WHERE user_id=? AND outcome_id=?", (ids["ann"], yes)).fetchone()[0]
+        assert pot < ann_shares               # Ben's money left with him, so the pot can't cover Ann
+        before = bal("ann")
+        appmod.resolve_market(db, m4, yes)
+        assert bal("ann") - before == pytest.approx(ann_shares, abs=0.01)   # Ⓜ1 a share, no bonus
+        assert db.execute("SELECT leftover_paid FROM markets WHERE id=?", (m4,)).fetchone()[0] == 0
+
+        # balance histories still add up (these users were created directly with Ⓜ1,000, so start there)
+        for n in ids:
+            running = 1000
+            for r in db.execute("SELECT amount, balance_after FROM activity WHERE user_id=? ORDER BY id", (ids[n],)):
+                running = round(running + r[0], 2)
+                assert r[1] == pytest.approx(running, abs=0.02)
+            assert running == pytest.approx(bal(n), abs=0.02)
+    finally:
+        appmod.DB_PATH = old
+
+
+def test_position_tables_show_leftover_bonus():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        ann, ben = appmod.app.test_client(), appmod.app.test_client()
+        signup(ann, "posann")
+        signup(ben, "posben")
+        uid = lambda n: db.execute("SELECT id FROM users WHERE username=?", (n,)).fetchone()[0]
+        later = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+        mid = appmod.create_market(db, "Position bonus?", RULES, "Other", later, ["Yes", "No"], 1000)
+        yes, no = [o["id"] for o in appmod.get_outcomes(db, mid)]
+        appmod.execute_trade(db, uid("posann"), mid, yes, "buy", 100)
+        appmod.execute_trade(db, uid("posben"), mid, no, "buy", 100)
+        page = ann.get(f"/market/{mid}").get_data(as_text=True)
+        assert "Pays if right" in page and "Paid out" not in page        # open market: unchanged columns
+        appmod.resolve_market(db, mid, yes)
+
+        page = ann.get(f"/market/{mid}").get_data(as_text=True)
+        assert "Paid out" in page and "Pays if right" not in page
+        assert "Ⓜ200.00" in page and "Ⓜ190.90 + Ⓜ9.10 pot bonus" in page and "+Ⓜ100.00" in page
+        loser = ben.get(f"/market/{mid}").get_data(as_text=True)
+        assert "−Ⓜ100.00" in loser and "pot bonus" not in loser
+
+        settled = ann.get("/portfolio").get_data(as_text=True)
+        assert "Won Ⓜ200.00" in settled and "incl. Ⓜ9.10 pot bonus" in settled
+        assert "Lost" in ben.get("/portfolio").get_data(as_text=True)
+    finally:
+        appmod.DB_PATH = old
+
+
+def test_estimated_bonus_shown_before_resolution():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        ann, ben = appmod.app.test_client(), appmod.app.test_client()
+        signup(ann, "estann")
+        signup(ben, "estben")
+        uid = lambda n: db.execute("SELECT id FROM users WHERE username=?", (n,)).fetchone()[0]
+        later = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+        mid = appmod.create_market(db, "Estimate?", RULES, "Other", later, ["Yes", "No"], 1000)
+        yes, no = [o["id"] for o in appmod.get_outcomes(db, mid)]
+        appmod.execute_trade(db, uid("estann"), mid, yes, "buy", 100)
+        appmod.execute_trade(db, uid("estben"), mid, no, "buy", 100)
+
+        # if Yes won now there'd be Ⓜ9.10 left over (all Ann's); if No won the pot would be short, so no estimate
+        assert "+ ~Ⓜ9.10 bonus if it ended now" in ann.get(f"/market/{mid}").get_data(as_text=True)
+        assert "bonus if it ended now" not in ben.get(f"/market/{mid}").get_data(as_text=True)
+        assert appmod.estimated_bonus(db, mid, no, uid("estben")) == 0
+
+        # the estimate matches what's actually paid if nothing changes
+        before = db.execute("SELECT balance FROM users WHERE id=?", (uid("estann"),)).fetchone()[0]
+        held = db.execute("SELECT shares FROM positions WHERE user_id=?", (uid("estann"),)).fetchone()[0]
+        appmod.resolve_market(db, mid, yes)
+        after = db.execute("SELECT balance FROM users WHERE id=?", (uid("estann"),)).fetchone()[0]
+        assert after - before - held == pytest.approx(9.10, abs=0.01)
+        assert "bonus if it ended now" not in ann.get(f"/market/{mid}").get_data(as_text=True)
+    finally:
+        appmod.DB_PATH = old
+
+
+def test_hedged_shares_earn_no_leftover_bonus():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        ids = {n: db.execute("INSERT INTO users (username, password_hash, balance, created_at) VALUES (?, 'x', ?, ?)",
+                             (n, 5000 if n == "whale" else 1000, appmod.now_str())).lastrowid
+               for n in ("ann", "ben", "cat", "whale")}
+        bal = lambda n: db.execute("SELECT balance FROM users WHERE id=?", (ids[n],)).fetchone()[0]
+        later = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+        mid = appmod.create_market(db, "Whale?", RULES, "Other", later, ["Yes", "No"], 1000)
+        yes, no = [o["id"] for o in appmod.get_outcomes(db, mid)]
+        appmod.execute_trade(db, ids["ann"], mid, yes, "buy", 100)
+        appmod.execute_trade(db, ids["ben"], mid, no, "buy", 300)
+        appmod.execute_trade(db, ids["cat"], mid, no, "buy", 200)
+        left_before, _ = appmod.leftover_and_weights(db, mid, yes)
+        assert left_before == pytest.approx(409.10, abs=0.01)
+
+        # the whale buys 2,000 of each side: exactly Ⓜ2,000 in, Ⓜ2,000 out whatever happens, and no bonus
+        q = [o["shares"] for o in appmod.get_outcomes(db, mid)]
+        cost_yes = appmod.lmsr.cost_for_shares(q, 1000, 0, 2000)
+        appmod.execute_trade(db, ids["whale"], mid, yes, "buy", round(cost_yes, 2))
+        held_yes = db.execute("SELECT shares FROM positions WHERE user_id=? AND outcome_id=?", (ids["whale"], yes)).fetchone()[0]
+        q = [o["shares"] for o in appmod.get_outcomes(db, mid)]
+        cost_no = appmod.lmsr.cost_for_shares(q, 1000, 1, held_yes)
+        appmod.execute_trade(db, ids["whale"], mid, no, "buy", round(cost_no, 2))
+        held_no = db.execute("SELECT shares FROM positions WHERE user_id=? AND outcome_id=?", (ids["whale"], no)).fetchone()[0]
+        assert held_yes == pytest.approx(held_no, abs=0.05)
+        spent = 5000 - bal("whale")
+        assert spent == pytest.approx(held_yes, abs=0.05)                 # a full set costs Ⓜ1 each
+
+        _, weights = appmod.leftover_and_weights(db, mid, yes)
+        assert ids["whale"] not in weights or weights[ids["whale"]] < 0.05  # fully hedged: (almost) no weight
+        assert appmod.estimated_bonus(db, mid, yes, ids["whale"]) < 0.1
+
+        ann_before = bal("ann")
+        ann_shares = db.execute("SELECT shares FROM positions WHERE user_id=?", (ids["ann"],)).fetchone()[0]
+        appmod.resolve_market(db, mid, yes)
+        assert bal("whale") == pytest.approx(5000 - spent + held_yes, abs=0.2)   # back to even, nothing extra
+        assert bal("ann") - ann_before - ann_shares == pytest.approx(409.10, abs=0.2)  # Ann keeps the leftover
+
+        # a partial hedge earns a bonus only on the unhedged part; holding some but not all outcomes isn't a hedge
+        m2 = appmod.create_market(db, "Partial?", RULES, "Other", later, ["A", "B", "C"], 1585)
+        a, b_, c = [o["id"] for o in appmod.get_outcomes(db, m2)]
+        appmod.execute_trade(db, ids["ann"], m2, a, "buy", 150)
+        appmod.execute_trade(db, ids["ann"], m2, b_, "buy", 50)
+        appmod.execute_trade(db, ids["cat"], m2, a, "buy", 50)
+        appmod.execute_trade(db, ids["cat"], m2, b_, "buy", 50)
+        appmod.execute_trade(db, ids["cat"], m2, c, "buy", 50)
+        h = lambda n: {o: db.execute("SELECT COALESCE(SUM(shares), 0) FROM positions WHERE user_id=? AND outcome_id=?",
+                                     (ids[n], o)).fetchone()[0] for o in (a, b_, c)}
+        ann_h, cat_h = h("ann"), h("cat")
+        _, weights = appmod.leftover_and_weights(db, m2, a)
+        assert weights[ids["ann"]] == pytest.approx(ann_h[a])                          # no C shares: not hedged
+        # only the unhedged part counts (zero if A is cat's smallest holding)
+        assert weights.get(ids["cat"], 0.0) == pytest.approx(max(cat_h[a] - min(cat_h.values()), 0.0), abs=1e-6)
+        _, weights_b = appmod.leftover_and_weights(db, m2, b_)
+        assert weights_b.get(ids["cat"], 0.0) == pytest.approx(max(cat_h[b_] - min(cat_h.values()), 0.0), abs=1e-6)
+        assert min(cat_h.values()) > 0      # cat really does hold some of every outcome
+    finally:
+        appmod.DB_PATH = old
+
+
+def test_bet_preview_shows_estimated_bonus():
+    old = appmod.DB_PATH
+    try:
+        db = _fresh_db()
+        bettor = appmod.app.test_client()
+        signup(bettor, "underdog")
+        uid = db.execute("SELECT id FROM users WHERE username='underdog'").fetchone()[0]
+        crowd = db.execute("INSERT INTO users (username, password_hash, balance, created_at) VALUES ('crowd', 'x', 5000, ?)",
+                           (appmod.now_str(),)).lastrowid
+        later = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+        mid = appmod.create_market(db, "Lopsided?", RULES, "Other", later, ["Yes", "No"], 1000)
+        yes, no = [o["id"] for o in appmod.get_outcomes(db, mid)]
+        appmod.execute_trade(db, crowd, mid, no, "buy", 1500)
+        url = lambda o, v: f"/api/quote?market={mid}&outcome={o}&action=buy&value={v}"
+
+        q = bettor.get(url(yes, 50)).get_json()
+        assert q["ok"] and q["est_bonus"] > 1000               # betting the underdog: a big share of the pot
+        assert bettor.get(url(no, 50)).get_json()["est_bonus"] == 0   # betting the favourite: pot would be short
+        assert appmod.app.test_client().get(url(yes, 50)).get_json()["est_bonus"] == pytest.approx(q["est_bonus"], abs=0.01)
+        assert bettor.get(f"/api/quote?market={mid}&outcome={no}&action=sell&value=1").get_json().get("est_bonus", 0) == 0
+
+        # the estimate is what you'd actually get if the market resolved right after the bet
+        appmod.execute_trade(db, uid, mid, yes, "buy", 50)
+        shares = db.execute("SELECT shares FROM positions WHERE user_id=?", (uid,)).fetchone()[0]
+        before = db.execute("SELECT balance FROM users WHERE id=?", (uid,)).fetchone()[0]
+        appmod.resolve_market(db, mid, yes)
+        after = db.execute("SELECT balance FROM users WHERE id=?", (uid,)).fetchone()[0]
+        assert after - before - shares == pytest.approx(q["est_bonus"], abs=0.02)
+    finally:
+        appmod.DB_PATH = old

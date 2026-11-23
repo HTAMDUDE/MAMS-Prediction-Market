@@ -50,6 +50,32 @@
     <li>If a market is cancelled or deleted, entry fees go back to the traders.</li>
   </ul>
 
+  <h2>Where winnings come from</h2>
+  <p>Every bet goes into the market's pot. When the market resolves, each winning share is paid Ⓜ1 from the pot, so
+    the losers' money pays the winners. If there's money left over, it's shared among the winners in proportion to
+    how many winning shares they hold. If the pot comes up short, the site covers the difference.</p>
+  <p class="muted small">Shares you hold on <i>every</i> outcome at once don't count towards the bonus. A full set (say one
+    Yes and one No) always costs exactly Ⓜ1 and always pays exactly Ⓜ1, so it carries no risk.</p>
+
+  <h2 id="late-fee">Late trading fee</h2>
+  <p>Trading right before betting closes, when the answer may already be obvious, costs a fee. It's charged on buys
+    and sells and paid to the person who made the market (on markets without a maker, or when makers trade their
+    own market late, it isn't paid to anyone):</p>
+  <p class="formula">fee = {{ '%g'|format(LATE_FEE_RATE) }} × shares traded × P × (1 − P) × T</p>
+  <p class="muted small">P is the average price per share in your trade (so 55¢ means P = 0.55). P × (1 − P) is largest at
+    50¢ and small near 0¢ or 100¢.</p>
+  <table class="table late-table">
+    <thead><tr><th>Time until betting closes</th><th class="num">T</th></tr></thead>
+    <tbody>
+      {% for label, t in late_rows %}
+        <tr><td>{{ label }}</td><td class="num">{{ '%g'|format(t) }}{% if not t %} (no fee){% endif %}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p>Example: buying 100 shares at 50¢ with less than {{ late_first_limit }} left costs
+    {{ '%g'|format(LATE_FEE_RATE) }} × 100 × 0.25 × {{ '%g'|format(late_top) }} = <b>Ⓜ{{ late_example|money }}</b> on top of the bet.
+    The bet panel shows the exact fee before you trade.</p>
+
   <h2>Read the rules, not just the title</h2>
   <p>A market called “Will the bill pass?” might really mean “signed into law by December 31” or “passed by the House”.
     Many arguments come from people betting on the title without reading the rules. Every market has a <b>Rules</b>

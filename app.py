@@ -54,6 +54,17 @@ CREATION_FEE = 10.0
 ENTRY_FEE = 10.0
 # Whoever makes a market must also bet at least this much on it, so they have skin in the game.
 CREATOR_MIN_BET = 10.0
+# Late-trading fee, to discourage piling in once the answer is nearly known:
+#   fee = LATE_FEE_RATE x shares traded x P x (1 - P) x T
+# P is the trade's average price per share; T depends on how long is left before betting closes.
+LATE_FEE_RATE = 0.07
+LATE_FEE_TIERS = [  # (less than this much time left, T), checked in order
+    (timedelta(minutes=30), 6.0),
+    (timedelta(hours=1), 4.0),
+    (timedelta(hours=2), 2.0),
+]  # more than 2 hours left: T = 0, no fee. Keep these sorted from shortest to longest.
+
+
 CATEGORIES = ["Academics", "Competitions", "Sports", "Events", "Campus Life", "Weather", "Other"]
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,20}$")
 EPS = 1e-9
@@ -130,6 +141,8 @@ NEW_COLUMNS = {
                 # Over/Under markets: the line, an optional unit ("%", "minutes"), and the measured result.
                 ("ou_line", "REAL"), ("ou_unit", "TEXT NOT NULL DEFAULT ''"), ("ou_result", "REAL"),
                 ("featured", "INTEGER NOT NULL DEFAULT 0")],
+                # money left in the pot after paying Ⓜ1 per winning share, shared out among the winners
+                ("leftover_paid", "REAL NOT NULL DEFAULT 0")],
     "proposals": [("rules_source", "TEXT NOT NULL DEFAULT ''"), ("rules_otherwise", "TEXT NOT NULL DEFAULT ''"),
                   ("ou_line", "REAL"), ("ou_unit", "TEXT NOT NULL DEFAULT ''"),
                   ("fee", "REAL NOT NULL DEFAULT 0"),  # creation fee paid, refunded on withdrawal
@@ -405,6 +418,54 @@ def refund_entry_fees(db, market_id, user_id=None, reason="Entry fee refunded"):
         db.execute("DELETE FROM market_entries WHERE market_id = ? AND user_id = ?", (market_id, e["user_id"]))
 
 
+def leftover_bonus(db, user_id, market_id):
+    """The user's share of a resolved market's leftover pot (0 if none)."""
+    return db.execute("SELECT COALESCE(SUM(amount), 0) FROM activity WHERE user_id = ? AND market_id = ? "
+                      "AND kind = 'payout' AND detail LIKE 'Bonus:%'", (user_id, market_id)).fetchone()[0]
+
+
+def leftover_and_weights(db, market_id, outcome_id, extra=None):
+    """If outcome_id wins: (leftover, {user_id: unhedged winning shares}).
+
+    `extra` = (user_key, bought_outcome_id, shares, money) adds a hypothetical buy on top of the real positions,
+    used to preview the bonus a bet would get. user_key can be a user id or any placeholder for a visitor.
+
+    leftover = the pot (money traders put in minus what they took out selling) minus Ⓜ1 per winning share,
+    rounded to the cent. It's shared by *unhedged* winning shares: your winning shares minus the shares you hold
+    on every outcome at once. A full set of outcomes always costs exactly Ⓜ1 and always pays exactly Ⓜ1, so it
+    carries no risk and earns no bonus; otherwise anyone could buy big equal sets and take the leftover from
+    the people who actually bet on an outcome."""
+    pot = db.execute("SELECT COALESCE(SUM(amount), 0) FROM trades WHERE market_id = ?", (market_id,)).fetchone()[0]
+    outcome_ids = [o["id"] for o in get_outcomes(db, market_id)]
+    held = {}
+    for p in db.execute("SELECT p.user_id, p.outcome_id, p.shares FROM positions p JOIN outcomes o "
+                        "ON o.id = p.outcome_id WHERE o.market_id = ?", (market_id,)):
+        held.setdefault(p["user_id"], {})[p["outcome_id"]] = p["shares"]
+    if extra:
+        who, bought, shares, money = extra
+        mine = held.setdefault(who, {})
+        mine[bought] = mine.get(bought, 0.0) + shares
+        pot += money
+    winning = sum(h.get(outcome_id, 0.0) for h in held.values())
+    weights = {}
+    for uid, h in held.items():
+        hedged = min(h.get(oid, 0.0) for oid in outcome_ids)
+        unhedged = h.get(outcome_id, 0.0) - hedged
+        if unhedged > EPS:
+            weights[uid] = unhedged
+    return cents(pot - winning), weights
+
+
+def estimated_bonus(db, market_id, outcome_id, user_id, extra=None):
+    """If this outcome won right now, roughly what this user's share of the leftover pot would be. It's computed
+    exactly like the real payout, but changes with every trade. Pass `extra` to include a bet not yet placed."""
+    leftover, weights = leftover_and_weights(db, market_id, outcome_id, extra)
+    total = sum(weights.values())
+    if leftover < 0.01 or user_id not in weights:
+        return 0.0
+    return math.floor(leftover * weights[user_id] / total * 100) / 100
+
+
 def trade_block_reason(db, user_id, market_id):
     """Why this user can't trade in this market, or None if they can."""
     if db.execute("SELECT 1 FROM trade_bans WHERE user_id = ?", (user_id,)).fetchone():
@@ -471,22 +532,52 @@ def ban_user_from_trading(db, user_id):
         raise
 
 
+def late_multiplier(m, now=None):
+    """T in the late-trading fee for the time left before betting closes (see LATE_FEE_TIERS); 0 if none applies."""
+    left = parse_dt(m["closes_at"]) - (now or datetime.now())
+    for limit, t in LATE_FEE_TIERS:
+        if left < limit:
+            return t
+    return 0.0
+
+
+def late_fee(shares, avg_price, t):
+    """F = LATE_FEE_RATE x C x P(1 - P) x T, rounded to the cent."""
+    if t <= 0 or shares <= 0:
+        return 0.0
+    p = min(max(avg_price, 0.0), 1.0)
+    return cents(LATE_FEE_RATE * shares * p * (1 - p) * t)
+
+
 def check_trade(m, outs, idx, action, value, balance=None, held=None, fee=0.0):
-    """Validate a trade and price it. Returns (shares, coins): shares bought/sold and coins spent/received.
-    Raises TradeError with a user-facing message. balance/held may be None to skip those checks
-    (used for logged-out quotes). Shared by execute_trade and the /api/quote preview so they always agree."""
+    """Validate a trade and price it. Returns (shares, coins, late): shares bought/sold, coins spent/received
+    before fees, and the late-trading fee. Raises TradeError with a user-facing message. balance/held may be None
+    to skip those checks (used for logged-out quotes). Shared by execute_trade and the /api/quote preview so they
+    always agree. `fee` is the entry fee owed on this buy, if any."""
     q = [o["shares"] for o in outs]
     label = outs[idx]["label"]
+    t = late_multiplier(m)
     if action == "buy":
         amount = cents(value)
         if amount < MIN_BET:
             raise TradeError(f"Minimum bet is Ⓜ{MIN_BET:.0f}.")
         if balance is not None and amount + fee > balance + EPS:
+            raise TradeError(f"Minimum bet is {MIN_BET:.0f} {CURRENCY}.")
+        shares = lmsr.shares_for_amount(q, m["b"], idx, amount)
+        late = late_fee(shares, amount / shares, t)
+        if balance is not None and amount + fee + late > balance + EPS:
+            extras = [f"Ⓜ{amount:,.2f} bet"]
             if fee:
-                raise TradeError(f"You need Ⓜ{amount + fee:,.2f} (Ⓜ{amount:,.2f} bet + Ⓜ{fee:,.0f} entry fee) "
+                extras.append(f"Ⓜ{fee:,.0f} entry fee")
+            if late:
+                extras.append(f"Ⓜ{late:,.2f} late trading fee")
+            if len(extras) > 1:
+                raise TradeError(f"You need Ⓜ{amount + fee + late:,.2f} ({' + '.join(extras)}) "
                                  f"but have Ⓜ{balance:,.2f}.")
             raise TradeError(f"You don't have enough for that bet. Your balance is Ⓜ{balance:,.2f}.")
         return lmsr.shares_for_amount(q, m["b"], idx, amount), amount
+            raise TradeError("You don't have enough MAMS Bucks for that bet.")
+        return shares, amount, late
     if action == "sell":
         shares = value
         if held is not None and abs(shares - held) < 1e-6:
@@ -499,6 +590,7 @@ def check_trade(m, outs, idx, action, value, balance=None, held=None, fee=0.0):
         if coins < 0.01:
             raise TradeError("That's worth less than Ⓜ0.01. Sell more shares at once.")
         return shares, coins
+        return shares, coins, min(late_fee(shares, coins / shares, t), coins)
     raise TradeError("Unknown action.")
 
 
@@ -533,6 +625,7 @@ def execute_trade(db, user_id, market_id, outcome_id, action, value, min_out=Non
         shares, coins = check_trade(m, outs, idx, action, value, user["balance"], held, fee)
         if min_out is not None and (shares if action == "buy" else coins) < min_out - 1e-9:
             raise TradeError("The price moved since your quote. Check the new quote and try again.")
+        shares, coins, late = check_trade(m, outs, idx, action, value, user["balance"], held, fee)
         if fee:
             creator = creator_name(db, m)
             db.execute("UPDATE users SET balance = ROUND(balance - ?, 2) WHERE id = ?", (fee, user_id))
@@ -560,6 +653,20 @@ def execute_trade(db, user_id, market_id, outcome_id, action, value, min_out=Non
         db.execute("UPDATE outcomes SET shares = shares + ? WHERE id = ?", (d_shares, outcome_id))
         db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (d_cash, user_id))
         log_activity(db, user_id, action, d_cash, m, detail)
+        if late:
+            t = late_multiplier(m)
+            # Paid to the market's creator; on markets without one, or when the creator trades their own market
+            # late, it leaves the game instead (paying yourself would cancel the penalty).
+            payee = m["created_by"] if m["created_by"] not in (None, user_id) else None
+            payee_name = creator_name(db, m) if payee else None
+            db.execute("UPDATE users SET balance = ROUND(balance - ?, 2) WHERE id = ?", (late, user_id))
+            log_activity(db, user_id, "fee", -late, m,
+                         f"Late trading fee (×{fmt_number(t)}, {shares:,.2f} shares at {coins / shares * 100:.0f}¢)"
+                         + (f", paid to {payee_name}" if payee else ""))
+            if payee:
+                db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (late, payee))
+                log_activity(db, payee, "earning", late, m, f"Late trading fee from {user['username']}")
+            msg += f" Late trading fee: Ⓜ{late:,.2f}" + (f" (paid to {payee_name})." if payee else ".")
         msg += f" Balance: Ⓜ{db.execute('SELECT balance FROM users WHERE id = ?', (user_id,)).fetchone()[0]:,.2f}."
         if new_shares <= 1e-9:
             db.execute("DELETE FROM positions WHERE user_id = ? AND outcome_id = ?", (user_id, outcome_id))
@@ -599,13 +706,28 @@ def resolve_market(db, market_id, outcome_id, resolved_by=None, automatic=False)
             db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (w["shares"], w["user_id"]))
             log_activity(db, w["user_id"], "payout", w["shares"], m,
                          f"Won: {w['shares']:,.2f} “{outs[outcome_id]}” shares paid Ⓜ1 each")
+        # Whatever is left in the pot after paying Ⓜ1 per winning share goes to the winners in proportion to their
+        # unhedged winning shares (see leftover_and_weights). If the pot is short, the house covers the gap.
+        # Positions aren't changed by paying out, so computing this after the Ⓜ1 payments above is fine.
+        leftover, weights = leftover_and_weights(db, market_id, outcome_id)
+        total_weight = sum(weights.values())
+        leftover_paid = 0.0
+        if leftover >= 0.01 and total_weight > EPS:
+            for uid, weight in weights.items():
+                cut = math.floor(leftover * weight / total_weight * 100) / 100
+                if cut >= 0.01:
+                    db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (cut, uid))
+                    log_activity(db, uid, "payout", cut, m,
+                                 f"Bonus: your share of the Ⓜ{leftover:,.2f} left in the pot")
+                    leftover_paid += cut
         for p in db.execute("SELECT p.user_id, p.shares, p.outcome_id FROM positions p JOIN outcomes o "
                             "ON o.id = p.outcome_id WHERE o.market_id = ? AND p.outcome_id != ? AND p.shares > 1e-9",
                             (market_id, outcome_id)).fetchall():
             log_activity(db, p["user_id"], "loss", 0, m,
                          f"Lost: {p['shares']:,.2f} “{outs[p['outcome_id']]}” shares paid nothing")
         db.execute("UPDATE markets SET status = 'resolved', resolved_outcome_id = ?, resolved_at = ?, "
-                   "resolved_by = ? WHERE id = ?", (outcome_id, now_str(), resolved_by, market_id))
+                   "resolved_by = ?, leftover_paid = ? WHERE id = ?",
+                   (outcome_id, now_str(), resolved_by, cents(leftover_paid), market_id))
         db.execute("UPDATE disputes SET handled_at = ? WHERE market_id = ? AND handled_at IS NULL",
                    (now_str(), market_id))
         db.execute("COMMIT")
@@ -911,7 +1033,7 @@ def inject_globals():
             "owner_id": g.get("owner_id"), "is_owner": is_owner(),
             "CURRENCY": CURRENCY, "DAILY_BONUS": DAILY_BONUS, "CATEGORIES": CATEGORIES,
             "DISPUTE_HOURS": DISPUTE_HOURS, "CREATION_FEE": CREATION_FEE, "ENTRY_FEE": ENTRY_FEE,
-            "CREATOR_MIN_BET": CREATOR_MIN_BET}
+            "CREATOR_MIN_BET": CREATOR_MIN_BET, "LATE_FEE_RATE": LATE_FEE_RATE}
 
 
 @app.template_filter("money")
@@ -1179,7 +1301,16 @@ def market(mid):
             value = (p["shares"] * o["price"] if b["m"]["status"] == "resolved"
                      else 0.0 if b["m"]["status"] == "cancelled"
                      else lmsr.sell_value(q, b["m"]["b"], index[p["outcome_id"]], p["shares"]))
-            my_positions.append({"outcome": o, "shares": p["shares"], "cost": p["cost"], "value": value})
+            my_positions.append({"outcome": o, "shares": p["shares"], "cost": p["cost"], "value": value,
+                                 "bonus": 0.0,
+                                 "est_bonus": estimated_bonus(db, mid, p["outcome_id"], g.user["id"])
+                                 if b["m"]["status"] == "open" else 0.0})
+        if b["m"]["status"] == "resolved":  # the leftover-pot bonus belongs with the winning position
+            bonus = leftover_bonus(db, g.user["id"], mid)
+            for p in my_positions:
+                if p["outcome"]["id"] == b["m"]["resolved_outcome_id"]:
+                    p["bonus"] = bonus
+                    p["value"] += bonus
     block_reason = trade_block_reason(db, g.user["id"], mid) if g.user else None
     blocked, all_users = [], []
     if g.user and g.user["is_admin"]:
@@ -1191,6 +1322,7 @@ def market(mid):
     return render_template("market.html", b=b, history=history, trades=trades, comments=comments,
                            my_positions=my_positions, block_reason=block_reason,
                            creator=creator, my_entry_fee=my_entry_fee,
+                           late_t=late_multiplier(m) if b["state"] == "open" else 0.0,
                            blocked=blocked, all_users=all_users, clarifications=clarifications,
                            disputes=disputes, proposer=proposer, can_dispute=can_dispute,
                            commenting_off=commenting_off, comments_off_text=COMMENTS_OFF,
@@ -1208,9 +1340,35 @@ def dispute(mid):
     return redirect(url_for("market", mid=mid))
 
 
+def late_fee_table():
+    """LATE_FEE_TIERS as rows for the How it works page: [(time left, T), ...], longest time first."""
+    def say(d, unit):
+        mins = int(d.total_seconds() // 60)
+        return f"{mins // 60:g}" if unit == "hours" else f"{mins}"
+
+    def unit_for(d):
+        return "hours" if d.total_seconds() >= 3600 and d.total_seconds() % 3600 == 0 else "minutes"
+
+    def one(d):
+        u = unit_for(d)
+        n = say(d, u)
+        return f"{n} {u[:-1] if n == '1' else u}"
+
+    tiers = LATE_FEE_TIERS
+    rows = [(f"More than {one(tiers[-1][0])}", 0.0)]
+    for (lo, _), (hi, t) in reversed(list(zip(tiers, tiers[1:]))):
+        u = unit_for(hi) if unit_for(lo) == unit_for(hi) else "minutes"
+        rows.append((f"{say(lo, u)}–{say(hi, u)} {u}", t))
+    rows.append((f"Less than {one(tiers[0][0])}", tiers[0][1]))
+    return rows
+
+
 @app.route("/how-it-works")
 def how_it_works():
-    return render_template("how_it_works.html", window_hours=DISPUTE_HOURS)
+    top = LATE_FEE_TIERS[0][1]
+    return render_template("how_it_works.html", window_hours=DISPUTE_HOURS, late_rows=late_fee_table(),
+                           late_top=top, late_example=cents(LATE_FEE_RATE * 100 * 0.25 * top),
+                           late_first_limit=late_fee_table()[-1][0].replace("Less than ", ""))
 
 
 @app.post("/market/<int:mid>/trade")
@@ -1291,12 +1449,18 @@ def quote():
             fee = entry_fee_due(db, m, g.user["id"]) if action == "buy" else 0.0
         else:
             fee = ENTRY_FEE if action == "buy" and m["created_by"] is not None else 0.0
-        shares, coins = check_trade(m, outs, i, action, value, balance, held, fee)
+        shares, coins, late = check_trade(m, outs, i, action, value, balance, held, fee)
     except TradeError as e:
         return jsonify(ok=False, error=str(e))
     q = [o["shares"] for o in outs]
     q[i] += shares if action == "buy" else -shares
+    late_to = creator_name(db, m) if m["created_by"] is not None and not (g.user and g.user["id"] == m["created_by"]) else None
+    est_bonus = 0.0
+    if action == "buy":  # the leftover-pot bonus this bet would get if its outcome won right after it
+        who = g.user["id"] if g.user else "visitor"
+        est_bonus = estimated_bonus(db, mid, oid, who, (who, oid, shares, coins))
     return jsonify(ok=True, shares=round(shares, 4), coins=coins, entry_fee=fee, creator=creator_name(db, m),
+                   late_fee=late, late_multiplier=late_multiplier(m), late_fee_to=late_to, est_bonus=est_bonus,
                    avg_price=coins / shares if shares else 0,
                    new_price=lmsr.prices(q, m["b"])[i])
 
@@ -1333,6 +1497,8 @@ def portfolio():
             refund = cents(max(db.execute("SELECT COALESCE(SUM(amount), 0) FROM trades WHERE user_id = ? AND market_id = ?",
                                           (uid, r["market_id"])).fetchone()[0], 0.0))
         item = {"r": r, "b": b, "price": price, "value": value, "refund": refund}
+        bonus = leftover_bonus(db, uid, r["market_id"]) if b["m"]["status"] == "resolved" and price > 0 else 0.0
+        item = {"r": r, "b": b, "price": price, "value": value + bonus, "bonus": bonus}
         (active if b["m"]["status"] == "open" else settled).append(item)
     settled.sort(key=lambda i: i["b"]["m"]["resolved_at"] or "", reverse=True)
     trades = db.execute(
