@@ -1,6 +1,7 @@
 // MAMS Prediction Market — front-end helpers (no dependencies).
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
+const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 // Timestamps from the server are school-time wall-clock strings ("2025-03-04 15:30:00"). Parsing them as UTC and
 // formatting with timeZone "UTC" keeps that wall clock exactly, whatever the viewer's own time zone is.
 const parseTime = s => Date.parse(s.replace(' ', 'T') + 'Z');
@@ -11,6 +12,7 @@ function wallNow(tz) {
   return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
 }
 const fmt = n => n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const escapeHtml = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 function svg(tag, attrs, parent) {
   const el = document.createElementNS(SVG_NS, tag);
@@ -19,79 +21,139 @@ function svg(tag, attrs, parent) {
   return el;
 }
 
-// Price-over-time chart: one stepped line per outcome.
-// `lines` limits how many outcomes are drawn (a Yes/No market only needs its Yes line).
-function drawChart(el, history, allLabels, endTime, lines, tz) {
+// Animate a number shown in `el` from `from` to `to`, formatting each frame with `format`.
+function tween(el, from, to, ms, format) {
+  if (el._tween) cancelAnimationFrame(el._tween);
+  if (reducedMotion() || from === to || !isFinite(from)) { el.textContent = format(to); return; }
+  const start = performance.now();
+  const step = now => {
+    const k = Math.min(1, (now - start) / ms);
+    const e = 1 - Math.pow(1 - k, 3);
+    el.textContent = format(from + (to - from) * e);
+    if (k < 1) el._tween = requestAnimationFrame(step);
+  };
+  el._tween = requestAnimationFrame(step);
+}
+
+// Price-over-time chart: one stepped line per outcome, with 1D / 1W / All range buttons next to it.
+// `lines` limits how many outcomes are drawn (a live Yes/No market only needs its Yes line).
+// `colors` overrides the outcome palette (Yes/No markets use the Yes and No colours).
+function drawChart(el, history, allLabels, endTime, lines, tz, colors) {
   if (!el || !history.length) return;
   const labels = allLabels.slice(0, lines || allLabels.length);
-  const W = 640, H = 220, L = 36, R = 8, T = 10, B = 24;
-  const pts = history.map(h => ({ t: parseTime(h.t), p: h.p }));
+  const color = i => (colors && colors[i]) || `var(--c${i})`;
+  const L = 38, R = 10, T = 12, B = 26;
+  let W = 640, H = 230;  // set from the element's width on each render so text stays 11px on phones
+  const all = history.map(h => ({ t: parseTime(h.t), p: h.p }));
   const end = endTime ? parseTime(endTime) : wallNow(tz || 'America/New_York');
-  pts.push({ t: Math.max(end, pts[pts.length - 1].t), p: pts[pts.length - 1].p });
-  const t0 = pts[0].t, t1 = Math.max(pts[pts.length - 1].t, t0 + 1);
-  const x = t => L + (t - t0) / (t1 - t0) * (W - L - R);
-  const y = p => T + (1 - p) * (H - T - B);
-
-  const root = svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Price history chart' });
-  for (const g of [0, 0.25, 0.5, 0.75, 1]) {
-    svg('line', { x1: L, x2: W - R, y1: y(g), y2: y(g), class: 'grid' }, root);
-    svg('text', { x: L - 6, y: y(g) + 4, class: 'axis', 'text-anchor': 'end' }, root).textContent = `${g * 100}%`;
-  }
-  // Time axis: clock times when the chart spans under a day, dates otherwise; the last tick says "now" while live.
-  const shortSpan = t1 - t0 < 86400000;
-  const tickFmt = new Intl.DateTimeFormat('en-US', shortSpan
-    ? { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' } : { month: 'short', day: 'numeric', timeZone: 'UTC' });
-  const TICKS = 4;
-  let prevLabel = null;
-  for (let i = 0; i < TICKS; i++) {
-    const t = t0 + (t1 - t0) * i / (TICKS - 1);
-    const last = i === TICKS - 1;
-    const label = last && !endTime ? 'now' : tickFmt.format(t);
-    if (!last && label === prevLabel) continue;  // a short span would repeat the same label
-    if (last && label === prevLabel) { root.lastChild.remove(); }  // keep the end label, drop the duplicate before it
-    prevLabel = label;
-    svg('text', { x: x(t), y: H - 6, class: 'axis', 'text-anchor': i === 0 ? 'start' : last ? 'end' : 'middle' }, root).textContent = label;
-  }
-
-  labels.forEach((_, i) => {
-    let d = '';
-    pts.forEach((pt, k) => {
-      const px = x(pt.t).toFixed(1), py = y(pt.p[i]).toFixed(1);
-      d += k === 0 ? `M${px},${py}` : `H${px}V${py}`;
-    });
-    svg('path', { d, class: 'line', style: `stroke: var(--c${i})` }, root);
-    const last = pts[pts.length - 1];
-    svg('circle', { cx: x(last.t), cy: y(last.p[i]), r: 3.5, style: `fill: var(--c${i})` }, root);
-  });
-  el.appendChild(root);
-
-  // Hover/touch readout: a guide line plus each outcome's price at that moment.
-  const guide = svg('line', { y1: T, y2: H - B, class: 'guide', visibility: 'hidden' }, root);
-  const tip = document.createElement('div');
-  tip.className = 'chart-tip';
-  tip.hidden = true;
-  el.style.position = 'relative';
-  el.appendChild(tip);
-  const priceAt = t => {
+  all.push({ t: Math.max(end, all[all.length - 1].t), p: all[all.length - 1].p });
+  const priceAt = (pts, t) => {
     let cur = pts[0];
     for (const pt of pts) { if (pt.t <= t) cur = pt; else break; }
     return cur.p;
   };
-  const hide = () => { guide.setAttribute('visibility', 'hidden'); tip.hidden = true; };
-  root.addEventListener('pointermove', e => {
-    const box = root.getBoundingClientRect();
-    const vx = (e.clientX - box.left) / box.width * W;
-    if (vx < L || vx > W - R) return hide();
-    const t = t0 + (vx - L) / (W - L - R) * (t1 - t0);
-    const p = priceAt(t);
-    guide.setAttribute('x1', vx); guide.setAttribute('x2', vx); guide.setAttribute('visibility', 'visible');
-    tip.hidden = false;
-    tip.innerHTML = `<div class="muted small">${new Date(t).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'UTC' })}</div>` +
-      labels.map((name, i) => `<div><i style="background: var(--c${i})"></i>${name.replace(/</g, '&lt;')} <b>${(p[i] * 100).toFixed(1)}%</b></div>`).join('');
-    const left = vx / W * box.width;
-    tip.style.left = `${Math.min(Math.max(left + 12, 0), box.width - tip.offsetWidth)}px`;
+  const span = all[all.length - 1].t - all[0].t;
+  const buttons = [...(el.parentElement.querySelectorAll('[data-range]') || [])];
+  // a range at least as long as the whole history would look just like "All"
+  buttons.forEach(b => { const r = +b.dataset.range; if (r && r >= span) b.hidden = true; });
+  if (buttons.filter(b => !b.hidden).length < 2 && buttons[0]) buttons[0].parentElement.hidden = true;
+  let firstDraw = true;
+
+  let current = 0;
+  function render(range) {
+    current = range;
+    W = Math.max(300, Math.round(el.clientWidth || 640));
+    H = W < 500 ? 200 : 240;
+    el.replaceChildren();
+    let pts = all;
+    if (range && end - range > all[0].t) {
+      const start = end - range;
+      pts = [{ t: start, p: priceAt(all, start) }, ...all.filter(x => x.t > start)];
+    }
+    const t0 = pts[0].t, t1 = Math.max(pts[pts.length - 1].t, t0 + 1);
+    const x = t => L + (t - t0) / (t1 - t0) * (W - L - R);
+    const y = p => T + (1 - p) * (H - T - B);
+
+    const root = svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Price history chart' });
+    for (const g of [0, 0.25, 0.5, 0.75, 1]) {
+      svg('line', { x1: L, x2: W - R, y1: y(g), y2: y(g), class: 'gridline' }, root);
+      svg('text', { x: L - 8, y: y(g) + 4, class: 'axis', 'text-anchor': 'end' }, root).textContent = `${g * 100}%`;
+    }
+    // Time axis: clock times when the chart spans under a day, dates otherwise; the last tick says "now" while live.
+    const shortSpan = t1 - t0 < 86400000;
+    const tickFmt = new Intl.DateTimeFormat('en-US', shortSpan
+      ? { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' } : { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    const TICKS = 4;
+    let prevLabel = null;
+    for (let i = 0; i < TICKS; i++) {
+      const t = t0 + (t1 - t0) * i / (TICKS - 1);
+      const last = i === TICKS - 1;
+      const label = last && !endTime ? 'now' : tickFmt.format(t);
+      if (!last && label === prevLabel) continue;  // a short span would repeat the same label
+      if (last && label === prevLabel) { root.lastChild.remove(); }  // keep the end label, drop the duplicate before it
+      prevLabel = label;
+      svg('text', { x: x(t), y: H - 6, class: 'axis', 'text-anchor': i === 0 ? 'start' : last ? 'end' : 'middle' }, root).textContent = label;
+    }
+
+    const animate = firstDraw && !reducedMotion();
+    labels.forEach((_, i) => {
+      let d = '';
+      pts.forEach((pt, k) => {
+        const px = x(pt.t).toFixed(1), py = y(pt.p[i]).toFixed(1);
+        d += k === 0 ? `M${px},${py}` : `H${px}V${py}`;
+      });
+      if (labels.length === 1) {  // a single line gets a soft gradient under it
+        const id = `cg${Math.random().toString(36).slice(2, 8)}`;
+        const defs = svg('defs', {}, root);
+        const grad = svg('linearGradient', { id, x1: 0, x2: 0, y1: 0, y2: 1 }, defs);
+        svg('stop', { offset: '0%', style: `stop-color: ${color(i)}; stop-opacity: .22` }, grad);
+        svg('stop', { offset: '100%', style: `stop-color: ${color(i)}; stop-opacity: 0` }, grad);
+        svg('path', { d: `${d}V${y(0)}H${x(pts[0].t)}Z`, fill: `url(#${id})`, class: animate ? 'area' : '' }, root);
+      }
+      svg('path', { d, class: `line${animate ? ' draw' : ''}`, pathLength: 1, style: `stroke: ${color(i)}` }, root);
+      const last = pts[pts.length - 1];
+      if (!endTime) svg('circle', { cx: x(last.t), cy: y(last.p[i]), r: 4, class: 'end-pulse', style: `fill: ${color(i)}` }, root);
+      svg('circle', { cx: x(last.t), cy: y(last.p[i]), r: 4, class: 'end-dot', style: `fill: ${color(i)}` }, root);
+    });
+    firstDraw = false;
+    el.appendChild(root);
+
+    // Hover/touch readout: a guide line, a dot on each line, and each outcome's price at that moment.
+    const guide = svg('line', { y1: T, y2: H - B, class: 'guide', visibility: 'hidden' }, root);
+    const dots = labels.map((_, i) => svg('circle', { r: 4.5, class: 'hover-dot', visibility: 'hidden', style: `fill: ${color(i)}` }, root));
+    const tip = document.createElement('div');
+    tip.className = 'chart-tip';
+    tip.hidden = true;
+    el.appendChild(tip);
+    const hide = () => { guide.setAttribute('visibility', 'hidden'); dots.forEach(d => d.setAttribute('visibility', 'hidden')); tip.hidden = true; };
+    root.addEventListener('pointermove', e => {
+      const box = root.getBoundingClientRect();
+      const vx = (e.clientX - box.left) / box.width * W;
+      if (vx < L || vx > W - R) return hide();
+      const t = t0 + (vx - L) / (W - L - R) * (t1 - t0);
+      const p = priceAt(pts, t);
+      guide.setAttribute('x1', vx); guide.setAttribute('x2', vx); guide.setAttribute('visibility', 'visible');
+      dots.forEach((d, i) => { d.setAttribute('cx', vx); d.setAttribute('cy', y(p[i])); d.setAttribute('visibility', 'visible'); });
+      tip.hidden = false;
+      tip.innerHTML = `<div class="muted small">${new Date(t).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'UTC' })}</div>` +
+        labels.map((name, i) => `<div><i style="background: ${color(i)}"></i>${escapeHtml(name)} <b>${(p[i] * 100).toFixed(1)}%</b></div>`).join('');
+      const left = vx / W * box.width;
+      const flip = left + 16 + tip.offsetWidth > box.width;
+      tip.style.left = `${Math.max(0, flip ? left - 16 - tip.offsetWidth : left + 16)}px`;
+    });
+    root.addEventListener('pointerleave', hide);
+  }
+
+  buttons.forEach(b => b.addEventListener('click', () => {
+    buttons.forEach(o => o.classList.toggle('active', o === b));
+    render(+b.dataset.range);
+  }));
+  render(0);
+  let lastW = el.clientWidth, resizeTimer;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { if (Math.abs(el.clientWidth - lastW) > 8) { lastW = el.clientWidth; render(current); } }, 150);
   });
-  root.addEventListener('pointerleave', hide);
 }
 
 // Buy/sell panel with a live quote from /api/quote.
@@ -100,6 +162,7 @@ function setupTradeForm(form) {
   const actionInput = form.querySelector('input[name=action]');
   const valueInput = form.querySelector('#value');
   const valueLabel = form.querySelector('#value-label');
+  const prefix = form.querySelector('#value-prefix');
   const preview = form.querySelector('#preview');
   const submit = form.querySelector('#submit-btn');
   const maxBtn = form.querySelector('#max-btn');
@@ -110,27 +173,34 @@ function setupTradeForm(form) {
   const snipeRate = parseFloat(form.dataset.snipeRate) || 0; // buys pay at least this x T x shares x P^2
   // always shown in the summary: Ⓜ0.00 until the last 2 hours before betting closes
   const lateRow = (r, late, sign = '') => late
-    ? row(`Late fee (×${r.late_multiplier}${r.late_fee_to ? `, to ${r.late_fee_to}` : ''})`, `${sign}${money(late)}`, 'down')
+    ? row(`Late fee (×${r.late_multiplier}${r.late_fee_to ? `, to ${escapeHtml(r.late_fee_to)}` : ''})`, `${sign}${money(late)}`, 'down')
     : row('Late fee', money(0));
   const minOut = form.querySelector('#min-out');
   let timer = null, ctrl = null, quoted = null;  // quoted = { key } of the quote the preview shows
+  const shown = {};  // headline numbers currently on screen, so the next quote can count from them
 
   const selected = () => form.querySelector('input[name=outcome_id]:checked');
   const outcomeName = () => selected().dataset.label;
   const held = () => parseFloat(selected().dataset.held) || 0;
   const paid = () => parseFloat(selected().dataset.paid) || 0;  // what you spent on the shares you still hold
   const row = (label, value, cls = '') => `<div class="${cls}"><span>${label}</span><b>${value}</b></div>`;
+  // a headline figure that counts up from the previous quote's value
+  const big = (key, n, sub = '') => `<span class="win-val"><b data-tween="${key}" data-v="${n}">${money(n)}</b>${sub}</span>`;
   const money = n => `Ⓜ${fmt(n)}`;
   const signed = n => `${n >= 0 ? '+' : '−'}${money(Math.abs(n))}`;
   const defaultButton = () => `${isBuy() ? 'Buy' : 'Sell'} “${outcomeName()}”`;
   const isBuy = () => actionInput.value === 'buy';
 
   function refresh() {
-    valueLabel.textContent = isBuy() ? 'Amount to spend (Ⓜ)' : `Shares to sell (you own ${fmt(held())})`;
+    valueLabel.textContent = isBuy() ? 'Amount to spend' : `Shares to sell (you own ${fmt(held())})`;
+    prefix.hidden = !isBuy();
+    valueInput.placeholder = isBuy() ? '0' : '0 shares';
     quick.hidden = !isBuy();
     submit.textContent = defaultButton();
-    submit.classList.toggle('btn-buy', isBuy());
-    submit.classList.toggle('btn-sell', !isBuy());
+    // the button takes the colour of what you're doing: buying Yes (or any outcome) is green, buying No or selling is crimson
+    const buyingNo = isBuy() && form.querySelector('.outcome-pick.binary') && selected() === form.querySelectorAll('input[name=outcome_id]')[1];
+    submit.classList.toggle('btn-buy', isBuy() && !buyingNo);
+    submit.classList.toggle('btn-sell', !isBuy() || !!buyingNo);
     requestQuote();
   }
 
@@ -138,7 +208,16 @@ function setupTradeForm(form) {
     preview.innerHTML = html;
     submit.disabled = !canSubmit;
     submit.textContent = buttonText || defaultButton();
+    preview.querySelectorAll('[data-tween]').forEach(el => {
+      const key = el.dataset.tween, to = parseFloat(el.dataset.v);
+      if (key in shown && shown[key] !== to) {
+        tween(el, shown[key], to, 320, money);
+        el.classList.remove('flash-num'); void el.offsetWidth; el.classList.add('flash-num');
+      }
+      shown[key] = to;
+    });
   }
+  const clearShown = () => { for (const k in shown) delete shown[k]; };
 
   // A quote is only valid for the exact outcome|action|amount it was fetched for.
   const keyFor = v => `${selected().value}|${actionInput.value}|${v}`;
@@ -161,19 +240,19 @@ function setupTradeForm(form) {
     preview.classList.remove('stale');
     const v = parseFloat(valueInput.value);
     if (!isBuy() && held() <= 0) {
-      quoted = null;
-      setPreview(`<span class="muted">You don't own any “${outcomeName()}” shares to sell.</span>`, false);
+      quoted = null; clearShown();
+      setPreview(`<span class="muted">You don't own any “${escapeHtml(outcomeName())}” shares to sell.</span>`, false);
       return;
     }
     if (!(v > 0)) {
-      quoted = null;
+      quoted = null; clearShown();
       setPreview(`<span class="muted">${isBuy() ? 'Enter an amount to see your payout.' : 'Enter shares to see what you get back.'}</span>`, false);
       return;
     }
     const key = keyFor(v);
     // Same outcome and action, new amount: keep the old numbers on screen but dim them until the new quote lands.
     const sameKind = quoted && quoted.key.split('|').slice(0, 2).join('|') === key.split('|').slice(0, 2).join('|');
-    if (!sameKind) { preview.innerHTML = '<span class="muted">Getting a quote…</span>'; quoted = null; }
+    if (!sameKind) { preview.innerHTML = '<span class="muted">Getting a quote…</span>'; quoted = null; clearShown(); }
     preview.classList.toggle('stale', !!sameKind);
     submit.disabled = true;
     timer = setTimeout(async () => {
@@ -183,7 +262,7 @@ function setupTradeForm(form) {
         const res = await (await fetch(`${form.dataset.quote}?${params}`, { signal: ctrl.signal })).json();
         if (keyFor(parseFloat(valueInput.value)) !== key) return;  // the input moved on while we waited
         preview.classList.remove('stale');
-        if (!res.ok) { quoted = null; setPreview(`<span class="down">${res.error || 'Can\'t quote that trade.'}</span>`, false); return; }
+        if (!res.ok) { quoted = null; clearShown(); setPreview(`<span class="down">${escapeHtml(res.error || 'Can\'t quote that trade.')}</span>`, false); return; }
         quoted = { key };
         minOut.value = floor6((isBuy() ? res.shares : res.coins) * 0.98);  // refuse if the price moves >2% against you
         const newPct = `${(res.new_price * 100).toFixed(1)}%`;
@@ -192,9 +271,10 @@ function setupTradeForm(form) {
           const fee = res.entry_fee || 0, late = res.late_fee || 0;
           const total = res.coins + fee + late;
           setPreview(
-            row('You pay', money(total), 'total down') +
+            `<div class="win"><span>To win</span>${big('win', res.shares, `<small class="${res.shares >= total ? 'up' : 'down'}">${signed(res.shares - total)} profit</small>`)}</div>` +
+            `<div class="total"><span>You pay</span>${big('total', total)}</div>` +
             row('Bet', money(res.coins)) +
-            (fee ? row(`Entry fee (first bet${res.creator ? `, to ${res.creator}` : ''})`, money(fee)) : '') +
+            (fee ? row(`Entry fee (first bet${res.creator ? `, to ${escapeHtml(res.creator)}` : ''})`, money(fee)) : '') +
             lateRow(res, late) +
             row('You get', `${fmt(res.shares)} shares`) +
             row('Avg price per share', money(res.avg_price)) +
@@ -209,7 +289,7 @@ function setupTradeForm(form) {
           const costOfThese = held() > 0 ? paid() * Math.min(res.shares / held(), 1) : 0;
           const late = res.late_fee || 0, got = res.coins - late;
           setPreview(
-            row('You receive', money(got), 'total up') +
+            `<div class="win"><span>You receive</span>${big('got', got, `<small class="${got >= costOfThese ? 'up' : 'down'}">${signed(got - costOfThese)} vs. what you paid</small>`)}</div>` +
             row('Sale value', money(res.coins)) +
             lateRow(res, late, '−') +
             row('You sell', `${fmt(res.shares)} of your ${fmt(held())} shares`) +
@@ -222,7 +302,7 @@ function setupTradeForm(form) {
         }
       } catch (err) {
         if (err.name === 'AbortError') return;
-        quoted = null;
+        quoted = null; clearShown();
         preview.classList.remove('stale');
         setPreview('<span class="muted">Quote unavailable. Try again.</span>', false);
       }
@@ -230,6 +310,7 @@ function setupTradeForm(form) {
   }
 
   form.querySelectorAll('.seg button').forEach(btn => btn.addEventListener('click', () => {
+    if (btn.dataset.action === actionInput.value) return;
     form.querySelectorAll('.seg button').forEach(b => {
       b.classList.toggle('active', b === btn);
       b.setAttribute('aria-pressed', b === btn ? 'true' : 'false');
@@ -250,6 +331,29 @@ function setupTradeForm(form) {
     requestQuote();
   }));
   refresh();
+}
+
+// Outcome buttons on the market page (Yes/No, "Buy 42¢", the phone bet bar): pick that outcome in the order
+// ticket, switch it to Buy and bring the ticket into view.
+function setupPickers() {
+  const form = document.getElementById('trade-form'), ticket = document.getElementById('trade');
+  document.querySelectorAll('[data-pick]').forEach(btn => btn.addEventListener('click', e => {
+    e.preventDefault();
+    if (form) {
+      const buy = form.querySelector('.seg [data-action=buy]');
+      if (form.querySelector('input[name=action]').value !== 'buy') buy.click();
+      const radio = form.querySelector(`input[name=outcome_id][value="${btn.dataset.pick}"]`);
+      if (radio && !radio.checked) { radio.checked = true; radio.dispatchEvent(new Event('change', { bubbles: true })); }
+    }
+    if (!ticket) return;
+    const r = ticket.getBoundingClientRect();
+    if (r.top < 60 || r.top > window.innerHeight * 0.6) {
+      ticket.scrollIntoView({ behavior: reducedMotion() ? 'auto' : 'smooth', block: 'start' });
+    }
+    ticket.classList.remove('flash-target'); void ticket.offsetWidth; ticket.classList.add('flash-target');
+    const value = document.getElementById('value');
+    if (value && window.matchMedia('(hover: hover)').matches) setTimeout(() => value.focus({ preventScroll: true }), 300);
+  }));
 }
 
 // Market form (propose / review / admin create): Yes/No vs multiple-choice toggle and a live preview card.
@@ -311,7 +415,9 @@ function setupMarketForm(form) {
 
     preview.replaceChildren();
     const card = el('div', 'preview-market');
-    card.append(el('h3', '', field('question').trim() || 'Your question will show up here'));
+    const meta = el('div', 'card-meta');
+    meta.append(el('span', 'tag', field('category') || 'Category'), el('span', 'closes', 'Preview'));
+    card.append(meta, el('h3', '', field('question').trim() || 'Your question will show up here'));
     if (yesno || ou) {
       const row = el('div', 'chance-row');
       const chance = el('div', 'chance');
@@ -329,6 +435,7 @@ function setupMarketForm(form) {
         const bar = el('span', 'bar'), fill = el('span');
         fill.style.width = `${100 / Math.max(labels.length, 1)}%`;
         fill.style.background = `var(--c${i})`;
+        fill.style.animation = 'none';
         bar.append(fill);
         li.append(el('span', 'odds-label', name), bar, el('span', 'odds-pct', `${Math.round(100 / labels.length)}%`));
         list.append(li);
@@ -375,7 +482,10 @@ document.querySelectorAll('form[data-market-form]').forEach(setupMarketForm);
     pending = { form, submitter: e.submitter };
     dlg.querySelector('[data-title]').textContent = src.dataset.confirmTitle || 'Are you sure?';
     dlg.querySelector('[data-message]').textContent = message;
-    dlg.querySelector('[data-ok]').textContent = src.dataset.confirmLabel || 'Confirm';
+    const ok = dlg.querySelector('[data-ok]');
+    ok.textContent = src.dataset.confirmLabel || 'Confirm';
+    // destructive actions get a crimson confirm button
+    ok.classList.toggle('btn-brand', /delete|cancel|block|ban|reject|reset/i.test(ok.textContent));
     dlg.showModal();
   });
   if (dlg) dlg.addEventListener('close', () => {
@@ -387,14 +497,14 @@ document.querySelectorAll('form[data-market-form]').forEach(setupMarketForm);
 })();
 
 
-// Bottom "Bet" bar on phones: shows the current chance and scrolls to the trade panel; hidden while that panel is on screen.
+// Bottom "Bet" bar on phones: shows the current chance and jumps to the ticket; hidden while the ticket is on screen.
 function setupBetBar() {
   const bar = document.getElementById('bet-bar'), panel = document.getElementById('trade');
   if (!bar || !panel || !('IntersectionObserver' in window)) return;
   new IntersectionObserver(([entry]) => { bar.hidden = entry.isIntersecting; }, { threshold: 0.15 }).observe(panel);
 }
 
-// Phone menu sheet.
+// Phone "More" sheet.
 (function setupMenu() {
   const btn = document.getElementById('menu-btn'), sheet = document.getElementById('menu-sheet');
   if (!btn || !sheet || !sheet.showModal) return;
@@ -402,6 +512,14 @@ function setupBetBar() {
   sheet.addEventListener('click', e => {
     if (e.target === sheet || e.target.closest('[data-close-sheet]') || e.target.closest('a')) sheet.close();
   });
+})();
+
+// Desktop account menu: close on outside click or Escape.
+(function setupUserMenu() {
+  const menu = document.querySelector('.user-menu');
+  if (!menu) return;
+  document.addEventListener('click', e => { if (menu.open && !menu.contains(e.target)) menu.open = false; });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && menu.open) { menu.open = false; menu.querySelector('summary').focus(); } });
 })();
 
 
@@ -412,22 +530,27 @@ function setupBetBar() {
   if (!bar || !grid) return;
   const cards = [...grid.querySelectorAll('.market-card')];
   const empty = document.getElementById('empty-state');
+  const extras = document.querySelectorAll('[data-default-only]');  // spotlight and movers: default view only
   const tabs = [...bar.querySelectorAll('[data-status]')], chips = [...bar.querySelectorAll('[data-cat]')];
   const params = new URLSearchParams(location.search);
   let status = tabs.some(t => t.dataset.status === params.get('status')) ? params.get('status') : 'open';
   let cat = chips.some(c => c.dataset.cat === params.get('cat')) ? params.get('cat') : '';
   const matches = (state, s) => s === 'all' || state === s || (s === 'closed' && ['closed', 'proposed', 'disputed'].includes(state));
 
-  function apply() {
+  function apply(animate) {
     let shown = 0;
     for (const card of cards) {
       const ok = matches(card.dataset.state, status) && (!cat || card.dataset.cat === cat);
       card.hidden = !ok;
-      if (ok) shown++;
+      if (ok) {
+        if (animate) { card.style.setProperty('--i', shown); card.classList.remove('rise'); void card.offsetWidth; card.classList.add('rise'); }
+        shown++;
+      }
     }
     tabs.forEach(t => { const on = t.dataset.status === status; t.classList.toggle('active', on); t.setAttribute('aria-pressed', on); });
     chips.forEach(c => { const on = c.dataset.cat === cat; c.classList.toggle('active', on); c.setAttribute('aria-pressed', on); });
     const filtered = status !== 'open' || !!cat;
+    extras.forEach(x => { x.hidden = filtered; });
     empty.hidden = shown > 0;
     document.getElementById('empty-title').innerHTML = `<strong>${filtered ? 'No markets match these filters.' : 'No open markets right now.'}</strong>`;
     document.getElementById('empty-hint').textContent = filtered ? 'Try another topic or status.' : 'Check back soon, or propose one yourself.';
@@ -445,7 +568,251 @@ function setupBetBar() {
     if (!tab && !chip || e.metaKey || e.ctrlKey || e.shiftKey) return;
     e.preventDefault();
     if (tab) status = tab.dataset.status; else cat = chip.dataset.cat;
-    apply();
+    if (chip) chip.scrollIntoView({ behavior: reducedMotion() ? 'auto' : 'smooth', block: 'nearest', inline: 'center' });
+    apply(true);
   });
-  document.getElementById('clear-filters').addEventListener('click', e => { e.preventDefault(); status = 'open'; cat = ''; apply(); });
+  document.getElementById('clear-filters').addEventListener('click', e => { e.preventDefault(); status = 'open'; cat = ''; apply(true); });
+})();
+
+
+// Featured markets carousel: dots follow the scroll position, and it advances on its own until touched.
+(function setupSpotlight() {
+  const track = document.getElementById('spot-track'), dots = document.getElementById('spot-dots');
+  if (!track || !dots) return;
+  const buttons = [...dots.querySelectorAll('button')];
+  const index = () => Math.round(track.scrollLeft / track.clientWidth);
+  const go = i => track.scrollTo({ left: i * track.clientWidth, behavior: reducedMotion() ? 'auto' : 'smooth' });
+  track.addEventListener('scroll', () => buttons.forEach((b, i) => b.classList.toggle('active', i === index())), { passive: true });
+  buttons.forEach((b, i) => b.addEventListener('click', () => { stop(); go(i); }));
+  let timer = reducedMotion() ? null : setInterval(() => {
+    if (document.hidden || track.matches(':hover')) return;
+    go((index() + 1) % buttons.length);
+  }, 7000);
+  const stop = () => { clearInterval(timer); timer = null; };
+  track.addEventListener('pointerdown', stop, { once: true });
+})();
+
+
+// Sliding thumb for segmented controls (Buy/Sell, market type) and the sliding underline in the top nav.
+(function setupSliders() {
+  document.querySelectorAll('.seg').forEach(seg => {
+    const thumb = document.createElement('span');
+    thumb.className = 'seg-thumb';
+    thumb.setAttribute('aria-hidden', 'true');
+    seg.prepend(thumb);
+    seg.classList.add('has-thumb');
+    const active = () => seg.querySelector(':scope > button.active') ||
+      (seg.querySelector('input:checked') || { closest: () => null }).closest('label');
+    let first = true;
+    const place = () => {
+      const a = active();
+      if (!a || !a.offsetWidth) return;
+      if (first) thumb.style.transition = 'none';
+      seg.style.setProperty('--seg-x', `${a.offsetLeft}px`);
+      seg.style.setProperty('--seg-w', `${a.offsetWidth}px`);
+      if (first) { void thumb.offsetWidth; thumb.style.transition = ''; first = false; }
+    };
+    seg.addEventListener('click', () => requestAnimationFrame(place));
+    seg.addEventListener('change', () => requestAnimationFrame(place));
+    if ('ResizeObserver' in window) new ResizeObserver(place).observe(seg);
+    place();
+  });
+
+  const nav = document.querySelector('.nav');
+  const ink = nav && nav.querySelector('.nav-ink');
+  if (!ink) return;
+  const links = [...nav.querySelectorAll('a')];
+  const current = links.find(a => a.classList.contains('active'));
+  const moveTo = a => {
+    if (!a) { nav.style.setProperty('--ink-o', 0); return; }
+    nav.style.setProperty('--ink-x', `${a.offsetLeft + 8}px`);
+    nav.style.setProperty('--ink-w', `${a.offsetWidth - 16}px`);
+    nav.style.setProperty('--ink-o', 1);
+  };
+  ink.style.transition = 'none';
+  moveTo(current);
+  void ink.offsetWidth;
+  ink.style.transition = '';
+  links.forEach(a => a.addEventListener('mouseenter', () => moveTo(a)));
+  nav.addEventListener('mouseleave', () => moveTo(current));
+  window.addEventListener('resize', () => moveTo(current));
+})();
+
+
+// Big percentages count up from zero when the page loads.
+(function setupCountUps() {
+  if (reducedMotion()) return;
+  document.querySelectorAll('[data-count]').forEach((el, k) => {
+    const m = /^(\d+)%$/.exec(el.textContent.trim());
+    if (!m) return;
+    const to = +m[1];
+    el.textContent = '0%';
+    setTimeout(() => tween(el, 0, to, 900, n => `${Math.round(n)}%`), 120 + Math.min(k, 10) * 40);
+  });
+})();
+
+
+// Toasts: short plain confirmations go away on their own; errors, receipts and anything with numbers stay until closed.
+(function setupToasts() {
+  const box = document.getElementById('toasts');
+  if (!box) return;
+  const dismiss = t => {
+    if (t.classList.contains('leaving')) return;
+    t.classList.add('leaving');
+    const done = () => { t.remove(); if (!box.querySelector('.toast')) box.remove(); };
+    t.addEventListener('animationend', done, { once: true });
+    setTimeout(done, 600);
+  };
+  box.querySelectorAll('.toast').forEach((t, i) => {
+    const x = t.querySelector('.toast-x');
+    x.hidden = false;
+    x.addEventListener('click', () => dismiss(t));
+    t.style.animationDelay = `${i * 90}ms`;
+    const text = t.querySelector('p').textContent.trim();
+    if (t.dataset.cat === 'success' && text.length < 80 && !/[0-9Ⓜ]/.test(text)) {
+      const bar = document.createElement('span');
+      bar.className = 'toast-timer';
+      t.append(bar);
+      bar.addEventListener('animationend', () => dismiss(t));
+    }
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { const t = box.querySelector('.toast:not(.leaving)'); if (t && !document.querySelector('dialog[open]')) dismiss(t); }
+  });
+})();
+
+
+// After a trade or the daily bonus the server leaves a note on <body>: tick the balance over from the old amount
+// and play a short burst — confetti for a buy, coins flying into the balance for a sale or the bonus.
+(function celebrate() {
+  const raw = document.body.dataset.celebrate;
+  if (!raw) return;
+  let c;
+  try { c = JSON.parse(raw); } catch (e) { return; }
+  const bal = document.querySelector('.balance');
+  const valueEl = bal && bal.querySelector('[data-balance-value]');
+  const to = bal ? parseFloat(bal.dataset.balance) : NaN;
+  const tick = () => {
+    if (!valueEl || !isFinite(c.from) || !isFinite(to) || c.from === to) return;
+    tween(valueEl, c.from, to, 900, fmt);
+    bal.classList.remove('pulse-up', 'pulse-down'); void bal.offsetWidth;
+    bal.classList.add(to > c.from ? 'pulse-up' : 'pulse-down');
+  };
+  if (valueEl && isFinite(c.from)) valueEl.textContent = fmt(c.from);
+  if (reducedMotion()) { tick(); return; }
+
+  const css = getComputedStyle(document.documentElement);
+  const v = name => css.getPropertyValue(name).trim();
+  const balRect = () => (bal && bal.offsetParent ? bal.getBoundingClientRect() : null);
+
+  if (c.kind === 'buy') {
+    const btn = document.getElementById('submit-btn');
+    const r = btn && btn.getBoundingClientRect();
+    const origin = r && r.top > 0 && r.bottom < window.innerHeight
+      ? { x: r.left + r.width / 2, y: r.top } : { x: window.innerWidth / 2, y: window.innerHeight * 0.35 };
+    confetti(origin, [v(c.color || '--yes') || v('--yes'), v('--brand'), v('--wpi-gray'), v('--gold'), v('--ink')]);
+    setTimeout(tick, 300);
+  } else {
+    const target = balRect();
+    if (!target) { tick(); return; }
+    let from;
+    const toast = document.querySelector('.toast');
+    if (c.kind === 'bonus') from = { x: target.left + target.width / 2 - 40, y: target.bottom + 150, spread: 140 };
+    else if (toast) { const t = toast.getBoundingClientRect(); from = { x: t.left + 30, y: t.top + t.height / 2, spread: 60 }; }
+    else from = { x: window.innerWidth / 2, y: window.innerHeight / 2, spread: 80 };
+    coins(from, target, c.kind === 'bonus' ? 12 : 8, tick);
+  }
+
+  function confetti(origin, colors) {
+    const canvas = document.createElement('canvas');
+    canvas.className = 'fx-canvas';
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = innerWidth * dpr; canvas.height = innerHeight * dpr;
+    document.body.append(canvas);
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    const parts = Array.from({ length: 110 }, () => {
+      const a = -Math.PI / 2 + (Math.random() - 0.5) * 1.9, s = 7 + Math.random() * 9;
+      return { x: origin.x, y: origin.y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, r: Math.random() * Math.PI,
+               vr: (Math.random() - 0.5) * 0.35, w: 5 + Math.random() * 6, h: 3 + Math.random() * 5,
+               c: colors[Math.floor(Math.random() * colors.length)] || '#ac2b37', round: Math.random() < 0.25 };
+    });
+    const start = performance.now();
+    (function frame(now) {
+      const t = now - start;
+      ctx.clearRect(0, 0, innerWidth, innerHeight);
+      for (const p of parts) {
+        p.vy += 0.32; p.vx *= 0.985; p.vy *= 0.985; p.x += p.vx; p.y += p.vy; p.r += p.vr;
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, 1 - Math.max(0, t - 1100) / 700);
+        ctx.translate(p.x, p.y); ctx.rotate(p.r); ctx.fillStyle = p.c;
+        if (p.round) { ctx.beginPath(); ctx.arc(0, 0, p.h / 1.4, 0, Math.PI * 2); ctx.fill(); }
+        else ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h * Math.abs(Math.cos(p.r * 2)) + 1);
+        ctx.restore();
+      }
+      if (t < 1800) requestAnimationFrame(frame); else canvas.remove();
+    })(start);
+  }
+
+  function coins(from, target, n, done) {
+    const tx = target.left + target.width / 2 - 11, ty = target.top + target.height / 2 - 11;
+    let left = n;
+    for (let i = 0; i < n; i++) {
+      const coin = document.createElement('span');
+      coin.className = 'fx-coin';
+      coin.textContent = 'Ⓜ';
+      document.body.append(coin);
+      const sx = from.x + (Math.random() - 0.5) * from.spread - 11, sy = from.y + (Math.random() - 0.5) * 30 - 11;
+      // arc above the straight path, but never off the top of the screen
+      const mx = (sx + tx) / 2 + (Math.random() - 0.5) * 120, my = Math.max(14, (sy + ty) / 2 - 50 - Math.random() * 50);
+      coin.animate([
+        { transform: `translate(${sx}px, ${sy}px) scale(.6)`, opacity: 0 },
+        { transform: `translate(${mx}px, ${my}px) scale(1.1)`, opacity: 1, offset: 0.45 },
+        { transform: `translate(${tx}px, ${ty}px) scale(.5)`, opacity: 0.9 },
+      ], { duration: 750 + Math.random() * 250, delay: i * 60, easing: 'cubic-bezier(.5, 0, .4, 1)', fill: 'both' })
+        .finished.then(() => { coin.remove(); if (--left === 0) done(); });
+    }
+    setTimeout(() => { if (bal) { bal.style.transform = 'scale(1.06)'; setTimeout(() => { bal.style.transform = ''; }, 200); } }, 600);
+  }
+})();
+
+
+// Installable app: register the service worker (offline page + cached static files, see templates/sw.js) and offer
+// "Install app" where the browser supports it. Chrome/Edge/Android fire beforeinstallprompt; iPhone Safari never
+// does, so there the button explains Share → Add to Home Screen instead. Hidden once installed.
+(function setupInstall() {
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
+    });
+  }
+  const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  if (standalone) { document.documentElement.classList.add('standalone'); return; }
+  const buttons = [...document.querySelectorAll('[data-install]')];
+  if (!buttons.length) return;
+  const show = on => buttons.forEach(b => { b.hidden = !on; });
+  const ua = navigator.userAgent;
+  const iosSafari = /iPhone|iPad|iPod/.test(ua) && /Safari/.test(ua) && !/CriOS|FxiOS|EdgiOS/.test(ua);
+  let deferred = null;
+  window.addEventListener('beforeinstallprompt', e => {
+    e.preventDefault();  // keep Chrome's mini-infobar away; our own buttons show the prompt instead
+    deferred = e;
+    show(true);
+  });
+  window.addEventListener('appinstalled', () => { deferred = null; show(false); });
+  if (iosSafari) show(true);
+  buttons.forEach(b => b.addEventListener('click', async e => {
+    e.preventDefault();
+    const sheet = document.getElementById('menu-sheet');
+    if (sheet && sheet.open) sheet.close();
+    if (deferred) {
+      deferred.prompt();
+      const choice = await deferred.userChoice;
+      deferred = null;
+      if (choice.outcome === 'accepted') show(false);
+    } else if (iosSafari) {
+      const help = document.getElementById('install-help');
+      if (help && help.showModal) help.showModal();
+    }
+  }));
 })();

@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 from functools import wraps
 
-from flask import (Flask, abort, flash, g, jsonify, redirect, render_template,
+from flask import (Flask, abort, flash, g, jsonify, make_response, redirect, render_template,
                    request, session, url_for, current_app)
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -414,6 +414,51 @@ def bundle(db, m):
         "volume": stats["volume"],
         "traders": stats["traders"],
     }
+
+
+def price_trends(db, market_ids, points=32):
+    """Per market id: `spark`, a downsampled list of price snapshots (each a list with one price per outcome) for
+    sparklines, and `delta`, each outcome's change since the last snapshot at least 24 hours old (or since the
+    first snapshot when the market is younger than that). Times are school wall-clock strings, like now_str()."""
+    market_ids = list(market_ids)
+    if not market_ids:
+        return {}
+    cutoff = (parse_dt(now_str()) - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+    series = {}
+    for r in db.execute(f"SELECT market_id, prices, created_at FROM price_history WHERE market_id IN "
+                        f"({','.join('?' * len(market_ids))}) ORDER BY id", market_ids):
+        series.setdefault(r["market_id"], []).append((r["created_at"], json.loads(r["prices"])))
+    out = {}
+    for mid, s in series.items():
+        latest = s[-1][1]
+        base = s[0][1]
+        for t, p in s:
+            if t <= cutoff:
+                base = p
+            else:
+                break
+        if len(s) > points:  # keep the first and last snapshot, evenly spaced in between
+            s = [s[round(i * (len(s) - 1) / (points - 1))] for i in range(points)]
+        out[mid] = {"spark": [p for _, p in s], "delta": [a - b for a, b in zip(latest, base)]}
+    return out
+
+
+@app.template_global()
+def spark_points(trend, i=0, w=120, h=32):
+    """SVG polyline points for outcome i's sparkline in a w x h box (prices 0..1, padded so the stroke fits)."""
+    if not trend or not trend["spark"]:
+        return ""
+    vals = [p[i] if i < len(p) else 0 for p in trend["spark"]]
+    if len(vals) == 1:
+        vals = vals * 2
+    lo, hi = min(vals), max(vals)
+    if hi - lo < 0.08:  # flat-ish lines stay flat-ish instead of being blown up to full height
+        mid = (hi + lo) / 2
+        lo, hi = mid - 0.04, mid + 0.04
+    pad = 3
+    n = len(vals) - 1
+    return " ".join(f"{pad + k * (w - 2 * pad) / n:.1f},{pad + (hi - v) / (hi - lo) * (h - 2 * pad):.1f}"
+                    for k, v in enumerate(vals))
 
 
 def snapshot_prices(db, market_id, b):
@@ -989,7 +1034,7 @@ def load_user_and_check_csrf():
         elif g.user["id"] == g.owner_id and not g.user["is_admin"]:
             db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (g.user["id"],))  # owner is always admin
             g.user = db.execute("SELECT * FROM users WHERE id = ?", (g.user["id"],)).fetchone()
-    if request.endpoint != "static":
+    if request.endpoint not in PWA_ENDPOINTS:
         finalize_due(get_db())
     if request.method == "POST":
         token = request.form.get("csrf_token", "")
@@ -997,7 +1042,9 @@ def load_user_and_check_csrf():
             abort(400, "Your form expired. Go back, reload the page and try again.")
 
 
-EMAIL_EXEMPT = {"account_email", "logout", "static", "how_it_works"}
+EMAIL_EXEMPT = {"account_email", "logout", "static", "how_it_works", "manifest", "service_worker", "offline"}
+# files the browser fetches on its own (app install, offline support): no per-request bookkeeping needed
+PWA_ENDPOINTS = {"static", "manifest", "service_worker", "offline"}
 
 
 @app.before_request
@@ -1123,6 +1170,7 @@ def inject_globals():
     return {"csrf_token": csrf_token, "user": g.user, "can_bonus": can_bonus, "pending_proposals": pending,
             "SCHOOL_TZ": os.environ.get("TZ", "America/New_York"),
             "announcement": get_setting(get_db(), "announcement"),
+            "celebrate": session.pop("celebrate", None),
             "owner_id": g.get("owner_id"), "is_owner": is_owner(),
             "CURRENCY": CURRENCY, "DAILY_BONUS": DAILY_BONUS, "CATEGORIES": CATEGORIES,
             "DISPUTE_HOURS": DISPUTE_HOURS, "CREATION_FEE": CREATION_FEE, "ENTRY_FEE": ENTRY_FEE,
@@ -1181,6 +1229,78 @@ def until_filter(s):
         if secs >= size:
             return f"{int(secs // size)}{unit} left"
     return "<1m left"
+
+
+# ---------------------------------------------------------------- installable app (PWA)
+
+def _asset_version():
+    """A short hash of everything in static/. Static URLs carry it (?v=...), so a deploy gives every file a new URL
+    and the service worker, which caches static files forever, picks up the new copies."""
+    digest = hashlib.sha256()
+    static_dir = os.path.join(BASE_DIR, "static")
+    for root, _dirs, files in sorted(os.walk(static_dir)):
+        for name in sorted(files):
+            with open(os.path.join(root, name), "rb") as f:
+                digest.update(name.encode() + f.read())
+    return digest.hexdigest()[:10]
+
+
+ASSET_VERSION = _asset_version()
+# cached by the service worker when it installs, so the offline page has its styles and icon
+PRECACHE_ASSETS = ["style.css", "app.js", "icons/icon-192.png", "icons/favicon-32.png"]
+
+
+@app.template_global()
+def asset(filename):
+    return url_for("static", filename=filename, v=ASSET_VERSION)
+
+
+@app.route("/manifest.webmanifest")
+def manifest():
+    icon = lambda f, size, purpose="any": {"src": asset(f"icons/{f}"), "sizes": size, "type": "image/png",
+                                           "purpose": purpose}
+    data = {
+        "name": "MAMS Prediction Market",
+        "short_name": "MAMS Markets",
+        "description": f"Trade {CURRENCY} on what happens next at Mass Academy.",
+        "id": "/",
+        "start_url": "/?source=app",
+        "scope": "/",
+        "display": "standalone",
+        "orientation": "portrait-primary",
+        "background_color": "#f4f5f6",
+        "theme_color": "#ffffff",
+        "categories": ["education", "games"],
+        "icons": [icon("icon-192.png", "192x192"), icon("icon-512.png", "512x512"),
+                  icon("maskable-512.png", "512x512", "maskable")],
+        "shortcuts": [
+            {"name": "Markets", "url": "/", "icons": [icon("icon-192.png", "192x192")]},
+            {"name": "Portfolio", "url": "/portfolio", "icons": [icon("icon-192.png", "192x192")]},
+            {"name": "Leaderboard", "url": "/leaderboard", "icons": [icon("icon-192.png", "192x192")]},
+        ],
+    }
+    resp = make_response(json.dumps(data))
+    resp.headers["Content-Type"] = "application/manifest+json"
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+@app.route("/sw.js")
+def service_worker():
+    """Served from the site root so it can control every page. Its text includes ASSET_VERSION, so each deploy is a
+    new service worker that installs itself and clears the old caches."""
+    resp = make_response(render_template("sw.js", version=ASSET_VERSION, offline_url=url_for("offline"),
+                                         precache=[asset(f) for f in PRECACHE_ASSETS]))
+    resp.headers["Content-Type"] = "application/javascript; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+@app.route("/offline")
+def offline():
+    """Shown by the service worker when a page can't load. It's cached, so it must not contain anything personal
+    (no username, balance or form tokens): it doesn't extend base.html for that reason."""
+    return render_template("offline.html")
 
 
 # ---------------------------------------------------------------- routes: accounts
@@ -1387,6 +1507,7 @@ def bonus():
     db.execute("COMMIT")
     if cur.rowcount:
         flash(f"Claimed your daily {DAILY_BONUS:.0f} {CURRENCY}!", "success")
+        session["celebrate"] = {"kind": "bonus", "from": g.user["balance"]}
     else:
         flash("You already claimed today's bonus. Come back tomorrow.", "error")
     return redirect(request.referrer or url_for("index"))
@@ -1427,8 +1548,27 @@ def index():
     markets.sort(key=sort_key)
     visible = {b["m"]["id"] for b in markets
                if matches_status(b["state"], status) and (not cat or b["m"]["category"] == cat)}
+    live = [b for b in markets if b["state"] == "open"]
+    trends = price_trends(db, [b["m"]["id"] for b in markets if b["state"] in ("open", "closed", "proposed",
+                                                                               "disputed")])
+    for b in markets:
+        b["trend"] = trends.get(b["m"]["id"])
+    # Movers: the open markets whose price moved most in the last day (a binary market by its first outcome,
+    # a multiple-choice one by whichever outcome moved most).
+    movers = []
+    for b in live:
+        if not b["trend"]:
+            continue
+        idx = 0 if b["binary"] else max(range(len(b["outcomes"])), key=lambda i: abs(b["trend"]["delta"][i])
+                                        if i < len(b["trend"]["delta"]) else 0)
+        delta = b["trend"]["delta"][idx] if idx < len(b["trend"]["delta"]) else 0
+        if abs(delta) >= 0.005:
+            movers.append({"b": b, "o": b["outcomes"][idx], "idx": idx, "delta": delta})
+    movers.sort(key=lambda x: -abs(x["delta"]))
+    spotlight = [b for b in live if b["m"]["featured"]][:5]
     return render_template("index.html", markets=markets, visible=visible, status=status, cat=cat,
-                           tabs=STATUS_TABS)
+                           tabs=STATUS_TABS, movers=movers[:8], spotlight=spotlight,
+                           default_view=(status == "open" and not cat))
 
 
 @app.route("/market/<int:mid>")
@@ -1438,6 +1578,7 @@ def market(mid):
     if m is None:
         abort(404)
     b = bundle(db, m)
+    trend = price_trends(db, [mid]).get(mid) if b["state"] not in ("resolved", "cancelled") else None
     history = [{"t": r["created_at"], "p": json.loads(r["prices"])}
                for r in db.execute("SELECT * FROM price_history WHERE market_id = ? ORDER BY id", (mid,))]
     trades = db.execute(
@@ -1495,7 +1636,9 @@ def market(mid):
         all_users = [r["username"] for r in db.execute("SELECT username FROM users ORDER BY username")]
     creator = creator_name(db, m)
     my_entry_fee = entry_fee_due(db, m, g.user["id"]) if g.user else (ENTRY_FEE if creator else 0.0)
+    pick = request.args.get("pick", type=int)
     return render_template("market.html", b=b, history=history, trades=trades, comments=comments,
+                           trend=trend, pick=pick if pick in {o["id"] for o in b["outcomes"]} else None,
                            my_positions=my_positions, block_reason=block_reason,
                            creator=creator, my_entry_fee=my_entry_fee,
                            late_t=late_multiplier(m) if b["state"] == "open" else 0.0,
@@ -1568,8 +1711,17 @@ def trade(mid):
     except ValueError:
         min_out = None
     try:
-        flash(execute_trade(get_db(), g.user["id"], mid, outcome_id, request.form.get("action"), value, min_out),
-              "success")
+        db = get_db()
+        action = request.form.get("action")
+        flash(execute_trade(db, g.user["id"], mid, outcome_id, action, value, min_out), "success")
+        # the next page plays a short animation: confetti in the outcome's colour, the balance ticking over
+        m = db.execute("SELECT ou_line FROM markets WHERE id = ?", (mid,)).fetchone()
+        labels = [o["label"] for o in get_outcomes(db, mid)]
+        ids = [o["id"] for o in get_outcomes(db, mid)]
+        idx = ids.index(outcome_id) if outcome_id in ids else 0
+        binary = is_binary(labels) or (m is not None and m["ou_line"] is not None)
+        session["celebrate"] = {"kind": "buy" if action == "buy" else "sell", "from": g.user["balance"],
+                                "color": ("--yes" if idx == 0 else "--no") if binary else f"--c{idx}"}
     except TradeError as e:
         flash(str(e), "error")
     return redirect(url_for("market", mid=mid))
@@ -2747,7 +2899,7 @@ def admin_reset_password(uid):
         pw = set_temporary_password(db, uid)
         log_audit("user.password_reset", "user", uid, u["username"])
         flash(f"Temporary password for {u['username']}: {pw}. Share it privately; they can change it on their "
-              "Portfolio page.", "success")
+              "Portfolio page.", "notice")
     return back(url_for("admin") + "#users")
 
 

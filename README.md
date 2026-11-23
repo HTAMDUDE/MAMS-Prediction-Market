@@ -36,6 +36,11 @@ assemblies, and anything else the admins post.
   average over/under 85%) and **multiple choice**.
 - Results are **proposed** by an admin and can be **disputed** for 2 hours before winners are paid.
 - Admins create, edit, cancel and delete markets, and propose results (see [Admin guide](#admin-guide)).
+- It's an **installable app** (PWA): "Install app" in the account menu (Chrome, Edge, Android) or Share → Add to
+  Home Screen (iPhone). It opens full screen with its own icon and shows an offline page without a connection. Pages
+  are never cached (prices, balances and form tokens must be live); only static files are, under versioned URLs, so a
+  deploy is picked up on the next load. Browsers only allow this over **HTTPS** or on `localhost`, so it won't show
+  up at `http://<your-computer's-IP>:8000`. See `templates/sw.js` and the PWA routes in `app.py`.
 - The site also has a leaderboard (ranked by net worth), a portfolio page, a price-history chart and comments on
   each market.
 

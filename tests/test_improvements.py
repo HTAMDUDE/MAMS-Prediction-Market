@@ -481,7 +481,7 @@ def test_home_renders_every_market_and_hides_by_filter():
     cancelled = _open_market(db, "Cancelled market?")
     appmod.cancel_market(db, cancelled)
     page = c["boss"].get("/").get_data(as_text=True)
-    card = lambda text, html: next(x for x in html.split("<a class=\"card market-card\"")[1:] if text in x)
+    card = lambda text, html: next(x for x in html.split("class=\"card market-card")[1:] if text in x)
     assert " hidden" in card("Cancelled market?", page)[:300]
     assert " hidden" not in card("Still open market?", page)[:300]
     assert ">Cancelled</a>" in page  # the new tab
@@ -505,7 +505,7 @@ def test_market_page_has_quote_guard_bet_bar_and_school_timezone():
     assert 'aria-pressed="true">Buy' in page and 'for="value"' in page
     # logged-out visitors get no trade form but still see the page and the menu
     anon = appmod.app.test_client().get(f"/market/{mid}").get_data(as_text=True)
-    assert 'id="menu-sheet"' in anon and "Log in" in anon and 'name="min_out"' not in anon
+    assert 'class="tabbar"' in anon and "Log in" in anon and 'name="min_out"' not in anon
 
 
 def test_nav_marks_current_page_and_footer_links():
@@ -630,3 +630,43 @@ def test_kaushik_is_still_the_owner(monkeypatch):
     c.post("/register", data={"csrf_token": csrf(c.get("/register")), "username": "kaushik", "email": "k@example.com",
                               "password": "secret1", "confirm": "secret1"})
     assert db.execute("SELECT is_admin FROM users WHERE username = 'kaushik'").fetchone()[0] == 1
+
+
+# ---------------------------------------------------------------- installable app (PWA)
+
+def test_manifest_lists_working_icons_and_start_url():
+    _fresh_db()
+    client = appmod.app.test_client()
+    r = client.get("/manifest.webmanifest")
+    assert r.status_code == 200 and r.headers["Content-Type"].startswith("application/manifest+json")
+    data = r.get_json(force=True)
+    assert data["display"] == "standalone" and data["start_url"].startswith("/") and data["scope"] == "/"
+    sizes = {(i["sizes"], i["purpose"]) for i in data["icons"]}
+    assert {("192x192", "any"), ("512x512", "any"), ("512x512", "maskable")} <= sizes
+    for icon in data["icons"]:
+        assert client.get(icon["src"]).status_code == 200, icon["src"]
+
+
+def test_service_worker_is_served_from_root_and_precaches_real_files():
+    _fresh_db()
+    client = appmod.app.test_client()
+    r = client.get("/sw.js")
+    body = r.get_data(as_text=True)
+    assert r.status_code == 200 and "javascript" in r.headers["Content-Type"] and r.headers["Cache-Control"] == "no-cache"
+    assert appmod.ASSET_VERSION in body and '"/offline"' in body
+    for name in appmod.PRECACHE_ASSETS:
+        url = f"/static/{name}?v={appmod.ASSET_VERSION}"
+        assert url in body and client.get(url).status_code == 200
+    # pages link the manifest and use versioned static URLs, so a deploy never serves stale cached CSS/JS
+    page = client.get("/").get_data(as_text=True)
+    assert 'rel="manifest"' in page and f"style.css?v={appmod.ASSET_VERSION}" in page
+
+
+def test_offline_page_is_never_personal_and_needs_no_confirmed_email():
+    db, c, uid = _site("boss", "newbie")
+    db.execute("UPDATE users SET email_verified = 0 WHERE username = 'newbie'")
+    db.commit()
+    for path in ("/offline", "/sw.js", "/manifest.webmanifest"):
+        assert c["newbie"].get(path).status_code == 200, path  # not redirected to the email page
+    page = c["boss"].get("/offline").get_data(as_text=True)
+    assert "You're offline" in page and "boss" not in page and "csrf_token" not in page and "Ⓜ" not in page
