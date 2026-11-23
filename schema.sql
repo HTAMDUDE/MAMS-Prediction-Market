@@ -4,11 +4,21 @@ CREATE TABLE IF NOT EXISTS users (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
     password_hash TEXT NOT NULL,
+    email         TEXT,
+    email_verified INTEGER NOT NULL DEFAULT 0,
     balance       REAL NOT NULL,
     is_admin      INTEGER NOT NULL DEFAULT 0,
     last_bonus    TEXT,
     created_at    TEXT NOT NULL,
     session_gen   INTEGER NOT NULL DEFAULT 0   -- bump to sign the user out everywhere
+);
+
+CREATE TABLE IF NOT EXISTS login_challenges (
+    username     TEXT PRIMARY KEY COLLATE NOCASE,
+    code_hash    TEXT NOT NULL,
+    expires_at   REAL NOT NULL,
+    requested_at REAL NOT NULL,
+    attempts     INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS markets (

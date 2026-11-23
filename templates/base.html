@@ -48,7 +48,6 @@
         </form>
       {% else %}
         <a class="btn btn-small btn-ghost desk-only" href="{{ url_for('login') }}">Log in</a>
-        <a class="btn btn-small desk-only" href="{{ url_for('register') }}">Sign up</a>
       {% endif %}
       <button type="button" class="btn btn-small btn-ghost menu-btn" id="menu-btn" aria-label="Open menu" aria-haspopup="dialog" aria-controls="menu-sheet">☰</button>
     </div>
@@ -69,7 +68,6 @@
         <button class="btn btn-ghost btn-block">Log out</button>
       </form>
     {% else %}
-      <a class="btn btn-block" href="{{ url_for('register') }}">Sign up</a>
       <a class="btn btn-ghost btn-block" href="{{ url_for('login') }}">Log in</a>
     {% endif %}
   </div>

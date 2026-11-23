@@ -122,8 +122,14 @@ def test_min_bet_and_balance_messages():
 # ---------------------------------------------------------------- 2. password tools
 
 def _login(client, name, pw):
-    return client.post("/login", data={"csrf_token": csrf(client.get("/login")), "username": name, "password": pw},
-                       follow_redirects=True)
+    """Log in through the roster login's password step (the name must be on the roster)."""
+    real = appmod.load_login_directory
+    appmod.load_login_directory = lambda: {name.casefold(): {"name": name, "email": f"{name}@example.com"}}
+    try:
+        return client.post("/login", data={"csrf_token": csrf(client.get("/login")), "stage": "password",
+                                           "username": name, "password": pw}, follow_redirects=True)
+    finally:
+        appmod.load_login_directory = real
 
 
 def test_change_password_and_other_sessions_are_signed_out():
@@ -505,7 +511,7 @@ def test_market_page_has_quote_guard_bet_bar_and_school_timezone():
     assert 'aria-pressed="true">Buy' in page and 'for="value"' in page
     # logged-out visitors get no trade form but still see the page and the menu
     anon = appmod.app.test_client().get(f"/market/{mid}").get_data(as_text=True)
-    assert 'id="menu-sheet"' in anon and "Sign up" in anon and 'name="min_out"' not in anon
+    assert 'id="menu-sheet"' in anon and "Log in" in anon and 'name="min_out"' not in anon
 
 
 def test_nav_marks_current_page_and_footer_links():
@@ -519,3 +525,33 @@ def test_format_filters():
     env = appmod.app.jinja_env
     assert env.from_string("{{ 12|signed_money }} {{ -3.5|signed_money }}").render() == "+Ⓜ12.00 −Ⓜ3.50"
     assert env.from_string("{{ 0.424|cents_label }}").render() == "42¢"
+
+
+# ---------------------------------------------------------------- roster login + owner (merge of PR #1)
+
+def test_roster_signup_named_kaushik_is_owner_and_login_keeps_session(monkeypatch):
+    import re, time
+    src = open(os.path.join(os.path.dirname(appmod.__file__), "app.py")).read()
+    assert re.search(r'^OWNER_USERNAME = os.environ.get\("MAMS_OWNER", "Kaushik"\)', src, re.M)  # the real default
+    monkeypatch.setattr(appmod, "OWNER_USERNAME", "Kaushik")  # this file's fixture blanks it for other tests
+    db = _fresh_db()
+    monkeypatch.setattr(appmod, "load_login_directory", lambda: {
+        "kaushik": {"name": "Kaushik", "email": "k@example.com"},
+        "dana": {"name": "Dana", "email": "d@example.com"}})
+    for name in ("Kaushik", "Dana"):
+        c = appmod.app.test_client()
+        c.get("/login")
+        with c.session_transaction() as s:     # as if the emailed code was just verified
+            s["verified_login_name"] = name
+            s["verified_login_at"] = time.time()
+        c.post("/login", data={"csrf_token": csrf(c.get("/login")), "stage": "create_password",
+                               "password": "longpass1", "confirm": "longpass1"})
+        assert c.get("/portfolio").status_code == 200
+    admin = {r[0]: r[1] for r in db.execute("SELECT username, is_admin FROM users")}
+    assert admin == {"Kaushik": 1, "Dana": 0}
+
+    # someone who changed their password before (session_gen > 0) can log in and stays logged in
+    db.execute("UPDATE users SET session_gen = 3 WHERE username = 'Dana'")
+    phone = appmod.app.test_client()
+    _login(phone, "Dana", "longpass1")
+    assert phone.get("/portfolio").status_code == 200
