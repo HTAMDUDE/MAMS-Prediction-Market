@@ -122,14 +122,8 @@ def test_min_bet_and_balance_messages():
 # ---------------------------------------------------------------- 2. password tools
 
 def _login(client, name, pw):
-    """Log in through the roster login's password step (the name must be on the roster)."""
-    real = appmod.load_login_directory
-    appmod.load_login_directory = lambda: {name.casefold(): {"name": name, "email": f"{name}@example.com"}}
-    try:
-        return client.post("/login", data={"csrf_token": csrf(client.get("/login")), "stage": "password",
-                                           "username": name, "password": pw}, follow_redirects=True)
-    finally:
-        appmod.load_login_directory = real
+    return client.post("/login", data={"csrf_token": csrf(client.get("/login")), "username": name, "password": pw},
+                       follow_redirects=True)
 
 
 def test_change_password_and_other_sessions_are_signed_out():
@@ -527,31 +521,112 @@ def test_format_filters():
     assert env.from_string("{{ 0.424|cents_label }}").render() == "42¢"
 
 
-# ---------------------------------------------------------------- roster login + owner (merge of PR #1)
+# ---------------------------------------------------------------- confirmed emails
 
-def test_roster_signup_named_kaushik_is_owner_and_login_keeps_session(monkeypatch):
-    import re, time
-    src = open(os.path.join(os.path.dirname(appmod.__file__), "app.py")).read()
-    assert re.search(r'^OWNER_USERNAME = os.environ.get\("MAMS_OWNER", "Kaushik"\)', src, re.M)  # the real default
-    monkeypatch.setattr(appmod, "OWNER_USERNAME", "Kaushik")  # this file's fixture blanks it for other tests
+def _capture_codes(monkeypatch):
+    sent = []
+    monkeypatch.setattr(appmod, "send_login_code_email", lambda to, code: sent.append((to, code)))
+    return sent
+
+
+def _email_post(client, **data):
+    return client.post("/account/email", data={"csrf_token": csrf(client.get("/account/email")), **data},
+                       follow_redirects=True)
+
+
+def test_everyone_is_logged_out_once_when_emails_arrive():
     db = _fresh_db()
-    monkeypatch.setattr(appmod, "load_login_directory", lambda: {
-        "kaushik": {"name": "Kaushik", "email": "k@example.com"},
-        "dana": {"name": "Dana", "email": "d@example.com"}})
-    for name in ("Kaushik", "Dana"):
-        c = appmod.app.test_client()
-        c.get("/login")
-        with c.session_transaction() as s:     # as if the emailed code was just verified
-            s["verified_login_name"] = name
-            s["verified_login_at"] = time.time()
-        c.post("/login", data={"csrf_token": csrf(c.get("/login")), "stage": "create_password",
-                               "password": "longpass1", "confirm": "longpass1"})
-        assert c.get("/portfolio").status_code == 200
-    admin = {r[0]: r[1] for r in db.execute("SELECT username, is_admin FROM users")}
-    assert admin == {"Kaushik": 1, "Dana": 0}
+    client = appmod.app.test_client()
+    signup(client, "oldtimer")
+    assert client.get("/portfolio").status_code == 200
+    db.execute("DELETE FROM site_settings WHERE key = 'emails_logout_done'")   # as on the live site before the update
+    appmod.require_emails_once(db)
+    assert client.get("/portfolio").status_code == 302                           # signed out
+    assert _login(client, "oldtimer", "secret1").status_code == 200
+    gen = db.execute("SELECT session_gen FROM users WHERE username='oldtimer'").fetchone()[0]
+    appmod.require_emails_once(db)                                               # only ever once
+    assert db.execute("SELECT session_gen FROM users WHERE username='oldtimer'").fetchone()[0] == gen
+    assert client.get("/portfolio").status_code == 200
 
-    # someone who changed their password before (session_gen > 0) can log in and stays logged in
-    db.execute("UPDATE users SET session_gen = 3 WHERE username = 'Dana'")
-    phone = appmod.app.test_client()
-    _login(phone, "Dana", "longpass1")
-    assert phone.get("/portfolio").status_code == 200
+
+def test_existing_user_without_email_must_confirm_one(monkeypatch):
+    db = _fresh_db()
+    sent = _capture_codes(monkeypatch)
+    client = appmod.app.test_client()
+    signup(client, "oldtimer")
+    db.execute("UPDATE users SET email = NULL, email_verified = 0 WHERE username = 'oldtimer'")   # a pre-email account
+    for path in ("/", "/portfolio", "/leaderboard"):
+        r = client.get(path)
+        assert r.status_code == 302 and r.headers["Location"].endswith("/account/email")
+    assert client.get("/api/quote?market=1&outcome=1&action=buy&value=5").status_code == 403
+    assert "Add your email" in client.get("/account/email").get_data(as_text=True)
+
+    assert "valid email" in _email_post(client, action="send", email="nope").get_data(as_text=True)
+    page = _email_post(client, action="send", email="Old.Timer@example.com").get_data(as_text=True)
+    assert "Enter the 6-digit code" in page and sent[-1][0] == "Old.Timer@example.com"
+    code = sent[-1][1]
+    assert "That code isn" in _email_post(client, action="verify", code="000000" if code != "000000" else "111111").get_data(as_text=True)
+    assert "Email confirmed" in _email_post(client, action="verify", code=code).get_data(as_text=True)
+    row = db.execute("SELECT email, email_verified FROM users WHERE username='oldtimer'").fetchone()
+    assert tuple(row) == ("Old.Timer@example.com", 1)
+    assert client.get("/portfolio").status_code == 200
+    assert "Old.Timer@example.com" in client.get("/portfolio").get_data(as_text=True)
+
+    # the email lands in people.csv next to the database
+    csv_text = open(appmod.email_csv_path(), encoding="utf-8-sig").read().splitlines()
+    assert csv_text[0] == "name,email" and "oldtimer,Old.Timer@example.com" in csv_text
+
+
+def test_new_user_signs_up_with_email_and_confirms(monkeypatch):
+    db = _fresh_db()
+    sent = _capture_codes(monkeypatch)
+    signup(appmod.app.test_client(), "taken")             # already has taken@example.com
+    c = appmod.app.test_client()
+    form = lambda **kw: {"csrf_token": csrf(c.get("/register")), "username": "newbie", "email": "newbie@example.com",
+                         "password": "secret1", "confirm": "secret1", **kw}
+    assert "already used" in c.post("/register", data=form(email="TAKEN@example.com"),
+                                    follow_redirects=True).get_data(as_text=True)
+    assert "valid email" in c.post("/register", data=form(email="x"), follow_redirects=True).get_data(as_text=True)
+    page = c.post("/register", data=form(), follow_redirects=True).get_data(as_text=True)
+    assert "Enter the 6-digit code" in page and sent[-1][0] == "newbie@example.com"
+    assert c.get("/").status_code == 302                  # can't use the site until confirmed
+    lb = appmod.app.test_client().get("/leaderboard").get_data(as_text=True)
+    assert "newbie" not in lb                             # unconfirmed sign-ups aren't listed
+    assert "Email confirmed" in _email_post(c, action="verify", code=sent[-1][1]).get_data(as_text=True)
+    assert c.get("/").status_code == 200
+    assert "newbie" in appmod.app.test_client().get("/leaderboard").get_data(as_text=True)
+    assert "newbie,newbie@example.com" in open(appmod.email_csv_path(), encoding="utf-8-sig").read()
+
+
+def test_code_expiry_attempt_limit_and_duplicate_at_confirm(monkeypatch):
+    db = _fresh_db()
+    sent = _capture_codes(monkeypatch)
+    a, b = appmod.app.test_client(), appmod.app.test_client()
+    signup(a, "alpha")
+    signup(b, "bravo")
+    db.execute("UPDATE users SET email = NULL, email_verified = 0")
+    _email_post(a, action="send", email="shared@example.com")
+    _email_post(b, action="send", email="shared@example.com")
+    code_a, code_b = sent[0][1], sent[1][1]
+    assert "Email confirmed" in _email_post(a, action="verify", code=code_a).get_data(as_text=True)
+    assert "already used" in _email_post(b, action="verify", code=code_b).get_data(as_text=True)
+    # too many wrong codes: the code stops working
+    _email_post(b, action="send", email="bravo@example.com")
+    wrong = "000000" if sent[-1][1] != "000000" else "111111"
+    for _ in range(appmod.LOGIN_CODE_MAX_ATTEMPTS):
+        _email_post(b, action="verify", code=wrong)
+    assert "expired" in _email_post(b, action="verify", code=sent[-1][1]).get_data(as_text=True)
+
+
+def test_kaushik_is_still_the_owner(monkeypatch):
+    import re
+    src = open(os.path.join(os.path.dirname(appmod.__file__), "app.py")).read()
+    assert re.search(r'^OWNER_USERNAME = os.environ.get\("MAMS_OWNER", "Kaushik"\)', src, re.M)
+    monkeypatch.setattr(appmod, "OWNER_USERNAME", "Kaushik")
+    _capture_codes(monkeypatch)
+    db = _fresh_db()
+    signup(appmod.app.test_client(), "someone")
+    c = appmod.app.test_client()
+    c.post("/register", data={"csrf_token": csrf(c.get("/register")), "username": "kaushik", "email": "k@example.com",
+                              "password": "secret1", "confirm": "secret1"})
+    assert db.execute("SELECT is_admin FROM users WHERE username = 'kaushik'").fetchone()[0] == 1

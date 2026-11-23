@@ -63,8 +63,10 @@ def signup(client, name):
     is_admin = int((first_user and not appmod.OWNER_USERNAME) or name.lower() == appmod.OWNER_USERNAME
                    or name.lower() in appmod.ADMIN_USERNAMES)
     cur = db.execute(
-        "INSERT INTO users (username, password_hash, balance, is_admin, created_at) VALUES (?, ?, ?, ?, ?)",
-        (name, appmod.generate_password_hash("secret1"), appmod.STARTING_BALANCE, is_admin, appmod.now_str()))
+        "INSERT INTO users (username, password_hash, balance, is_admin, created_at, email, email_verified) "
+        "VALUES (?, ?, ?, ?, ?, ?, 1)",
+        (name, appmod.generate_password_hash("secret1"), appmod.STARTING_BALANCE, is_admin, appmod.now_str(),
+         f"{name}@example.com"))
     appmod.log_activity(db, cur.lastrowid, "signup", appmod.STARTING_BALANCE, None, "Starting balance")
     with client.session_transaction() as user_session:
         user_session.permanent = True
@@ -77,16 +79,18 @@ def test_leaderboard_and_how_it_works_render_for_everyone(monkeypatch, tmp_path)
     appmod.DB_PATH = str(tmp_path / "public-pages.db")
     appmod.init_db()
     appmod._hits.clear()
-    # everyone on the (private) roster is listed, even before they first log in; use a made-up 50-name roster
-    monkeypatch.setattr(appmod, "load_login_directory", lambda: {
-        f"student {i}": {"name": f"Student {i}", "email": f"student{i}@example.com"} for i in range(50)})
     try:
         client = appmod.app.test_client()
+        assert "Nobody has signed up yet" in client.get("/leaderboard").get_data(as_text=True)
+        for i in range(5):
+            signup(appmod.app.test_client(), f"student{i}")
+        db = appmod.connect()
+        db.execute("INSERT INTO users (username, password_hash, balance, created_at) VALUES ('nevercame', 'x', 1000, 'x')")
+        db.close()
         page = client.get("/leaderboard")
         html = page.get_data(as_text=True)
         assert page.status_code == 200
-        assert "Nobody has signed up yet" not in html
-        assert html.count('class="rank"') == 50
+        assert html.count('class="rank"') == 5 and "nevercame" not in html   # unconfirmed, never traded: hidden
 
         guide = client.get("/how-it-works")
         assert guide.status_code == 200
@@ -251,157 +255,21 @@ def test_admin_edit():
         appmod.DB_PATH = old
 
 
-def test_login_lockout_after_repeated_failures(monkeypatch):
-    monkeypatch.setattr(appmod, "load_login_directory", lambda: {
-        "lockme": {"name": "lockme", "email": "lockme@example.invalid"}
-    })
+def test_login_lockout_after_repeated_failures():
     client = appmod.app.test_client()
     signup(client, "lockme")
     client = appmod.app.test_client()
     for _ in range(10):
-        r = client.post("/login", data={"csrf_token": csrf(client.get("/login")), "stage": "password",
-                                        "username": "lockme",
+        r = client.post("/login", data={"csrf_token": csrf(client.get("/login")), "username": "lockme",
                                         "password": "wrong"})
         assert "Wrong username or password." in r.get_data(as_text=True)
-    r = client.post("/login", data={"csrf_token": csrf(client.get("/login")), "stage": "password",
-                                    "username": "lockme",
+    r = client.post("/login", data={"csrf_token": csrf(client.get("/login")), "username": "lockme",
                                     "password": "secret1"})
     assert "Too many wrong passwords" in r.get_data(as_text=True)
     appmod._hits.clear()
-    r = client.post("/login", data={"csrf_token": csrf(client.get("/login")), "stage": "password",
-                                    "username": "lockme",
+    r = client.post("/login", data={"csrf_token": csrf(client.get("/login")), "username": "lockme",
                                     "password": "secret1"})
     assert r.status_code == 302
-
-
-def test_roster_first_login_email_verification_and_returning_password(monkeypatch, tmp_path):
-    old_db = appmod.DB_PATH
-    appmod.DB_PATH = str(tmp_path / "login.db")
-    appmod.init_db()
-    monkeypatch.setattr(appmod, "OWNER_USERNAME", "")
-    monkeypatch.setattr(appmod, "load_login_directory", lambda: {
-        "test participant": {"name": "Test Participant", "email": "test-recipient@example.invalid"}
-    })
-    sent = []
-    monkeypatch.setattr(appmod, "send_login_code_email", lambda address, code: sent.append((address, code)))
-    appmod._hits.clear()
-    try:
-        client = appmod.app.test_client()
-        page = client.get("/login")
-        html = page.get_data(as_text=True)
-        assert "Test Participant" in html
-        assert "test-recipient@example.invalid" not in html
-
-        page = client.post("/login", data={
-            "csrf_token": csrf(page), "stage": "select", "username": "Test Participant"
-        })
-        assert "verification code was sent" in page.get_data(as_text=True)
-        assert 'value="resend"' in page.get_data(as_text=True)
-        assert len(sent) == 1
-        assert sent[0][0] == "test-recipient@example.invalid"
-        original_code = sent[0][1]
-        page = client.post("/login", data={
-            "csrf_token": csrf(page), "stage": "verify", "action": "resend"
-        })
-        assert "Please wait before requesting another" in page.get_data(as_text=True)
-        assert len(sent) == 1
-        monkeypatch.setattr(appmod, "LOGIN_CODE_RESEND_DELAY", 0)
-        page = client.post("/login", data={
-            "csrf_token": csrf(page), "stage": "verify", "action": "resend"
-        })
-        assert "new verification code was sent" in page.get_data(as_text=True)
-        assert len(sent) == 2
-        code = sent[1][1]
-        assert len(code) == 6 and code.isdigit()
-
-        page = client.post("/login", data={
-            "csrf_token": csrf(page), "stage": "verify", "code": original_code
-        })
-        assert "incorrect" in page.get_data(as_text=True)
-        wrong_code = "000000" if code != "000000" else "000001"
-        page = client.post("/login", data={
-            "csrf_token": csrf(page), "stage": "verify", "code": wrong_code
-        })
-        assert "incorrect" in page.get_data(as_text=True)
-        page = client.post("/login", data={
-            "csrf_token": csrf(page), "stage": "verify", "code": code
-        })
-        assert "Create your password" in page.get_data(as_text=True)
-        page = client.get("/login")
-        assert "Email verified" in page.get_data(as_text=True)
-        page = client.post("/login", data={
-            "csrf_token": csrf(page), "stage": "create_password",
-            "password": "short", "confirm": "short"
-        })
-        assert "at least 8 characters" in page.get_data(as_text=True)
-        page = client.post("/login", data={
-            "csrf_token": csrf(page), "stage": "create_password",
-            "password": "long-test-password", "confirm": "long-test-password"
-        })
-        assert page.status_code == 302
-        db = appmod.connect()
-        account = db.execute(
-            "SELECT email, email_verified, is_admin FROM users WHERE username = 'Test Participant'"
-        ).fetchone()
-        assert account["email"] == "test-recipient@example.invalid"
-        assert account["email_verified"] == 1
-        assert account["is_admin"] == 1
-
-        client.post("/logout", data={"csrf_token": csrf(client.get("/"))})
-        page = client.get("/login")
-        page = client.post("/login", data={
-            "csrf_token": csrf(page), "stage": "select", "username": "Test Participant"
-        })
-        assert "Welcome back" in page.get_data(as_text=True)
-        assert len(sent) == 2
-        page = client.post("/login", data={
-            "csrf_token": csrf(page), "stage": "password", "username": "Test Participant",
-            "password": "long-test-password"
-        })
-        assert page.status_code == 302
-        db.close()
-    finally:
-        appmod.DB_PATH = old_db
-
-
-def test_back_from_selected_name_returns_to_selection_and_clears_challenge(monkeypatch, tmp_path):
-    old_db = appmod.DB_PATH
-    appmod.DB_PATH = str(tmp_path / "login-back.db")
-    appmod.init_db()
-    monkeypatch.setattr(appmod, "load_login_directory", lambda: {
-        "first participant": {"name": "First Participant", "email": "first@example.invalid"},
-        "second participant": {"name": "Second Participant", "email": "second@example.invalid"},
-    })
-    sent = []
-    monkeypatch.setattr(appmod, "send_login_code_email", lambda address, code: sent.append((address, code)))
-    appmod._hits.clear()
-    try:
-        client = appmod.app.test_client()
-        page = client.get("/login")
-        page = client.post("/login", data={
-            "csrf_token": csrf(page), "stage": "select", "username": "First Participant"
-        })
-        assert "First Participant" in page.get_data(as_text=True)
-        assert "Back to name selection" in page.get_data(as_text=True)
-        assert len(sent) == 1
-
-        page = client.post("/login", data={
-            "csrf_token": csrf(page), "stage": "back_to_select"
-        })
-        html = page.get_data(as_text=True)
-        assert "Second Participant" in html
-        assert "value=\"resend\"" not in html
-        db = appmod.connect()
-        assert db.execute("SELECT COUNT(*) FROM login_challenges").fetchone()[0] == 0
-        db.close()
-
-        page = client.post("/login", data={
-            "csrf_token": csrf(page), "stage": "select", "username": "Second Participant"
-        })
-        assert "Second Participant" in page.get_data(as_text=True)
-        assert sent[1][0] == "second@example.invalid"
-    finally:
-        appmod.DB_PATH = old_db
 
 
 def test_email_is_disabled_during_automated_tests(monkeypatch):
@@ -606,8 +474,8 @@ def _fresh_db():
 
 
 def _user(db, name, balance=1000):
-    return db.execute("INSERT INTO users (username, password_hash, balance, created_at) VALUES (?, 'x', ?, ?)",
-                      (name, balance, appmod.now_str())).lastrowid
+    return db.execute("INSERT INTO users (username, password_hash, balance, created_at, email, email_verified) "
+                      "VALUES (?, 'x', ?, ?, ?, 1)", (name, balance, appmod.now_str(), f"{name}@example.com")).lastrowid
 
 
 def _market(db, n=2, b=300):

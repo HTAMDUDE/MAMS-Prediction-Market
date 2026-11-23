@@ -76,7 +76,8 @@ OWNER_USERNAME = os.environ.get("MAMS_OWNER", "Kaushik").strip()
 LOGIN_CODE_LIFETIME = 10 * 60
 LOGIN_CODE_RESEND_DELAY = 60
 LOGIN_CODE_MAX_ATTEMPTS = 5
-LOGIN_SETUP_LIFETIME = 15 * 60
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,20}$")
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _secret_key():
@@ -144,6 +145,7 @@ NEW_COLUMNS = {
     "users": [("session_gen", "INTEGER NOT NULL DEFAULT 0"),
               ("email", "TEXT"), ("email_verified", "INTEGER NOT NULL DEFAULT 0")],
     "comments": [("hidden", "INTEGER NOT NULL DEFAULT 0")],
+    "login_challenges": [("email", "TEXT")],  # the address being confirmed
     "markets": [("rules_source", "TEXT NOT NULL DEFAULT ''"), ("rules_otherwise", "TEXT NOT NULL DEFAULT ''"),
                 ("proposed_outcome_id", "INTEGER"), ("proposed_by", "INTEGER"), ("proposed_at", "TEXT"),
                 ("finalizes_at", "TEXT"), ("resolved_by", "INTEGER"),
@@ -182,6 +184,20 @@ def migrate(db):
         db.execute("ALTER TABLE clarifications_new RENAME TO clarifications")
         db.execute("CREATE INDEX IF NOT EXISTS idx_clarifications_market ON clarifications(market_id)")
         db.execute("COMMIT")
+    # one account per confirmed email
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email COLLATE NOCASE) "
+               "WHERE email_verified = 1")
+
+
+def require_emails_once(db):
+    """When confirmed emails were introduced, everyone was signed out once so they'd be asked for one on their next
+    log-in. Recorded in site_settings so it only ever happens once."""
+    if db.execute("SELECT 1 FROM site_settings WHERE key = 'emails_logout_done'").fetchone():
+        return
+    db.execute("BEGIN IMMEDIATE")
+    db.execute("UPDATE users SET session_gen = session_gen + 1")
+    db.execute("INSERT INTO site_settings (key, value, updated_at) VALUES ('emails_logout_done', '1', datetime('now'))")
+    db.execute("COMMIT")
 
 
 def deepen_liquidity(db):
@@ -239,44 +255,29 @@ def init_db():
     with open(os.path.join(BASE_DIR, "schema.sql")) as f:
         db.executescript(f.read())
     migrate(db)
+    require_emails_once(db)
     deepen_liquidity(db)
     backfill_activity(db)
     shorten_dispute_windows(db)
     db.close()
 
 
-def load_login_directory():
-    """Load private participant identity data from deployment config or the ignored instance directory."""
-    raw = os.environ.get("MAMS_USER_DIRECTORY")
-    if raw:
-        entries = json.loads(raw)
-    else:
-        path = os.environ.get("MAMS_USER_DIRECTORY_FILE", os.path.join(INSTANCE_DIR, "login_roster.json"))
-        with open(path, encoding="utf-8") as directory_file:
-            entries = json.load(directory_file)
-    if not isinstance(entries, list):
-        raise ValueError("The user directory must be a JSON list.")
-    directory = {}
-    seen = set()
-    emails_seen = set()
-    for entry in entries:
-        if not isinstance(entry, dict):
-            raise ValueError("Each user directory entry must contain a name and email.")
-        name = entry.get("name")
-        email = entry.get("email")
-        if not isinstance(name, str) or not isinstance(email, str):
-            raise ValueError("Each user directory entry must contain a name and email.")
-        name = name.strip()
-        email = email.strip()
-        key = name.casefold()
-        email_key = email.casefold()
-        if (not name or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email)
-                or key in seen or email_key in emails_seen):
-            raise ValueError("The user directory contains a missing or duplicate name/email.")
-        directory[key] = {"name": name, "email": email}
-        seen.add(key)
-        emails_seen.add(email_key)
-    return directory
+def email_csv_path():
+    """people.csv lives next to the database (instance/ on the server, which git ignores)."""
+    return os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "people.csv")
+
+
+def write_email_csv(db):
+    """Keep instance/people.csv (name,email for every account; blank until confirmed) up to date."""
+    import csv
+    rows = db.execute("SELECT username, CASE WHEN email_verified = 1 THEN email ELSE '' END FROM users "
+                      "ORDER BY username COLLATE NOCASE").fetchall()
+    tmp = email_csv_path() + ".tmp"
+    with open(tmp, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(["name", "email"])
+        w.writerows([tuple(r) for r in rows])
+    os.replace(tmp, email_csv_path())
 
 
 def login_code_hash(username, code):
@@ -989,6 +990,19 @@ def load_user_and_check_csrf():
             abort(400, "Your form expired. Go back, reload the page and try again.")
 
 
+EMAIL_EXEMPT = {"account_email", "logout", "static", "how_it_works"}
+
+
+@app.before_request
+def require_confirmed_email():
+    """Logged-in accounts without a confirmed email are sent to add one first (existing accounts after the switch
+    to emails, and new accounts until they type in their code)."""
+    if g.get("user") is not None and not g.user["email_verified"] and request.endpoint not in EMAIL_EXEMPT:
+        if request.endpoint == "quote":
+            return jsonify(ok=False, error="Confirm your email first."), 403
+        return redirect(url_for("account_email"))
+
+
 def login_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
@@ -1165,205 +1179,149 @@ def until_filter(s):
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
-    return redirect(url_for("login"))
-
-
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    next_url = request.form.get("next", "") if request.method == "POST" else request.args.get("next", "")
-    try:
-        directory = load_login_directory()
-    except (OSError, ValueError):
-        current_app.logger.exception("Unable to load the private login directory.")
-        flash("Login is temporarily unavailable. Please contact the site administrator.", "error")
-        return render_template("login.html", stage="select", names=[], next_url=next_url)
-
-    names = [entry["name"] for entry in directory.values()]
     if request.method == "POST":
-        stage = request.form.get("stage", "select")
-    elif session.get("verified_login_name") and \
-            time.time() - session.get("verified_login_at", 0) <= LOGIN_SETUP_LIFETIME:
-        stage = "create_password"
-    elif session.get("pending_login_name"):
-        stage = "verify"
-    else:
-        stage = "select"
-    selected_name = session.get("verified_login_name") if stage == "create_password" else \
-        session.get("pending_login_name") if stage == "verify" else ""
-    if request.method == "POST":
-        name = request.form.get("username", "").strip()
-        entry = directory.get(name.casefold())
-        if stage == "back_to_select":
-            pending_name = session.pop("pending_login_name", "")
-            if pending_name:
-                get_db().execute("DELETE FROM login_challenges WHERE username = ?", (pending_name,))
-            session.pop("verified_login_name", None)
-            session.pop("verified_login_at", None)
-            return render_template("login.html", stage="select", names=names, next_url=next_url)
-        elif stage == "select":
-            session.pop("pending_login_name", None)
-            session.pop("verified_login_name", None)
-            session.pop("verified_login_at", None)
-            if entry is None:
-                flash("Select a name from the list.", "error")
-            elif rate_limited(("login-start-ip", request.remote_addr), 20, 3600) or \
-                    rate_limited(("login-start", entry["name"].casefold()), 3, 900):
-                flash("Too many login attempts. Please wait and try again.", "error")
+        username = request.form.get("username", "").strip()
+        email = request.form.get("email", "").strip()
+        password = request.form.get("password", "")
+        if not USERNAME_RE.match(username):
+            flash("Username must be 3–20 characters: letters, numbers, _ . -", "error")
+        elif not EMAIL_RE.match(email):
+            flash("Enter a valid email address.", "error")
+        elif email_taken(get_db(), email):
+            flash("That email is already used by another account.", "error")
+        elif len(password) < 6:
+            flash("Password must be at least 6 characters.", "error")
+        elif password != request.form.get("confirm", ""):
+            flash("Passwords don't match.", "error")
+        elif rate_limited(("register", request.remote_addr), 40, 3600):
+            flash("Too many new accounts from this network. Try again in a while.", "error")
+        else:
+            db = get_db()
+            first_user = db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
+            is_admin = int((first_user and not OWNER_USERNAME) or username.lower() == OWNER_USERNAME.lower()
+                           or username.lower() in ADMIN_USERNAMES)
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                cur = db.execute(
+                    "INSERT INTO users (username, password_hash, balance, is_admin, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (username, generate_password_hash(password), STARTING_BALANCE, is_admin, now_str()))
+                log_activity(db, cur.lastrowid, "signup", STARTING_BALANCE, None, "Starting balance")
+                db.execute("COMMIT")
+            except sqlite3.IntegrityError:
+                db.execute("ROLLBACK")
+                flash("That username is taken.", "error")
             else:
-                user = get_db().execute("SELECT * FROM users WHERE username = ?", (entry["name"],)).fetchone()
-                if user:
-                    return render_template("login.html", stage="password", names=names,
-                                           selected_name=entry["name"], next_url=next_url)
-                existing = get_db().execute(
-                    "SELECT requested_at FROM login_challenges WHERE username = ?",
-                    (entry["name"],)).fetchone()
-                if existing and time.time() - existing["requested_at"] < LOGIN_CODE_RESEND_DELAY:
-                    flash("A verification code was just sent. Check your email and try it below.", "success")
-                    session["pending_login_name"] = entry["name"]
-                    return render_template("login.html", stage="verify", names=names,
-                                           selected_name=entry["name"], next_url=next_url)
-                code = f"{secrets.randbelow(1_000_000):06d}"
-                try:
-                    send_login_code_email(entry["email"], code)
-                except (OSError, RuntimeError, smtplib.SMTPException, ValueError):
-                    current_app.logger.exception("Unable to send a first-login verification code.")
-                    flash("Unable to send a verification email. Please try again later.", "error")
-                else:
-                    get_db().execute(
-                        "INSERT OR REPLACE INTO login_challenges "
-                        "(username, code_hash, expires_at, requested_at, attempts) VALUES (?, ?, ?, ?, 0)",
-                        (entry["name"], login_code_hash(entry["name"], code),
-                         time.time() + LOGIN_CODE_LIFETIME, time.time()))
-                    session["pending_login_name"] = entry["name"]
-                    session.pop("verified_login_name", None)
-                    session.pop("verified_login_at", None)
-                    flash("A verification code was sent to the email address on file.", "success")
-                    return render_template("login.html", stage="verify", names=names,
-                                           selected_name=entry["name"], next_url=next_url)
-        elif stage == "password":
-            user = get_db().execute("SELECT * FROM users WHERE username = ?", (entry["name"],)).fetchone() \
-                if entry else None
-            fail_key = ("login-fail", entry["name"].casefold() if entry else name.casefold())
-            recent_fails = [t for t in _hits.get(fail_key, []) if time.time() - t < 300]
-            if len(recent_fails) >= 10:
-                flash("Too many wrong passwords for this account. Wait 5 minutes and try again.", "error")
-                return render_template("login.html", stage="password", names=names,
-                                       selected_name=entry["name"] if entry else "", next_url=next_url)
-            elif user and check_password_hash(user["password_hash"], request.form.get("password", "")):
-                _hits.pop(fail_key, None)
-                session.clear()
-                session.permanent = True
-                session["uid"] = user["id"]
-                session["gen"] = user["session_gen"]
-                return redirect(next_url if next_url.startswith("/") and not next_url.startswith("//")
-                                else url_for("index"))
-            else:
-                rate_limited(fail_key, 10, 300)
-                flash("Wrong username or password.", "error")
-                return render_template("login.html", stage="password", names=names,
-                                       selected_name=entry["name"] if entry else "", next_url=next_url)
-        elif stage == "verify":
-            pending_name = session.get("pending_login_name", "")
-            entry = directory.get(pending_name.casefold())
-            challenge = get_db().execute(
-                "SELECT * FROM login_challenges WHERE username = ?", (pending_name,)).fetchone() if entry else None
-            if request.form.get("action") == "resend":
-                if not entry or not challenge:
-                    session.pop("pending_login_name", None)
-                    flash("Select your name to request a verification code.", "error")
-                    return render_template("login.html", stage="select", names=names, next_url=next_url)
-                if time.time() - challenge["requested_at"] < LOGIN_CODE_RESEND_DELAY:
-                    flash("Please wait before requesting another verification code.", "error")
-                    return render_template("login.html", stage="verify", names=names,
-                                           selected_name=entry["name"], next_url=next_url)
-                if rate_limited(("login-start-ip", request.remote_addr), 20, 3600) or \
-                        rate_limited(("login-start", entry["name"].casefold()), 3, 900):
-                    flash("Too many code requests. Please wait and try again.", "error")
-                    return render_template("login.html", stage="verify", names=names,
-                                           selected_name=entry["name"], next_url=next_url)
-                code = f"{secrets.randbelow(1_000_000):06d}"
-                try:
-                    send_login_code_email(entry["email"], code)
-                except (OSError, RuntimeError, smtplib.SMTPException, ValueError):
-                    current_app.logger.exception("Unable to resend a first-login verification code.")
-                    flash("Unable to send a verification email. Please try again later.", "error")
-                else:
-                    get_db().execute(
-                        "UPDATE login_challenges SET code_hash = ?, expires_at = ?, requested_at = ?, attempts = 0 "
-                        "WHERE username = ?",
-                        (login_code_hash(entry["name"], code), time.time() + LOGIN_CODE_LIFETIME,
-                         time.time(), entry["name"]))
-                    flash("A new verification code was sent to the email address on file.", "success")
-                return render_template("login.html", stage="verify", names=names,
-                                       selected_name=entry["name"], next_url=next_url)
-            if (not entry or not challenge or challenge["expires_at"] < time.time()
-                    or challenge["attempts"] >= LOGIN_CODE_MAX_ATTEMPTS):
-                flash("That verification code expired. Select your name to request another.", "error")
-                session.pop("pending_login_name", None)
-                return render_template("login.html", stage="select", names=names, next_url=next_url)
-            code = request.form.get("code", "").strip()
-            if not hmac.compare_digest(challenge["code_hash"], login_code_hash(entry["name"], code)):
-                get_db().execute(
-                    "UPDATE login_challenges SET attempts = attempts + 1 WHERE username = ?", (entry["name"],))
-                flash("That verification code is incorrect.", "error")
-                return render_template("login.html", stage="verify", names=names,
-                                       selected_name=entry["name"], next_url=next_url)
-            get_db().execute("DELETE FROM login_challenges WHERE username = ?", (entry["name"],))
-            session.pop("pending_login_name", None)
-            session["verified_login_name"] = entry["name"]
-            session["verified_login_at"] = time.time()
-            return render_template("login.html", stage="create_password", names=names,
-                                   selected_name=entry["name"], next_url=next_url)
-        elif stage == "create_password":
-            verified_name = session.get("verified_login_name", "")
-            entry = directory.get(verified_name.casefold())
-            verified_at = session.get("verified_login_at", 0)
-            if not entry or time.time() - verified_at > LOGIN_SETUP_LIFETIME:
-                session.pop("verified_login_name", None)
-                session.pop("verified_login_at", None)
-                flash("Your verification session expired. Select your name to start again.", "error")
-                return render_template("login.html", stage="select", names=names, next_url=next_url)
-            password = request.form.get("password", "")
-            if len(password) < 8:
-                flash("Password must be at least 8 characters.", "error")
-            elif password != request.form.get("confirm", ""):
-                flash("Passwords don't match.", "error")
-            elif get_db().execute("SELECT 1 FROM users WHERE username = ?", (entry["name"],)).fetchone():
-                session.pop("verified_login_name", None)
-                session.pop("verified_login_at", None)
-                flash("An account already exists for that name. Log in with its password.", "error")
-                return render_template("login.html", stage="select", names=names, next_url=next_url)
-            else:
-                db = get_db()
-                first_user = db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
-                is_admin = int((first_user and not OWNER_USERNAME) or entry["name"].casefold() == OWNER_USERNAME.casefold()
-                               or entry["name"].casefold() in ADMIN_USERNAMES)
-                try:
-                    db.execute("BEGIN IMMEDIATE")
-                    cur = db.execute(
-                        "INSERT INTO users (username, password_hash, email, email_verified, balance, is_admin, created_at) "
-                        "VALUES (?, ?, ?, 1, ?, ?, ?)",
-                        (entry["name"], generate_password_hash(password), entry["email"],
-                         STARTING_BALANCE, is_admin, now_str()))
-                    log_activity(db, cur.lastrowid, "signup", STARTING_BALANCE, None, "Starting balance")
-                    db.execute("COMMIT")
-                except sqlite3.IntegrityError:
-                    db.execute("ROLLBACK")
-                    flash("An account already exists for that name. Log in with its password.", "error")
-                    return render_template("login.html", stage="select", names=names, next_url=next_url)
                 session.clear()
                 session.permanent = True
                 session["uid"] = cur.lastrowid
                 session["gen"] = 0
                 flash(f"Welcome! You start with {STARTING_BALANCE:,.0f} {CURRENCY}."
-                      + (" You're an admin, so you can create and resolve markets." if is_admin else ""), "success")
-                return redirect(next_url if next_url.startswith("/") and not next_url.startswith("//")
-                                else url_for("index"))
-        else:
-            flash("That login step is no longer available. Start again.", "error")
-            stage = "select"
-    return render_template("login.html", stage=stage, names=names,
-                           selected_name=selected_name, next_url=next_url)
+                      + (" You're an admin, so you can create and resolve markets." if is_admin else "")
+                      + " Confirm your email to start betting.", "success")
+                send_email_code(db, cur.lastrowid, username, email)
+                return redirect(url_for("account_email"))
+    return render_template("register.html")
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        if rate_limited(("login-ip", request.remote_addr), 120, 60):
+            flash("Too many log-in attempts from this network. Wait a minute and try again.", "error")
+            return render_template("login.html")
+        name = request.form.get("username", "").strip()
+        fail_key = ("login-fail", name.lower())
+        recent_fails = [t for t in _hits.get(fail_key, []) if time.time() - t < 300]
+        if len(recent_fails) >= 10:
+            flash("Too many wrong passwords for this account. Wait 5 minutes and try again.", "error")
+            return render_template("login.html")
+        u = get_db().execute("SELECT * FROM users WHERE username = ?", (name,)).fetchone()
+        if u and check_password_hash(u["password_hash"], request.form.get("password", "")):
+            _hits.pop(fail_key, None)
+            session.clear()
+            session.permanent = True
+            session["uid"] = u["id"]
+            session["gen"] = u["session_gen"]
+            nxt = request.args.get("next", "")
+            return redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else url_for("index"))
+        rate_limited(fail_key, 10, 300)  # record the failure
+        flash("Wrong username or password.", "error")
+    return render_template("login.html")
+
+
+def email_taken(db, email, except_id=None):
+    row = db.execute("SELECT id FROM users WHERE email = ? COLLATE NOCASE AND email_verified = 1", (email,)).fetchone()
+    return row is not None and row["id"] != except_id
+
+
+def send_email_code(db, user_id, username, email):
+    """Email a 6-digit code to confirm `email` for this account. Returns True if it was sent."""
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    try:
+        send_login_code_email(email, code)
+    except (OSError, RuntimeError, smtplib.SMTPException, ValueError):
+        current_app.logger.exception("Unable to send an email confirmation code.")
+        flash("We couldn't send an email just now. Check the address and try again in a minute.", "error")
+        return False
+    db.execute("INSERT OR REPLACE INTO login_challenges (username, code_hash, expires_at, requested_at, attempts, email) "
+               "VALUES (?, ?, ?, ?, 0, ?)",
+               (username, login_code_hash(username, code), time.time() + LOGIN_CODE_LIFETIME, time.time(), email))
+    flash(f"We sent a 6-digit code to {email}. It expires in 10 minutes.", "success")
+    return True
+
+
+@app.route("/account/email", methods=["GET", "POST"])
+@login_required
+def account_email():
+    """Add (or change) your email: enter it, then type the code we send to it. Accounts without a confirmed email
+    are sent here before they can use the rest of the site."""
+    db = get_db()
+    u = g.user
+    challenge = db.execute("SELECT * FROM login_challenges WHERE username = ?", (u["username"],)).fetchone()
+    if request.method == "POST":
+        action = request.form.get("action", "")
+        if action in ("send", "resend"):
+            email = request.form.get("email", "").strip() if action == "send" else (challenge["email"] if challenge else "")
+            if not EMAIL_RE.match(email or ""):
+                flash("Enter a valid email address.", "error")
+            elif email_taken(db, email, except_id=u["id"]):
+                flash("That email is already used by another account.", "error")
+            elif challenge and challenge["email"] and challenge["email"].casefold() == email.casefold() \
+                    and time.time() - challenge["requested_at"] < LOGIN_CODE_RESEND_DELAY:
+                flash("We just sent a code. Wait a minute before asking for another.", "error")
+            elif rate_limited(("email-code", u["id"]), 5, 3600) or rate_limited(("email-code-ip", request.remote_addr), 30, 3600):
+                flash("Too many codes requested. Try again later.", "error")
+            else:
+                send_email_code(db, u["id"], u["username"], email)
+            return redirect(url_for("account_email"))
+        if action == "change":
+            db.execute("DELETE FROM login_challenges WHERE username = ?", (u["username"],))
+            return redirect(url_for("account_email"))
+        if action == "verify":
+            code = request.form.get("code", "").strip()
+            if not challenge or not challenge["email"] or challenge["expires_at"] < time.time() \
+                    or challenge["attempts"] >= LOGIN_CODE_MAX_ATTEMPTS:
+                db.execute("DELETE FROM login_challenges WHERE username = ?", (u["username"],))
+                flash("That code expired. Enter your email to get a new one.", "error")
+            elif not hmac.compare_digest(challenge["code_hash"], login_code_hash(u["username"], code)):
+                db.execute("UPDATE login_challenges SET attempts = attempts + 1 WHERE username = ?", (u["username"],))
+                flash("That code isn't right. Check the email and try again.", "error")
+            elif email_taken(db, challenge["email"], except_id=u["id"]):
+                db.execute("DELETE FROM login_challenges WHERE username = ?", (u["username"],))
+                flash("That email is already used by another account.", "error")
+            else:
+                db.execute("UPDATE users SET email = ?, email_verified = 1 WHERE id = ?", (challenge["email"], u["id"]))
+                db.execute("DELETE FROM login_challenges WHERE username = ?", (u["username"],))
+                try:
+                    write_email_csv(db)
+                except OSError:
+                    current_app.logger.exception("Couldn't update people.csv.")
+                flash("Email confirmed. You're all set!", "success")
+                return redirect(url_for("index"))
+            return redirect(url_for("account_email"))
+    pending = challenge["email"] if challenge and challenge["email"] and challenge["expires_at"] >= time.time() else None
+    return render_template("account_email.html", pending=pending,
+                           current=u["email"] if u["email_verified"] else None)
 
 
 def set_temporary_password(db, user_id):
@@ -1806,29 +1764,12 @@ def leaderboard():
     db = get_db()
     worth = net_worths(db)
     counts = {r["user_id"]: r["n"] for r in db.execute("SELECT user_id, COUNT(*) AS n FROM trades GROUP BY user_id")}
-    users = db.execute("SELECT id, username, balance FROM users").fetchall()
-    try:
-        roster = load_login_directory()
-    except (OSError, ValueError, json.JSONDecodeError):
-        roster = {}
-    by_name = {u["username"].casefold(): u for u in users}
-    board_by_name = {}
-    for key, entry in roster.items():
-        u = by_name.get(key)
-        if u:
-            board_by_name[key] = {"username": u["username"], "worth": worth[u["id"]],
-                                  "balance": u["balance"], "trades": counts.get(u["id"], 0),
-                                  "is_me": g.user is not None and g.user["id"] == u["id"]}
-        else:
-            board_by_name[key] = {"username": entry["name"], "worth": STARTING_BALANCE,
-                                  "balance": STARTING_BALANCE, "trades": 0,
-                                  "is_me": False}
-    for u in users:
-        key = u["username"].casefold()
-        if key not in board_by_name:
-            board_by_name[key] = {"username": u["username"], "worth": worth[u["id"]],
-                                  "balance": u["balance"], "trades": counts.get(u["id"], 0),
-                                  "is_me": g.user is not None and g.user["id"] == u["id"]}
+    # accounts that never confirmed an email and never traded (abandoned sign-ups) aren't listed
+    users = db.execute("SELECT id, username, balance, email_verified FROM users").fetchall()
+    board_by_name = {u["username"].casefold(): {"username": u["username"], "worth": worth[u["id"]],
+                                                "balance": u["balance"], "trades": counts.get(u["id"], 0),
+                                                "is_me": g.user is not None and g.user["id"] == u["id"]}
+                     for u in users if u["email_verified"] or counts.get(u["id"], 0)}
     board = sorted(board_by_name.values(), key=lambda x: -x["worth"])
     return render_template("leaderboard.html", board=board)
 

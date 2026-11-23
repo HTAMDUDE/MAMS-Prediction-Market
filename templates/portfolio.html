@@ -62,6 +62,7 @@
 {% endif %}
 
 <div class="card" id="account">
+  <p>Email: <strong>{{ user.email }}</strong> · <a href="{{ url_for('account_email') }}">Change</a></p>
   <details {{ 'open' if get_flashed_messages() }}>
     <summary><strong>Account: change password</strong></summary>
     <form method="post" action="{{ url_for('change_password') }}" class="stack" style="max-width:22rem;margin-top:.75rem">

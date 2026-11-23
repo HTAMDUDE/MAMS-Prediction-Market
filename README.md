@@ -56,39 +56,26 @@ python3 -m venv .venv
 Other people on the same network can open `http://<your-computer's-IP>:8000`.
 (Port 5000 isn't used because macOS's AirPlay Receiver already takes it.)
 
-**The owner is the roster name `Kaushik`** (`OWNER_USERNAME` in `app.py`; override with `MAMS_OWNER`, or set it
-empty to make the first verified account the owner). To make specific
-usernames admins when they first log in, set `MAMS_ADMINS=alice,bob`.
+**The owner is the account named `Kaushik`** (`OWNER_USERNAME` in `app.py`; override with `MAMS_OWNER`, or set it
+empty to make the first account the owner). To make specific usernames admins when they sign up, set
+`MAMS_ADMINS=alice,bob`.
 
-### Login directory and email
+### Accounts and email
 
-Login is restricted to the private participant directory. For local development, create
-`instance/login_roster.json` as a JSON list of `{"name": "...", "email": "..."}` entries. The entire `instance/`
-directory is ignored by Git. On a host, provide the same JSON through the private `MAMS_USER_DIRECTORY`
-environment variable or configure `MAMS_USER_DIRECTORY_FILE` to point to a private file; do not commit participant
-names or email addresses.
+Anyone can sign up with a username, email and password. Every account needs a **confirmed email**: after signing up
+(or, for accounts made before emails existed, after logging in) people are sent to **Confirm your email**, where they
+type a 6-digit code we email them. Until then they can't use the rest of the site. When emails were introduced,
+everyone was logged out once so they'd be asked for one. Each email can belong to one account, and people can change
+theirs from Portfolio.
+
+Every confirmed email is saved in the database and written to **`instance/people.csv`** (`name,email` for every
+account, blank until confirmed). `instance/` is ignored by Git, so names and emails never reach GitHub.
 
 Configure `MAMS_SMTP_HOST`, `MAMS_SMTP_PORT` (defaults to `587`), `MAMS_SMTP_USERNAME`, `MAMS_SMTP_PASSWORD`, and
-`MAMS_SMTP_FROM` for verification email. A first-time login sends a code to the selected participant's address, and
-the verification form lets them request another code after the resend cooldown.
-Automated tests never deliver email: they replace the mail sender with a mock, and the sender refuses delivery when
-Flask testing mode is enabled. For a live manual test, only select your own name so the code goes to your address.
-
-To test locally without setting up SMTP, run `python -m pytest -q`; the first-login flow is covered with a mocked
-email sender. For a browser test without sending any email, start the app with `MAMS_EMAIL_BACKEND=console`; the
-verification code will appear in the server terminal. On Windows PowerShell, run:
-
-```powershell
-$env:MAMS_EMAIL_BACKEND = "console"
-.\.venv\Scripts\python.exe -m flask --app app run --host 127.0.0.1 --port 8000
-```
-
-Then open `http://127.0.0.1:8000` and select any roster name; first-time codes are printed in the terminal, not
-emailed. For real Gmail SMTP delivery, run `.\scripts\setup-gmail-smtp.ps1` from the project folder. It securely prompts
-for a Gmail app password, verifies SMTP authentication without sending an email, and starts the local server in SMTP
-mode. It prints the server PID and log paths. The password is not written to Git or chat. Gmail
-must have 2-Step Verification enabled and the app password must be generated at
-`https://myaccount.google.com/apppasswords`.
+`MAMS_SMTP_FROM` for the code emails (for Gmail: `smtp.gmail.com`, and an app password from
+`https://myaccount.google.com/apppasswords`, which needs 2-Step Verification). Automated tests never send email.
+To try it locally without sending anything, start the app with `MAMS_EMAIL_BACKEND=console`; codes are printed in the
+server terminal instead. On Windows, `.\scripts\setup-gmail-smtp.ps1` sets up real Gmail delivery for a local server.
 
 ### Roles
 
@@ -178,8 +165,9 @@ Fine-grained → read-only access to this repo's contents). Your normal GitHub p
   from app import app as application
   ```
 
-**4. Click the green Reload button** and open `https://USERNAME.pythonanywhere.com`. Register your account
-right away, because the first account becomes the admin.
+**4. Click the green Reload button** and open `https://USERNAME.pythonanywhere.com`. Sign up as `Kaushik`
+(the owner and admin) if that account doesn't exist yet. Add the `MAMS_SMTP_*` settings below to the WSGI file
+first, so the email confirmation codes can be sent.
 
 **Updating after you push changes to GitHub:**
 
