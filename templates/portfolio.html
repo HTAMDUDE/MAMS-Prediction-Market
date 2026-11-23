@@ -12,19 +12,19 @@
   <h2>Open positions</h2>
   {% if active %}
   <div class="table-scroll">
-  <table class="table">
+  <table class="table stack-mobile">
     <thead><tr><th>Market</th><th>Outcome</th><th class="num">Shares</th><th class="num">Spent</th><th class="num" title="What these shares would sell for right now">Sell value</th><th class="num">Gain</th></tr></thead>
     <tbody>
     {% for i in active %}
       {% set gain = i.value - i.r.cost %}
       <tr>
-        <td><a href="{{ url_for('market', mid=i.r.market_id) }}">{{ i.r.question }}</a>
+        <td data-label="Market"><a href="{{ url_for('market', mid=i.r.market_id) }}">{{ i.r.question }}</a>
           {% if i.b.state == 'closed' %}<span class="status status-closed">awaiting result</span>{% elif i.b.state == 'proposed' %}<span class="status status-pending">result proposed</span>{% elif i.b.state == 'disputed' %}<span class="status status-rejected">disputed</span>{% endif %}</td>
-        <td>{{ i.r.label }} <span class="muted small">{{ i.price|pct }}</span></td>
-        <td class="num">{{ i.r.shares|money }}</td>
-        <td class="num">Ⓜ{{ i.r.cost|money }}</td>
-        <td class="num">Ⓜ{{ i.value|money }}</td>
-        <td class="num {{ 'up' if gain >= 0 else 'down' }}">{{ '+' if gain >= 0 }}{{ gain|money }}</td>
+        <td data-label="Outcome">{{ i.r.label }} <span class="muted small">{{ i.price|pct }}</span></td>
+        <td class="num" data-label="Shares">{{ i.r.shares|money }}</td>
+        <td class="num" data-label="Spent">Ⓜ{{ i.r.cost|money }}</td>
+        <td class="num" data-label="Sell value">Ⓜ{{ i.value|money }}</td>
+        <td data-label="Gain" class="num {{ 'up' if gain >= 0 else 'down' }}">{{ gain|signed_money }}</td>
       </tr>
     {% endfor %}
     </tbody>
@@ -38,17 +38,17 @@
 <div class="card">
   <h2>Settled</h2>
   <div class="table-scroll">
-  <table class="table">
+  <table class="table stack-mobile">
     <thead><tr><th>Market</th><th>Your pick</th><th class="num">Shares</th><th class="num">Spent</th><th class="num">Result</th></tr></thead>
     <tbody>
     {% for i in settled %}
       <tr>
-        <td><a href="{{ url_for('market', mid=i.r.market_id) }}">{{ i.r.question }}</a></td>
-        <td>{{ i.r.label }}</td>
-        <td class="num">{{ i.r.shares|money }}</td>
-        <td class="num">Ⓜ{{ i.r.cost|money }}</td>
-        <td class="num">
-          {% if i.b.state == 'cancelled' %}<span class="muted">Refunded</span>
+        <td data-label="Market"><a href="{{ url_for('market', mid=i.r.market_id) }}">{{ i.r.question }}</a></td>
+        <td data-label="Your pick">{{ i.r.label }}</td>
+        <td class="num" data-label="Shares">{{ i.r.shares|money }}</td>
+        <td class="num" data-label="Spent">Ⓜ{{ i.r.cost|money }}</td>
+        <td class="num" data-label="Result">
+          {% if i.b.state == 'cancelled' %}<span class="muted">{% if i.refund > 0 %}Refunded Ⓜ{{ i.refund|money }}{% else %}Cancelled{% endif %}</span>
           {% elif i.price > 0 %}<span class="up">Won Ⓜ{{ i.value|money }}</span>
             {% if i.bonus %}<div class="muted small">incl. Ⓜ{{ i.bonus|money }} pot bonus</div>{% endif %}
           {% else %}<span class="down">Lost</span>{% endif %}
@@ -60,6 +60,22 @@
   </div>
 </div>
 {% endif %}
+
+<div class="card" id="account">
+  <details {{ 'open' if get_flashed_messages() }}>
+    <summary><strong>Account: change password</strong></summary>
+    <form method="post" action="{{ url_for('change_password') }}" class="stack" style="max-width:22rem;margin-top:.75rem">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label for="pw-current">Current password</label>
+      <input id="pw-current" type="password" name="current" autocomplete="current-password" required>
+      <label for="pw-new">New password (at least 6 characters)</label>
+      <input id="pw-new" type="password" name="new" autocomplete="new-password" minlength="6" required>
+      <label for="pw-confirm">Confirm new password</label>
+      <input id="pw-confirm" type="password" name="confirm" autocomplete="new-password" minlength="6" required>
+      <button class="btn">Change password</button>
+    </form>
+  </details>
+</div>
 
 <div class="card">
   <h2>Trade history <a class="small" href="{{ url_for('balance_history') }}">Full balance history →</a></h2>

@@ -64,7 +64,7 @@ Other people on the same network can open `http://<your-computer's-IP>:8000`.
 | Role | Can do |
 |---|---|
 | **Owner** (one person) | Everything admins can, plus add/remove admins and manage other admins. Nobody can demote, ban, block or change the owner's balance. |
-| **Admin** | Run markets (create, edit, approve proposals, resolve, cancel, delete) and manage **regular users** (balances, bans, blocks). Can't act on the owner or other admins, and can't create admins. |
+| **Admin** | Run markets (create, edit, approve proposals, resolve, cancel, delete) and manage **regular users** (balances, bans, mutes, password resets, account deletion) and moderate comments. Can't act on the owner or other admins, and can't create admins. Every action is recorded in the Admin log. |
 | **User** | Bet, comment and propose markets. |
 
 Use `.venv/bin/python`, not plain `python3`, so the app runs with the Flask installed in the virtual environment.
@@ -87,7 +87,13 @@ Admins see an **Admin** link in the top bar.
 | **Delete** | Admin page or the market's page | Removes the market completely. Unresolved markets refund bets first; payouts from resolved markets are kept. |
 | **Block from one market** | The market's page → Admin → "Blocked from this market" | Stops that person betting on this market (e.g. someone who already knows the answer). Any bets they placed here are refunded and removed, which also undoes their effect on the price. Can be undone with Unblock. |
 | **Ban from trading** | Admin page → Users → Trading | Stops someone betting anywhere. Their bets in every unresolved market are refunded and removed. Already-resolved markets are not changed. Click **Allow** to lift the ban. |
-| **Adjust balance / Make admin** (admins: owner only) | Admin page → Users | Add or remove MAMS Bucks, or promote/demote other users. |
+| **Find and manage users** | Admin page → Users | Search by username, filter (everyone / admins / banned / muted), 25 per page. **Manage** opens a page for one user: adjust balance (adds or removes; never below Ⓜ0), ban or allow trading, mute or allow commenting, **reset password**, make or remove admin (owner only) and **delete account**. Admins can manage regular users; only the owner can manage admins or the owner. |
+| **Reset a password** | Manage user → Reset password, or `python reset_password.py <username>` on the server | Shows a temporary 12-character password once and signs that user out everywhere. The CLI works even if the owner is locked out. Users can change their own password on the Portfolio page (that also signs out their other devices). |
+| **Delete an account** | Manage user → Delete account | Their bets in unresolved markets are reversed and refunded first (prices go back as if they never bet); payouts from settled markets stay. Refused for yourself, the owner, admins (demote them first), people with an open dispute, and people who created a market that is still running (resolve or cancel it first). |
+| **Moderate comments** | Under each comment on a market page | **Hide** (others see "This comment was hidden by an admin"; admins still see it), **Unhide**, or **Delete**. Admins can moderate regular users' comments and their own; the owner can moderate anyone's. Muted users can't post. |
+| **Close early / Reopen / Feature** | Market page → Admin → Market controls | **Close betting now** stops betting so you can propose a result. **Reopen** a closed market with a new closing time (not while a result is proposed). **Feature** pins a market first on the Open tab with a ★ badge. |
+| **Announcement** | Admin page → Site announcement | Up to 300 characters, shown under the top bar on every page until cleared. |
+| **Admin log** | Admin page → Admin log (`/admin/log`) | Every admin action, who did it, and what changed. Searchable, 50 per page, and it can't be edited. The separate **Activity** page is the trade feed. |
 
 When betting closes, a market moves to **Awaiting result**. An admin proposes the result, there is a 2-hour challenge window (anyone who traded in the market can dispute it), and then winners are paid automatically. Finalizing happens on the next page load after the window ends, so no background job is needed.
 
@@ -96,6 +102,8 @@ Trades by admins and by the market's creator are labelled on the market page so 
 **Upgrading an existing site:** just pull the new code and reload. The database gets its new columns automatically on start-up and nothing needs to be run by hand.
 
 Users can have up to 5 proposals waiting at once, and can withdraw a proposal until it's reviewed.
+
+**Price protection:** the bet form sends the quoted amount with a 2% tolerance; if the price moves further than that before you press Buy or Sell, the trade is refused and you can re-check the quote. Sells worth under Ⓜ0.01 are refused.
 
 ## Deploying on PythonAnywhere (free)
 
@@ -162,7 +170,7 @@ accounts or bets.
 |---------------|----------------------|-----------------------------------------------------|
 | `PORT`        | `8000`               | Port to listen on                                   |
 | `MAMS_DB`     | `instance/mams.db`   | SQLite database file                                |
-| `MAMS_OWNER`  | first account        | Username of the site owner                          |
+| `MAMS_OWNER`  | `Kaushik`            | Username of the site owner (set it empty to make the first account the owner) |
 | `MAMS_ADMINS` | (empty)              | Comma-separated usernames that become admins        |
 | `SECRET_KEY`  | auto-generated       | Session signing key (saved to `instance/secret_key`)|
 | `MAMS_PRODUCTION` | (off)            | Set to `1` when hosted on HTTPS: secure cookies, trust proxy IPs |
@@ -173,7 +181,7 @@ Starting balance, daily bonus and the category list are constants at the top of 
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest
+.venv/bin/python -m pytest        # tests/test_market.py (core rules) and tests/test_improvements.py (admin controls, safeguards)
 ```
 
 ## Project layout
@@ -183,6 +191,7 @@ app.py          Flask routes, trading, resolution, admin tools, auth
 lmsr.py         Market-maker math (prices, cost to buy, value when selling)
 schema.sql      Database tables
 seed.py         Example markets
+reset_password.py  Give a user a temporary password (python reset_password.py <username>)
 templates/      HTML pages (Jinja)
 static/         CSS and the chart / trade-preview JavaScript
 tests/          pytest suite

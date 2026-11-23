@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Admin log · MAMS Prediction Market{% endblock %}
+{% block content %}
+<div class="activity-head">
+  <div>
+    <h1>Admin log</h1>
+    <p class="muted">Every action an admin has taken, newest first. Entries can't be edited or deleted.</p>
+  </div>
+  <a class="btn btn-small btn-ghost" href="{{ url_for('admin') }}">← Admin</a>
+</div>
+
+<form method="get" class="inline" style="margin-bottom:1rem">
+  <label for="log-q" class="sr-only">Search the log</label>
+  <input id="log-q" type="search" name="q" value="{{ q }}" placeholder="Search admin, action, target or detail" aria-label="Search the log">
+  <button class="btn btn-small">Search</button>
+  {% if q %}<a class="btn btn-small btn-ghost" href="{{ url_for('admin_log') }}">Clear</a>{% endif %}
+</form>
+
+<div class="card">
+  {% if rows %}
+  <div class="table-scroll">
+  <table class="table stack-mobile">
+    <thead><tr><th>When</th><th>Admin</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td data-label="When" class="muted small nowrap" title="{{ r.created_at|when }}">{{ r.created_at|ago }}</td>
+        <td data-label="Admin">{{ r.actor_name }}</td>
+        <td data-label="Action">{{ labels.get(r.action, r.action) }}</td>
+        <td data-label="Target">
+          {% if r.target_type == 'market' and r.market_exists and r.action != 'market.delete' %}
+            <a href="{{ url_for('market', mid=r.target_id) }}">{{ r.target_label }}</a>
+          {% else %}{{ r.target_label or '—' }}{% endif %}
+        </td>
+        <td data-label="Detail" class="muted small">{{ r.detail }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="muted small">Page {{ page }} of {{ pages }} · {{ total }} entr{{ 'y' if total == 1 else 'ies' }}
+    {% if page > 1 %}· <a href="{{ url_for('admin_log', q=q or None, page=page - 1) }}">← Newer</a>{% endif %}
+    {% if page < pages %}· <a href="{{ url_for('admin_log', q=q or None, page=page + 1) }}">Older →</a>{% endif %}</p>
+  {% else %}
+  <p class="muted">{{ 'Nothing matches that search.' if q else 'No admin activity yet.' }}</p>
+  {% endif %}
+</div>
+{% endblock %}

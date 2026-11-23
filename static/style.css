@@ -326,3 +326,94 @@ main { padding-top: 8px; padding-bottom: 32px; }
 .formula { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--surface-2); border-radius: 8px;
            padding: 8px 12px; display: inline-block; }
 .late-table { max-width: 420px; margin-bottom: 12px; }
+
+/* confirmation dialog */
+dialog { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text);
+         padding: 20px; max-width: min(28rem, calc(100vw - 32px)); box-shadow: 0 12px 40px rgba(0,0,0,.25); }
+dialog::backdrop { background: rgba(0,0,0,.45); }
+dialog h2 { margin-top: 0; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+           clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.row-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.row-actions form { margin: 0; }
+.btn[disabled] { opacity: .5; cursor: not-allowed; }
+
+.announcement { background: color-mix(in srgb, var(--gold) 22%, var(--surface)); border-bottom: 1px solid var(--gold);
+                padding: 8px 0; font-size: .92rem; white-space: pre-line; }
+.featured { color: var(--gold); font-weight: 600; font-size: .85em; }
+.comment-hidden { opacity: .8; }
+.struck { text-decoration: line-through; }
+.mod-actions { margin-top: 6px; }
+
+/* ---- polish: trade form, focus, mobile ---- */
+:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.preview { min-height: 13.5rem; transition: opacity .12s; }
+.preview.stale { opacity: .5; }
+.btn-buy { background: var(--up); border-color: var(--up); color: #fff; }
+.btn-sell { background: var(--down); border-color: var(--down); color: #fff; }
+#submit-btn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.field > label, label.field-label { display: block; font-size: .85rem; font-weight: 600; margin-bottom: 4px; }
+.yn-yes { background: color-mix(in srgb, var(--c0) 16%, transparent); color: var(--c0); }
+.yn-no { background: color-mix(in srgb, var(--c1) 14%, transparent); color: var(--c1); }
+
+.menu-btn, .sheet { display: none; }
+.sheet { flex-direction: column; }
+@media (max-width: 767px) {
+  .desk-only { display: none !important; }
+  .menu-btn { display: inline-block; }
+  .brand-text { display: none; }
+  .topbar-inner { flex-wrap: nowrap; }
+  .account { margin-left: auto; }
+  dialog.sheet { margin: 0 0 0 auto; height: 100dvh; max-height: 100dvh; width: min(19rem, 86vw);
+                 border-radius: 0; border-width: 0 0 0 1px; padding: 16px; animation: slide-in .18s ease-out; }
+  dialog.sheet[open] { display: flex; }
+  .sheet-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .sheet-nav { display: flex; flex-direction: column; gap: 2px; }
+  .sheet-nav a { padding: 10px 12px; border-radius: 8px; color: var(--text); font-weight: 500; min-height: 44px; display: flex; align-items: center; gap: 6px; }
+  .sheet-nav a.active { background: var(--surface-2); }
+  .sheet-account { margin-top: auto; display: flex; flex-direction: column; gap: 8px; }
+  .sheet-account form { margin: 0; }
+}
+@keyframes slide-in { from { transform: translateX(100%); } to { transform: none; } }
+
+/* bottom "Bet" bar (phones only) */
+.bet-bar { display: none; }
+@media (max-width: 860px) {
+  /* market page order on phones: market -> trade panel -> everything else (admin tools last) */
+  .market-layout { display: flex; flex-direction: column; gap: 16px; }
+  .market-main, .market-side { display: contents; }
+  .market-head { order: 1; }
+  .market-side > * { order: 2; }
+  .market-rest { order: 3; }
+  .market-side > .admin-card { order: 4; }
+  .market-layout .card { margin-bottom: 0; }
+  .bet-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; display: flex; align-items: center;
+             justify-content: space-between; gap: 12px; padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+             background: var(--surface); border-top: 1px solid var(--border); box-shadow: 0 -4px 16px rgba(0,0,0,.12); }
+  .bet-bar[hidden] { display: none; }
+  .bet-bar .btn { padding: 8px 22px; }
+  main { padding-bottom: 72px; }
+}
+
+/* tap targets and iOS zoom */
+@media (max-width: 767px) {
+  .btn, .btn-small, .tab, .chip, .seg button, .quick button, .nav a { min-height: 36px; }
+  .btn-small { display: inline-flex; align-items: center; justify-content: center; }
+  input, select, textarea { font-size: 16px; min-height: 36px; }
+  .tabs, .chips { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 2px; }
+  .chip { white-space: nowrap; }
+}
+
+/* wide tables become stacked rows on phones: add class "stack-mobile" and data-label to cells */
+@media (max-width: 600px) {
+  .table.stack-mobile thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .table.stack-mobile, .table.stack-mobile tbody { display: block; }
+  .table.stack-mobile tr { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .table.stack-mobile td { display: block; padding: 2px 0; border: 0; text-align: left; }
+  .table.stack-mobile td[data-label]::before { content: attr(data-label); display: block; font-size: .72rem; color: var(--muted);
+                                              text-transform: uppercase; letter-spacing: .04em; }
+  .table.stack-mobile td.num { text-align: left; }
+}
+.empty-filters { text-align: center; padding: 32px 0; }
+.market-card[hidden], .empty[hidden], .btn[hidden] { display: none; }

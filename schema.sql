@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS users (
     balance       REAL NOT NULL,
     is_admin      INTEGER NOT NULL DEFAULT 0,
     last_bonus    TEXT,
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    session_gen   INTEGER NOT NULL DEFAULT 0   -- bump to sign the user out everywhere
 );
 
 CREATE TABLE IF NOT EXISTS markets (
@@ -30,7 +31,8 @@ CREATE TABLE IF NOT EXISTS markets (
     proposed_by         INTEGER,
     proposed_at         TEXT,
     finalizes_at        TEXT,
-    resolved_by         INTEGER
+    resolved_by         INTEGER,
+    featured            INTEGER NOT NULL DEFAULT 0   -- admins can pin a market to the top of the home page
 );
 
 CREATE TABLE IF NOT EXISTS outcomes (
@@ -72,7 +74,8 @@ CREATE TABLE IF NOT EXISTS comments (
     market_id  INTEGER NOT NULL REFERENCES markets(id),
     user_id    INTEGER NOT NULL REFERENCES users(id),
     body       TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    hidden     INTEGER NOT NULL DEFAULT 0   -- hidden by an admin: others see a placeholder
 );
 
 -- Markets suggested by users, waiting for an admin to approve or reject.
@@ -108,7 +111,7 @@ CREATE TABLE IF NOT EXISTS disputes (
 CREATE TABLE IF NOT EXISTS clarifications (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     market_id  INTEGER NOT NULL REFERENCES markets(id),
-    admin_id   INTEGER NOT NULL REFERENCES users(id),
+    admin_id   INTEGER REFERENCES users(id),   -- NULL once that admin's account is deleted
     body       TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -160,3 +163,32 @@ CREATE INDEX IF NOT EXISTS idx_history_market  ON price_history(market_id);
 CREATE INDEX IF NOT EXISTS idx_comments_market ON comments(market_id);
 CREATE INDEX IF NOT EXISTS idx_disputes_market ON disputes(market_id);
 CREATE INDEX IF NOT EXISTS idx_clarifications_market ON clarifications(market_id);
+
+-- Every admin action (Admin -> Admin log). Names are copied in with no foreign keys so the log survives
+-- deleted accounts and markets; nothing in the app edits or deletes these rows.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_id     INTEGER,
+    actor_name   TEXT NOT NULL,
+    action       TEXT NOT NULL,       -- key in AUDIT_ACTIONS
+    target_type  TEXT NOT NULL,       -- user | market | comment | proposal | site
+    target_id    TEXT NOT NULL DEFAULT '',
+    target_label TEXT NOT NULL DEFAULT '',
+    detail       TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action);
+
+-- Users an admin has barred from commenting.
+CREATE TABLE IF NOT EXISTS comment_mutes (
+    user_id    INTEGER PRIMARY KEY REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+
+-- Small site-wide settings, e.g. the announcement banner.
+CREATE TABLE IF NOT EXISTS site_settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);

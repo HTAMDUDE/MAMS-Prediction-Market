@@ -4,13 +4,13 @@
 {% macro delete_button(b) %}
 <a class="btn btn-small btn-ghost" href="{{ url_for('admin_edit', mid=b.m.id) }}">Edit</a>
 <form method="post" action="{{ url_for('admin_delete', mid=b.m.id) }}" class="inline"
-      onsubmit="return confirm({{ ('Delete this market permanently? ' ~ ('Everyone who bet gets their money back. ' if b.m.status == 'open' else 'Payouts already made are kept. ') ~ 'This cannot be undone.')|tojson|forceescape }})">
+      data-confirm="{{ ('Everyone who bet gets their money back. ' if b.m.status == 'open' else 'Payouts already made are kept. ') ~ 'This cannot be undone.' }}" data-confirm-title="Delete this market permanently?" data-confirm-label="Delete market">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <button class="btn btn-small btn-danger">Delete</button>
 </form>
 {% endmacro %}
 
-<h1>Admin</h1>
+<div class="activity-head"><h1>Admin</h1><a class="btn btn-small btn-ghost" href="{{ url_for('admin_log') }}">Admin log →</a></div>
 
 <div class="card" id="proposals">
   <h2>Proposals waiting for approval {% if proposals %}<span class="badge">{{ proposals|length }}</span>{% endif %}</h2>
@@ -58,7 +58,7 @@
         </div>
         {% if b.state == 'closed' %}
         <form method="post" action="{{ url_for('admin_propose_result', mid=b.m.id) }}" class="inline"
-              onsubmit="return confirm('Propose this result? Traders get {{ DISPUTE_HOURS }} hours to dispute it before winners are paid.')">
+              data-confirm="Traders get {{ DISPUTE_HOURS }} hours to dispute it before winners are paid." data-confirm-title="Propose this result?" data-confirm-label="Propose result">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <select name="outcome_id" required>
             <option value="">Winner…</option>
@@ -89,63 +89,59 @@
     {% endif %}
   </div>
 </div>
+<div class="card" id="announcement">
+  <h2>Site announcement</h2>
+  <p class="muted small">Shown to everyone under the top bar (up to 300 characters). People see a new one on their next page load.</p>
+  <form method="post" action="{{ url_for('admin_announcement') }}" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label for="announcement-text" class="sr-only">Announcement</label>
+    <textarea id="announcement-text" name="text" maxlength="300" rows="2" placeholder="e.g. Trading pauses during the assembly.">{{ announcement }}</textarea>
+    <div class="row-actions">
+      <button class="btn btn-small">{{ 'Update' if announcement else 'Publish' }}</button>
+      {% if announcement %}<button class="btn btn-small btn-ghost" name="clear" value="1">Clear</button>{% endif %}
+    </div>
+  </form>
+</div>
+
 <div class="card" id="users">
   <h2>Users</h2>
   <p class="muted small">
     {% if is_owner %}You're the owner: you can manage everyone, and only you can add or remove admins.
-    {% else %}Only the site owner can add or remove admins, or change an admin's balance or trading access.{% endif %}
+    {% else %}Only the site owner can add or remove admins, or manage an admin's account.{% endif %}
   </p>
+  <form method="get" action="{{ url_for('admin') }}#users" class="inline filters">
+    <label for="user-q" class="sr-only">Search users</label>
+    <input id="user-q" type="search" name="q" value="{{ uv.q }}" placeholder="Search by username" aria-label="Search users">
+    <label for="user-filter" class="sr-only">Filter users</label>
+    <select id="user-filter" name="filter" aria-label="Filter users">
+      {% for key, label in uv.filters.items() %}<option value="{{ key }}" {{ 'selected' if uv.filter == key }}>{{ label }}</option>{% endfor %}
+    </select>
+    <button class="btn btn-small">Search</button>
+    {% if uv.q or uv.filter %}<a class="btn btn-small btn-ghost" href="{{ url_for('admin') }}#users">Clear</a>{% endif %}
+  </form>
+  {% if users %}
   <div class="table-scroll">
-  <table class="table">
-    <thead><tr><th>User</th><th class="num">Balance</th><th>Adjust balance</th><th>Trading</th><th>Role</th></tr></thead>
+  <table class="table stack-mobile">
+    <thead><tr><th>User</th><th>Status</th><th class="num">Balance</th><th></th></tr></thead>
     <tbody>
     {% for u in users %}
-      {% set manageable = is_owner or (u.id != owner_id and not u.is_admin) %}
       <tr>
-        <td><a href="{{ url_for('balance_history', user=u.username) }}" title="View balance history"><strong>{{ u.username }}</strong></a>{% if u.id == user.id %} <span class="muted small">(you)</span>{% endif %}</td>
-        <td class="num">Ⓜ{{ u.balance|money }}</td>
-        <td>
-          {% if manageable %}
-          <form method="post" action="{{ url_for('admin_grant', uid=u.id) }}" class="inline">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="number" name="amount" step="0.01" placeholder="±Ⓜ" class="narrow" required>
-            <button class="btn btn-small btn-ghost">Apply</button>
-          </form>
-          {% else %}<span class="muted small">Owner only</span>{% endif %}
+        <td data-label="User"><a href="{{ url_for('balance_history', user=u.username) }}" title="View balance history"><strong>{{ u.username }}</strong></a>{% if u.id == user.id %} <span class="muted small">(you)</span>{% endif %}</td>
+        <td data-label="Status">
+          {% if u.id == owner_id %}<span class="tag">Owner</span>{% elif u.is_admin %}<span class="tag">Admin</span>{% endif %}
+          {% if u.banned %}<span class="status status-rejected">Trading off</span>{% endif %}
+          {% if u.muted %}<span class="status status-closed">Muted</span>{% endif %}
         </td>
-        <td>
-          {% if u.id == owner_id %}<span class="muted small">—</span>
-          {% elif manageable %}
-          <form method="post" action="{{ url_for('admin_trading', uid=u.id) }}" class="inline"
-                {% if not u.banned %}onsubmit="return confirm({{ ('Turn off trading for ' ~ u.username ~ '? Their bets in all unresolved markets will be refunded and removed.')|tojson|forceescape }})"{% endif %}>
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            {% if u.banned %}
-              <span class="status status-rejected">Banned</span>
-              <button class="btn btn-small btn-ghost">Allow</button>
-            {% else %}
-              <button class="btn btn-small btn-ghost">Ban from trading</button>
-            {% endif %}
-          </form>
-          {% else %}
-            {% if u.banned %}<span class="status status-rejected">Banned</span>{% else %}<span class="muted small">Owner only</span>{% endif %}
-          {% endif %}
-        </td>
-        <td>
-          {% if u.id == owner_id %}<span class="tag">Owner</span>
-          {% elif is_owner %}
-          <form method="post" action="{{ url_for('admin_toggle', uid=u.id) }}" class="inline">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            {% if u.is_admin %}<span class="tag">Admin</span>{% endif %}
-            <button class="btn btn-small btn-ghost">{{ 'Remove admin' if u.is_admin else 'Make admin' }}</button>
-          </form>
-          {% else %}
-            <span class="{{ 'tag' if u.is_admin else 'muted small' }}">{{ 'Admin' if u.is_admin else 'User' }}</span>
-          {% endif %}
-        </td>
+        <td data-label="Balance" class="num">Ⓜ{{ u.balance|money }}</td>
+        <td class="num"><a class="btn btn-small btn-ghost" href="{{ url_for('admin_user', uid=u.id) }}">Manage</a></td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
   </div>
+  <p class="muted small">Page {{ uv.page }} of {{ uv.pages }} · {{ uv.total }} user{{ '' if uv.total == 1 else 's' }}
+    {% if uv.page > 1 %}· <a href="{{ url_for('admin', q=uv.q or None, filter=uv.filter or None, upage=uv.page - 1) }}#users">← Previous</a>{% endif %}
+    {% if uv.page < uv.pages %}· <a href="{{ url_for('admin', q=uv.q or None, filter=uv.filter or None, upage=uv.page + 1) }}#users">Next →</a>{% endif %}</p>
+  {% else %}<p class="muted">No users match.</p>{% endif %}
 </div>
 {% endblock %}

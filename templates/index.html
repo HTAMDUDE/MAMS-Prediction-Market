@@ -13,26 +13,25 @@
 </section>
 {% endif %}
 
-<div class="toolbar">
-  <div class="tabs">
-    {% for key, label in [('open', 'Open'), ('closed', 'Awaiting result'), ('resolved', 'Resolved'), ('all', 'All')] %}
-      <a href="{{ url_for('index', status=key, cat=cat or None) }}" class="tab {{ 'active' if status == key }}">{{ label }}</a>
+<div class="toolbar" id="market-filters">
+  <div class="tabs" role="group" aria-label="Status">
+    {% for key, label in tabs %}
+      <a href="{{ url_for('index', status=key, cat=cat or None) }}" data-status="{{ key }}" class="tab {{ 'active' if status == key }}" aria-pressed="{{ 'true' if status == key else 'false' }}">{{ label }}</a>
     {% endfor %}
   </div>
-  <div class="chips">
-    <a href="{{ url_for('index', status=status) }}" class="chip {{ 'active' if not cat }}">All topics</a>
+  <div class="chips" role="group" aria-label="Topic">
+    <a href="{{ url_for('index', status=status) }}" data-cat="" class="chip {{ 'active' if not cat }}" aria-pressed="{{ 'false' if cat else 'true' }}">All topics</a>
     {% for c in CATEGORIES %}
-      <a href="{{ url_for('index', status=status, cat=c) }}" class="chip {{ 'active' if cat == c }}">{{ c }}</a>
+      <a href="{{ url_for('index', status=status, cat=c) }}" data-cat="{{ c }}" class="chip {{ 'active' if cat == c }}" aria-pressed="{{ 'true' if cat == c else 'false' }}">{{ c }}</a>
     {% endfor %}
   </div>
 </div>
 
-{% if markets %}
-<div class="grid">
+<div class="grid" id="market-grid">
   {% for b in markets %}
-    <a class="card market-card" href="{{ url_for('market', mid=b.m.id) }}">
+    <a class="card market-card" href="{{ url_for('market', mid=b.m.id) }}" data-state="{{ b.state }}" data-cat="{{ b.m.category }}" {{ '' if b.m.id in visible else 'hidden' }}>
       <div class="card-meta">
-        <span class="tag">{{ b.m.category }}</span>
+        <span class="tag">{{ b.m.category }}</span>{% if b.m.featured %} <span class="featured" title="Featured by the admins">★ Featured</span>{% endif %}
         {% if b.state == 'open' %}<span class="muted">{{ b.m.closes_at|until }}</span>
         {% elif b.state == 'closed' %}<span class="status status-closed">Awaiting result</span>
         {% elif b.state == 'proposed' %}<span class="status status-pending">Result proposed</span>
@@ -45,7 +44,7 @@
       {% if b.binary and b.state in ('open', 'closed', 'proposed', 'disputed') %}
       <div class="chance-row">
         <div class="chance"><span class="chance-pct">{{ b.outcomes[0].price|pct }}</span> <span class="muted">chance</span></div>
-        <div class="yn"><span class="yn-yes">{{ 'Over' if b.ou else 'Yes' }} {{ (b.outcomes[0].price * 100)|round|int }}¢</span><span class="yn-no">{{ 'Under' if b.ou else 'No' }} {{ (b.outcomes[1].price * 100)|round|int }}¢</span></div>
+        <div class="yn"><span class="yn-yes">{{ 'Over' if b.ou else 'Yes' }} {{ b.outcomes[0].price|cents_label }}</span><span class="yn-no">{{ 'Under' if b.ou else 'No' }} {{ b.outcomes[1].price|cents_label }}</span></div>
       </div>
       {% else %}
       <ul class="odds">
@@ -63,12 +62,13 @@
     </a>
   {% endfor %}
 </div>
-{% else %}
-<div class="empty">
-  <p>No markets here yet.</p>
-  {% if user and user.is_admin %}<a class="btn" href="{{ url_for('admin') }}">Create a market</a>{% endif %}
+<div class="empty" id="empty-state" {{ 'hidden' if visible }}>
+  <p id="empty-title"><strong>{{ 'No markets match these filters.' if (status != 'open' or cat) else 'No open markets right now.' }}</strong></p>
+  <p class="muted" id="empty-hint">{{ 'Try another topic or status.' if (status != 'open' or cat) else 'Check back soon, or propose one yourself.' }}</p>
+  <a class="btn btn-ghost" id="clear-filters" href="{{ url_for('index') }}" {{ '' if (status != 'open' or cat) else 'hidden' }}>Clear filters</a>
+  {% if user and user.is_admin %}<a class="btn" href="{{ url_for('admin') }}">Create a market</a>
+  {% elif user %}<a class="btn" href="{{ url_for('propose') }}">Propose a market</a>{% endif %}
 </div>
-{% endif %}
 
 <section id="how" class="how">
   <h2>How it works</h2>

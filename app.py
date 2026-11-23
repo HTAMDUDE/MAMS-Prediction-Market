@@ -68,7 +68,7 @@ LATE_FEE_TIERS = [  # (less than this much time left, T), checked in order
 CATEGORIES = ["Academics", "Competitions", "Sports", "Events", "Campus Life", "Weather", "Other"]
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,20}$")
 EPS = 1e-9
-OWNER_USERNAME = "Kaushik"
+OWNER_USERNAME = os.environ.get("MAMS_OWNER", "Kaushik").strip()
 
 
 def _secret_key():
@@ -132,11 +132,15 @@ def close_db(_exc):
 # Columns added after the first release. schema.sql only creates missing tables, so databases
 # created earlier get these through ALTER TABLE (see migrate).
 NEW_COLUMNS = {
+    # session_gen: bumping it signs a user out everywhere (password change/reset).
+    "users": [("session_gen", "INTEGER NOT NULL DEFAULT 0")],
+    "comments": [("hidden", "INTEGER NOT NULL DEFAULT 0")],
     "markets": [("rules_source", "TEXT NOT NULL DEFAULT ''"), ("rules_otherwise", "TEXT NOT NULL DEFAULT ''"),
                 ("proposed_outcome_id", "INTEGER"), ("proposed_by", "INTEGER"), ("proposed_at", "TEXT"),
                 ("finalizes_at", "TEXT"), ("resolved_by", "INTEGER"),
                 # Over/Under markets: the line, an optional unit ("%", "minutes"), and the measured result.
                 ("ou_line", "REAL"), ("ou_unit", "TEXT NOT NULL DEFAULT ''"), ("ou_result", "REAL"),
+                ("featured", "INTEGER NOT NULL DEFAULT 0"),
                 # money left in the pot after paying Ⓜ1 per winning share, shared out among the winners
                 ("leftover_paid", "REAL NOT NULL DEFAULT 0")],
     "proposals": [("rules_source", "TEXT NOT NULL DEFAULT ''"), ("rules_otherwise", "TEXT NOT NULL DEFAULT ''"),
@@ -155,6 +159,20 @@ def migrate(db):
         for name, decl in columns:
             if name not in have:
                 db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+    # clarifications.admin_id used to be NOT NULL; deleting an admin's account needs it nullable. SQLite can't
+    # drop a constraint in place, so rebuild the table (once).
+    cols = {r["name"]: r for r in db.execute("PRAGMA table_info(clarifications)")}
+    if cols and cols["admin_id"]["notnull"]:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("CREATE TABLE clarifications_new (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                   "market_id INTEGER NOT NULL REFERENCES markets(id), admin_id INTEGER REFERENCES users(id), "
+                   "body TEXT NOT NULL, created_at TEXT NOT NULL)")
+        db.execute("INSERT INTO clarifications_new (id, market_id, admin_id, body, created_at) "
+                   "SELECT id, market_id, admin_id, body, created_at FROM clarifications")
+        db.execute("DROP TABLE clarifications")
+        db.execute("ALTER TABLE clarifications_new RENAME TO clarifications")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_clarifications_market ON clarifications(market_id)")
+        db.execute("COMMIT")
 
 
 def deepen_liquidity(db):
@@ -542,7 +560,7 @@ def check_trade(m, outs, idx, action, value, balance=None, held=None, fee=0.0):
     if action == "buy":
         amount = cents(value)
         if amount < MIN_BET:
-            raise TradeError(f"Minimum bet is {MIN_BET:.0f} {CURRENCY}.")
+            raise TradeError(f"Minimum bet is Ⓜ{MIN_BET:.0f}.")
         shares = lmsr.shares_for_amount(q, m["b"], idx, amount)
         late = late_fee(shares, amount / shares, t)
         if balance is not None and amount + fee + late > balance + EPS:
@@ -554,7 +572,7 @@ def check_trade(m, outs, idx, action, value, balance=None, held=None, fee=0.0):
             if len(extras) > 1:
                 raise TradeError(f"You need Ⓜ{amount + fee + late:,.2f} ({' + '.join(extras)}) "
                                  f"but have Ⓜ{balance:,.2f}.")
-            raise TradeError("You don't have enough MAMS Bucks for that bet.")
+            raise TradeError(f"You don't have enough for that bet. Your balance is Ⓜ{balance:,.2f}.")
         return shares, amount, late
     if action == "sell":
         shares = value
@@ -565,12 +583,16 @@ def check_trade(m, outs, idx, action, value, balance=None, held=None, fee=0.0):
         if held is not None and shares > held + EPS:
             raise TradeError(f"You only own {held:.2f} shares of “{label}”.")
         coins = math.floor(lmsr.sell_value(q, m["b"], idx, shares) * 100) / 100
+        if coins < 0.01:
+            raise TradeError("That's worth less than Ⓜ0.01. Sell more shares at once.")
         return shares, coins, min(late_fee(shares, coins / shares, t), coins)
     raise TradeError("Unknown action.")
 
 
-def execute_trade(db, user_id, market_id, outcome_id, action, value):
-    """Buy (value = coins to spend) or sell (value = shares to sell). Returns a status message."""
+def execute_trade(db, user_id, market_id, outcome_id, action, value, min_out=None):
+    """Buy (value = coins to spend) or sell (value = shares to sell). Returns a status message.
+    min_out (optional) is the least the trader will accept: shares for a buy, coins for a sell. It guards
+    against the price moving between the quote and the trade."""
     db.execute("BEGIN IMMEDIATE")
     try:
         m = db.execute("SELECT * FROM markets WHERE id = ?", (market_id,)).fetchone()
@@ -596,6 +618,8 @@ def execute_trade(db, user_id, market_id, outcome_id, action, value):
 
         fee = entry_fee_due(db, m, user_id) if action == "buy" else 0.0
         shares, coins, late = check_trade(m, outs, idx, action, value, user["balance"], held, fee)
+        if min_out is not None and (shares if action == "buy" else coins) < min_out - 1e-9:
+            raise TradeError("The price moved since your quote. Check the new quote and try again.")
         if fee:
             creator = creator_name(db, m)
             db.execute("UPDATE users SET balance = ROUND(balance - ?, 2) WHERE id = ?", (fee, user_id))
@@ -790,7 +814,11 @@ def cancel_market(db, market_id):
                 db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (r["net"], r["user_id"]))
             log_activity(db, r["user_id"], "refund", max(r["net"], 0), m, "Refund: market cancelled")
         refund_entry_fees(db, market_id, reason="Entry fee refunded: market cancelled")
-        db.execute("UPDATE markets SET status = 'cancelled', resolved_at = ? WHERE id = ?", (now_str(), market_id))
+        # A proposed or disputed result is moot once the market is void.
+        db.execute("UPDATE disputes SET handled_at = ? WHERE market_id = ? AND handled_at IS NULL",
+                   (now_str(), market_id))
+        db.execute("UPDATE markets SET status = 'cancelled', resolved_at = ?, proposed_outcome_id = NULL, "
+                   "proposed_by = NULL, proposed_at = NULL, finalizes_at = NULL WHERE id = ?", (now_str(), market_id))
         db.execute("COMMIT")
     except Exception:
         db.execute("ROLLBACK")
@@ -816,7 +844,8 @@ def delete_market(db, market_id):
         db.execute("DELETE FROM positions WHERE outcome_id IN (SELECT id FROM outcomes WHERE market_id = ?)",
                    (market_id,))
         db.execute("UPDATE proposals SET market_id = NULL WHERE market_id = ?", (market_id,))
-        for table in ("trades", "price_history", "comments", "market_blocks", "market_entries", "outcomes"):
+        for table in ("trades", "price_history", "comments", "market_blocks", "market_entries", "disputes",
+                      "clarifications", "outcomes"):
             db.execute(f"DELETE FROM {table} WHERE market_id = ?", (market_id,))
         db.execute("DELETE FROM markets WHERE id = ?", (market_id,))
         db.execute("COMMIT")
@@ -868,6 +897,9 @@ def load_user_and_check_csrf():
         g.user = db.execute("SELECT * FROM users WHERE id = ?", (session["uid"],)).fetchone()
         if g.user is None:
             session.pop("uid")
+        elif session.get("gen", 0) != g.user["session_gen"]:
+            session.clear()  # password changed elsewhere: this session is no longer valid
+            g.user = None
         elif g.user["id"] == g.owner_id and not g.user["is_admin"]:
             db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (g.user["id"],))  # owner is always admin
             g.user = db.execute("SELECT * FROM users WHERE id = ?", (g.user["id"],)).fetchone()
@@ -914,6 +946,66 @@ def can_manage(target_id):
 NOT_ALLOWED = "Only the site owner can do that to an admin."
 
 
+def back(default):
+    """Redirect to the page a form came from (a same-site `next` path) or to `default`."""
+    nxt = request.form.get("next", "")
+    return redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else default)
+
+# Every admin action is written to audit_log (Admin -> Admin log). The key is stored; this map gives the label.
+AUDIT_ACTIONS = {
+    "market.create": "Created a market",
+    "market.edit": "Edited a market",
+    "market.cancel": "Cancelled a market (bets refunded)",
+    "market.delete": "Deleted a market",
+    "market.close_early": "Closed betting early",
+    "market.reopen": "Reopened betting",
+    "market.feature": "Featured a market",
+    "market.unfeature": "Removed a market from featured",
+    "market.clarify": "Added a rules clarification",
+    "market.convert_ou": "Converted a market to Over/Under",
+    "market.block": "Blocked a user from a market",
+    "market.unblock": "Unblocked a user from a market",
+    "result.propose": "Proposed a result",
+    "result.retract": "Withdrew a proposed result",
+    "result.confirm": "Confirmed a disputed result",
+    "proposal.approve": "Approved a market proposal",
+    "proposal.reject": "Rejected a market proposal",
+    "comment.hide": "Hid a comment",
+    "comment.unhide": "Unhid a comment",
+    "comment.delete": "Deleted a comment",
+    "user.ban": "Banned a user from trading",
+    "user.unban": "Allowed a user to trade again",
+    "user.comment_mute": "Muted a user from commenting",
+    "user.comment_unmute": "Allowed a user to comment again",
+    "user.grant": "Adjusted a balance",
+    "user.admin_on": "Made a user an admin",
+    "user.admin_off": "Removed a user's admin role",
+    "user.password_reset": "Reset a password",
+    "user.delete": "Deleted an account",
+    "site.announcement": "Changed the site announcement",
+}
+
+
+def log_audit(action, target_type, target_id, label="", detail=""):
+    """Record an admin action. Call it after the action succeeded (failed or forbidden attempts aren't logged).
+    Names are copied in, with no foreign keys, so the log survives deleted accounts and markets. A logging
+    failure never undoes the action."""
+    assert action in AUDIT_ACTIONS, action
+    try:
+        get_db().execute(
+            "INSERT INTO audit_log (actor_id, actor_name, action, target_type, target_id, target_label, detail, "
+            "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (g.user["id"], g.user["username"], action, target_type, str(target_id), str(label)[:200],
+             str(detail)[:500], now_str()))
+    except sqlite3.Error:
+        app.logger.exception("could not write audit log entry %s", action)
+
+
+def market_label(db, mid):
+    row = db.execute("SELECT question FROM markets WHERE id = ?", (mid,)).fetchone()
+    return row["question"] if row else f"Market #{mid}"
+
+
 def admin_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
@@ -930,6 +1022,8 @@ def inject_globals():
     if g.user and g.user["is_admin"]:
         pending = get_db().execute("SELECT COUNT(*) FROM proposals WHERE status = 'pending'").fetchone()[0]
     return {"csrf_token": csrf_token, "user": g.user, "can_bonus": can_bonus, "pending_proposals": pending,
+            "SCHOOL_TZ": os.environ.get("TZ", "America/New_York"),
+            "announcement": get_setting(get_db(), "announcement"),
             "owner_id": g.get("owner_id"), "is_owner": is_owner(),
             "CURRENCY": CURRENCY, "DAILY_BONUS": DAILY_BONUS, "CATEGORIES": CATEGORIES,
             "DISPUTE_HOURS": DISPUTE_HOURS, "CREATION_FEE": CREATION_FEE, "ENTRY_FEE": ENTRY_FEE,
@@ -939,6 +1033,18 @@ def inject_globals():
 @app.template_filter("money")
 def money_filter(x):
     return f"{x:,.2f}"
+
+
+@app.template_filter("signed_money")
+def signed_money_filter(x):
+    """+Ⓜ12.00 / −Ⓜ3.50 (a real minus sign)."""
+    return f"{'+' if x >= 0 else '−'}Ⓜ{abs(x):,.2f}"
+
+
+@app.template_filter("cents_label")
+def cents_label_filter(p):
+    """A 0-1 price as cents: 0.42 -> 42¢."""
+    return f"{round(p * 100):.0f}¢"
 
 
 @app.template_filter("pct")
@@ -995,7 +1101,7 @@ def register():
         else:
             db = get_db()
             first_user = db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
-            is_admin = int((first_user and not OWNER_USERNAME) or username.lower() == OWNER_USERNAME
+            is_admin = int((first_user and not OWNER_USERNAME) or username.lower() == OWNER_USERNAME.lower()
                            or username.lower() in ADMIN_USERNAMES)
             try:
                 db.execute("BEGIN IMMEDIATE")
@@ -1011,6 +1117,7 @@ def register():
                 session.clear()
                 session.permanent = True
                 session["uid"] = cur.lastrowid
+                session["gen"] = 0
                 flash(f"Welcome! You start with {STARTING_BALANCE:,.0f} {CURRENCY}."
                       + (" You're an admin, so you can create and resolve markets." if is_admin else ""), "success")
                 return redirect(url_for("index"))
@@ -1020,6 +1127,9 @@ def register():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
+        if rate_limited(("login-ip", request.remote_addr), 120, 60):
+            flash("Too many log-in attempts from this network. Wait a minute and try again.", "error")
+            return render_template("login.html")
         name = request.form.get("username", "").strip()
         fail_key = ("login-fail", name.lower())
         recent_fails = [t for t in _hits.get(fail_key, []) if time.time() - t < 300]
@@ -1032,11 +1142,46 @@ def login():
             session.clear()
             session.permanent = True
             session["uid"] = u["id"]
+            session["gen"] = u["session_gen"]
             nxt = request.args.get("next", "")
             return redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else url_for("index"))
         rate_limited(fail_key, 10, 300)  # record the failure
         flash("Wrong username or password.", "error")
     return render_template("login.html")
+
+
+def set_temporary_password(db, user_id):
+    """Give a user a new random password, sign them out everywhere and clear their login lockout.
+    Returns the password (shown once to whoever reset it)."""
+    pw = secrets.token_urlsafe(9)  # 12 URL-safe characters
+    name = db.execute("SELECT username FROM users WHERE id = ?", (user_id,)).fetchone()["username"]
+    db.execute("UPDATE users SET password_hash = ?, session_gen = session_gen + 1 WHERE id = ?",
+               (generate_password_hash(pw), user_id))
+    _hits.pop(("login-fail", name.lower()), None)
+    return pw
+
+
+@app.post("/account/password")
+@login_required
+def change_password():
+    cur, new = request.form.get("current", ""), request.form.get("new", "")
+    if rate_limited(("change-password", request.remote_addr), 30, 60):
+        flash("Too many attempts. Wait a minute and try again.", "error")
+    elif not cur:
+        flash("Enter your current password.", "error")
+    elif not check_password_hash(g.user["password_hash"], cur):
+        flash("Your current password is wrong.", "error")
+    elif len(new) < 6:
+        flash("Password must be at least 6 characters.", "error")
+    elif new != request.form.get("confirm", ""):
+        flash("Passwords don't match.", "error")
+    else:
+        db = get_db()
+        db.execute("UPDATE users SET password_hash = ?, session_gen = session_gen + 1 WHERE id = ?",
+                   (generate_password_hash(new), g.user["id"]))
+        session["gen"] = g.user["session_gen"] + 1  # keep this device signed in; every other one is signed out
+        flash("Password changed.", "success")
+    return redirect(url_for("portfolio") + "#account")
 
 
 @app.post("/logout")
@@ -1067,23 +1212,41 @@ def bonus():
 
 # ---------------------------------------------------------------- routes: markets
 
+STATE_ORDER = ["open", "closed", "proposed", "disputed", "resolved", "cancelled"]
+STATUS_TABS = [("open", "Open"), ("closed", "Awaiting result"), ("resolved", "Resolved"),
+               ("cancelled", "Cancelled"), ("all", "All")]
+
+
+def matches_status(state, status):
+    if status == "closed":  # "Awaiting result" also covers results that are proposed or disputed
+        return state in ("closed", "proposed", "disputed")
+    return status == "all" or state == status
+
+
 @app.route("/")
 def index():
+    """Every market is rendered (in one fixed order) and the status/topic filters just hide cards: the server
+    marks the ones that don't match the query string hidden, and static/app.js flips them on click with no
+    request. Order: grouped by state; open by featured then volume; awaiting by closing time; settled newest first."""
     db = get_db()
     status = request.args.get("status", "open")
+    status = status if status in dict(STATUS_TABS) else "open"
     cat = request.args.get("cat", "")
+    cat = cat if cat in CATEGORIES else ""
     markets = [bundle(db, m) for m in db.execute("SELECT * FROM markets ORDER BY closes_at").fetchall()]
-    if status == "closed":  # "Awaiting result" also covers results that are proposed or disputed
-        markets = [b for b in markets if b["state"] in ("closed", "proposed", "disputed")]
-    elif status in ("open", "resolved", "cancelled"):
-        markets = [b for b in markets if b["state"] == status]
-    if cat:
-        markets = [b for b in markets if b["m"]["category"] == cat]
-    if status == "open":
-        markets.sort(key=lambda b: -b["volume"])
-    elif status in ("resolved", "cancelled"):
-        markets.sort(key=lambda b: b["m"]["resolved_at"] or "", reverse=True)
-    return render_template("index.html", markets=markets, status=status, cat=cat)
+
+    def sort_key(b):
+        rank = STATE_ORDER.index(b["state"])
+        if b["state"] == "open":
+            return (rank, -b["m"]["featured"], -b["volume"], b["m"]["closes_at"])
+        if b["state"] in ("resolved", "cancelled"):  # newest first; ISO strings sort as dates
+            return (rank, 0, 0, "".join(chr(0x10FFFF - ord(ch)) for ch in (b["m"]["resolved_at"] or "")))
+        return (rank, 0, 0, b["m"]["closes_at"])
+    markets.sort(key=sort_key)
+    visible = {b["m"]["id"] for b in markets
+               if matches_status(b["state"], status) and (not cat or b["m"]["category"] == cat)}
+    return render_template("index.html", markets=markets, visible=visible, status=status, cat=cat,
+                           tabs=STATUS_TABS)
 
 
 @app.route("/market/<int:mid>")
@@ -1108,9 +1271,17 @@ def market(mid):
             traded = db.execute("SELECT 1 FROM trades WHERE user_id = ? AND market_id = ? LIMIT 1",
                                 (g.user["id"], mid)).fetchone()
             can_dispute = bool(traded) and not any(d["user_id"] == g.user["id"] for d in disputes)
-    comments = db.execute(
-        "SELECT c.*, u.username FROM comments c JOIN users u ON u.id = c.user_id "
-        "WHERE c.market_id = ? ORDER BY c.id DESC", (mid,)).fetchall()
+    is_admin = bool(g.user and g.user["is_admin"])
+    comments = []
+    for c in db.execute("SELECT c.*, u.username FROM comments c JOIN users u ON u.id = c.user_id "
+                        "WHERE c.market_id = ? ORDER BY c.id DESC", (mid,)).fetchall():
+        c = dict(c)
+        if c["hidden"] and not is_admin:
+            c["body"] = None  # a hidden comment's text is never sent to non-admins
+        c["can_moderate"] = is_admin and (c["user_id"] == g.user["id"] or can_manage(c["user_id"]))
+        comments.append(c)
+    commenting_off = bool(g.user and db.execute("SELECT 1 FROM comment_mutes WHERE user_id = ?",
+                                                (g.user["id"],)).fetchone())
     my_positions = []
     if g.user:
         by_id = {o["id"]: o for o in b["outcomes"]}
@@ -1147,7 +1318,9 @@ def market(mid):
                            creator=creator, my_entry_fee=my_entry_fee,
                            late_t=late_multiplier(m) if b["state"] == "open" else 0.0,
                            blocked=blocked, all_users=all_users, clarifications=clarifications,
-                           disputes=disputes, proposer=proposer, can_dispute=can_dispute)
+                           disputes=disputes, proposer=proposer, can_dispute=can_dispute,
+                           commenting_off=commenting_off, comments_off_text=COMMENTS_OFF,
+                           reopen_default=(datetime.now() + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M"))
 
 
 @app.post("/market/<int:mid>/dispute")
@@ -1204,10 +1377,21 @@ def trade(mid):
         flash("Pick an outcome and enter a valid number.", "error")
         return redirect(url_for("market", mid=mid))
     try:
-        flash(execute_trade(get_db(), g.user["id"], mid, outcome_id, request.form.get("action"), value), "success")
+        min_out = request.form.get("min_out", "").strip()
+        min_out = float(min_out) if min_out else None
+        if min_out is not None and (not math.isfinite(min_out) or min_out < 0):
+            min_out = None
+    except ValueError:
+        min_out = None
+    try:
+        flash(execute_trade(get_db(), g.user["id"], mid, outcome_id, request.form.get("action"), value, min_out),
+              "success")
     except TradeError as e:
         flash(str(e), "error")
     return redirect(url_for("market", mid=mid))
+
+
+COMMENTS_OFF = "An admin has turned off commenting for your account."
 
 
 @app.post("/market/<int:mid>/comment")
@@ -1218,6 +1402,8 @@ def comment(mid):
         flash("Comment can't be empty.", "error")
     elif len(body) > 500:
         flash("Keep comments under 500 characters.", "error")
+    elif get_db().execute("SELECT 1 FROM comment_mutes WHERE user_id = ?", (g.user["id"],)).fetchone():
+        flash(COMMENTS_OFF, "error")
     elif get_db().execute("SELECT 1 FROM markets WHERE id = ?", (mid,)).fetchone():
         get_db().execute("INSERT INTO comments (market_id, user_id, body, created_at) VALUES (?, ?, ?, ?)",
                          (mid, g.user["id"], body, now_str()))
@@ -1301,8 +1487,13 @@ def portfolio():
         else:
             value = r["shares"] * price
         bonus = leftover_bonus(db, uid, r["market_id"]) if b["m"]["status"] == "resolved" and price > 0 else 0.0
-        item = {"r": r, "b": b, "price": price, "value": value + bonus, "bonus": bonus}
+        refund = None
+        if b["m"]["status"] == "cancelled":
+            refund = cents(max(db.execute("SELECT COALESCE(SUM(amount), 0) FROM trades WHERE user_id = ? AND market_id = ?",
+                                          (uid, r["market_id"])).fetchone()[0], 0.0))
+        item = {"r": r, "b": b, "price": price, "value": value + bonus, "bonus": bonus, "refund": refund}
         (active if b["m"]["status"] == "open" else settled).append(item)
+    settled.sort(key=lambda i: i["b"]["m"]["resolved_at"] or "", reverse=True)
     trades = db.execute(
         "SELECT t.*, o.label, m.question FROM trades t JOIN outcomes o ON o.id = t.outcome_id "
         "JOIN markets m ON m.id = t.market_id WHERE t.user_id = ? ORDER BY t.id DESC LIMIT 30", (uid,)).fetchall()
@@ -1408,6 +1599,46 @@ def leaderboard():
 
 # ---------------------------------------------------------------- routes: admin
 
+USER_PAGE = 25
+USER_FILTERS = {"": "Everyone", "admins": "Admins", "banned": "Banned from trading",
+                "muted": "Muted from commenting"}
+
+
+def list_users(db):
+    """The Admin → Users table: search by name, one filter, 25 per page. Returns (rows, view-state)."""
+    q = request.args.get("q", "").strip()
+    flt = request.args.get("filter", "")
+    flt = flt if flt in USER_FILTERS else ""
+    try:
+        page = max(1, int(request.args.get("upage", 1)))
+    except ValueError:
+        page = 1
+    where, args = [], []
+    if q:
+        where.append("LOWER(u.username) LIKE ?")
+        args.append(f"%{q.lower()}%")
+    if flt == "admins":
+        where.append("(u.is_admin = 1 OR u.id = ?)")
+        args.append(g.owner_id)
+    elif flt == "banned":
+        where.append("tb.user_id IS NOT NULL")
+    elif flt == "muted":
+        where.append("cm.user_id IS NOT NULL")
+    frm = ("FROM users u LEFT JOIN trade_bans tb ON tb.user_id = u.id "
+           "LEFT JOIN comment_mutes cm ON cm.user_id = u.id " + ("WHERE " + " AND ".join(where) if where else ""))
+    total = db.execute(f"SELECT COUNT(*) {frm}", args).fetchone()[0]
+    pages = max(1, -(-total // USER_PAGE))
+    page = min(page, pages)
+    rows = db.execute(f"SELECT u.*, (tb.user_id IS NOT NULL) AS banned, (cm.user_id IS NOT NULL) AS muted {frm} "
+                      "ORDER BY u.username LIMIT ? OFFSET ?", args + [USER_PAGE, (page - 1) * USER_PAGE]).fetchall()
+    return rows, {"q": q, "filter": flt, "page": page, "pages": pages, "total": total, "filters": USER_FILTERS}
+
+
+def get_setting(db, key):
+    row = db.execute("SELECT value FROM site_settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else ""
+
+
 @app.route("/admin")
 @admin_required
 def admin():
@@ -1415,14 +1646,14 @@ def admin():
     markets = [bundle(db, m) for m in db.execute("SELECT * FROM markets WHERE status = 'open' ORDER BY closes_at")]
     settled = [bundle(db, m) for m in db.execute(
         "SELECT * FROM markets WHERE status != 'open' ORDER BY resolved_at DESC")]
-    users = db.execute("SELECT u.*, (tb.user_id IS NOT NULL) AS banned FROM users u "
-                       "LEFT JOIN trade_bans tb ON tb.user_id = u.id ORDER BY u.username").fetchall()
+    users, user_view = list_users(db)
     proposals =[dict(p, outcomes=json.loads(p["outcomes"])) for p in db.execute(
         "SELECT p.*, u.username FROM proposals p JOIN users u ON u.id = p.user_id "
         "WHERE p.status = 'pending' ORDER BY p.id")]
     default_close = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M")
-    return render_template("admin.html", markets=markets, settled=settled, users=users,
-                           proposals=proposals, default_close=default_close)
+    return render_template("admin.html", markets=markets, settled=settled, users=users, uv=user_view,
+                           proposals=proposals, default_close=default_close,
+                           announcement=get_setting(db, "announcement"))
 
 
 def read_market_form(f):
@@ -1516,8 +1747,10 @@ def admin_create():
     try:
         place_creator_stake(db, mid, g.user["id"], pick, stake)
     except TradeError as e:  # e.g. balance changed in between; the market exists, the bet didn't go through
+        log_audit("market.create", "market", mid, fields["question"])
         flash(f"Market created, but your opening bet failed: {e}", "error")
         return redirect(url_for("market", mid=mid))
+    log_audit("market.create", "market", mid, fields["question"])
     flash(f"Market created. You paid the Ⓜ{CREATION_FEE:,.0f} creation fee and bet Ⓜ{stake:,.2f} on "
           f"“{fields['labels'][pick]}”.", "success")
     return redirect(url_for("market", mid=mid))
@@ -1646,6 +1879,8 @@ def admin_review(pid):
             if done:
                 release_stake(db, p, "Proposal rejected, opening bet refunded")
             db.execute("COMMIT")
+            if done:
+                log_audit("proposal.reject", "proposal", pid, p["question"], note)
             flash("Proposal rejected." + (f" {p['username']}'s Ⓜ{p['stake']:,.2f} opening bet was refunded; "
                                           f"the Ⓜ{p['fee']:,.0f} fee is kept." if done and p["stake"] else ""),
                   "success")
@@ -1680,6 +1915,8 @@ def admin_review(pid):
                 bet_note = f" {p['username']}'s Ⓜ{p['stake']:,.2f} opening bet on “{fields['labels'][stake_pick]}” is placed."
             except TradeError as e:  # e.g. the proposer was banned meanwhile; they keep the refunded stake
                 bet_note = f" {p['username']}'s opening bet couldn't be placed ({e}), so it was refunded."
+        log_audit("proposal.approve", "proposal", pid, fields["question"],
+                  f"By {p['username']}; market #{mid}." + (f" Note: {note}" if note else ""))
         flash(f"Approved! The market is now live. (Proposed by {p['username']}.){bet_note}", "success")
         return redirect(url_for("market", mid=mid))
 
@@ -1719,6 +1956,8 @@ def admin_propose_result(mid):
         propose_result(db, mid, outcome_id, g.user["id"])
         if actual is not None:
             db.execute("UPDATE markets SET ou_result = ? WHERE id = ?", (actual, mid))
+        label = next((o["label"] for o in get_outcomes(db, mid) if o["id"] == outcome_id), "")
+        log_audit("result.propose", "market", mid, m["question"], f"Proposed “{label}”.")
         flash(f"Result proposed. It finalizes in {DISPUTE_HOURS} hours unless someone disputes it.", "success")
     except (TradeError, ValueError) as e:
         flash(str(e) or "Pick a winning outcome.", "error")
@@ -1773,6 +2012,8 @@ def admin_convert_ou(mid):
     else:
         try:
             convert_to_over_under(get_db(), mid, line, unit, yes_means, g.user["id"])
+            log_audit("market.convert_ou", "market", mid, market_label(get_db(), mid),
+                      f"Line {ou_text(line, unit)}; YES meant {yes_means}.")
             flash(f"Converted to Over/Under {ou_text(line, unit)}. Everyone's bets carried over.", "success")
         except TradeError as e:
             flash(str(e), "error")
@@ -1790,12 +2031,16 @@ def admin_result_action(mid):
     try:
         if request.form.get("decision") == "retract":
             retract_result(db, mid)
+            log_audit("result.retract", "market", mid, m["question"])
             flash("Proposed result withdrawn. You can propose a different one.", "success")
         elif request.form.get("decision") == "confirm":
             if m["proposed_outcome_id"] is None or not open_disputes(db, mid):
                 raise TradeError("Only a disputed result needs confirming; others finalize on their own.")
             n = resolve_market(db, mid, m["proposed_outcome_id"], g.user["id"])
+            log_audit("result.confirm", "market", mid, m["question"], f"Paid {n} winning position(s).")
             flash(f"Result confirmed. Paid out {n} winning position(s).", "success")
+        else:
+            raise TradeError("Unknown action.")
     except TradeError as e:
         flash(str(e), "error")
     return redirect(url_for("market", mid=mid))
@@ -1813,6 +2058,7 @@ def admin_clarify(mid):
     else:
         db.execute("INSERT INTO clarifications (market_id, admin_id, body, created_at) VALUES (?, ?, ?, ?)",
                    (mid, g.user["id"], body, now_str()))
+        log_audit("market.clarify", "market", mid, market_label(db, mid), body)
         flash("Clarification added to the rules.", "success")
     return redirect(request.referrer or url_for("market", mid=mid))
 
@@ -1821,7 +2067,9 @@ def admin_clarify(mid):
 @admin_required
 def admin_cancel(mid):
     try:
+        label = market_label(get_db(), mid)
         cancel_market(get_db(), mid)
+        log_audit("market.cancel", "market", mid, label)
         flash("Market cancelled and bets refunded.", "success")
     except TradeError as e:
         flash(str(e), "error")
@@ -1916,6 +2164,7 @@ def admin_edit(mid):
         except Exception:
             db.execute("ROLLBACK")
             raise
+        log_audit("market.edit", "market", mid, question)
         flash("Market updated.", "success")
         return redirect(url_for("market", mid=mid))
 
@@ -1930,7 +2179,9 @@ def admin_edit(mid):
 @admin_required
 def admin_delete(mid):
     try:
+        row = get_db().execute("SELECT question, status FROM markets WHERE id = ?", (mid,)).fetchone()
         delete_market(get_db(), mid)
+        log_audit("market.delete", "market", mid, row["question"], f"Status was {row['status']}.")
         flash("Market deleted.", "success")
     except TradeError as e:
         flash(str(e), "error")
@@ -1951,6 +2202,8 @@ def admin_block(mid):
         flash(NOT_ALLOWED, "error")
     else:
         refund = block_user_in_market(db, u["id"], mid)
+        log_audit("market.block", "user", u["id"], u["username"],
+                  f"Market #{mid}." + (f" Refunded Ⓜ{refund:,.2f}." if refund else ""))
         flash(f"{u['username']} can no longer bet on this market."
               + (f" Refunded Ⓜ{refund:,.2f} and removed their bets." if refund else ""), "success")
     return redirect(url_for("market", mid=mid) + "#admin")
@@ -1959,7 +2212,10 @@ def admin_block(mid):
 @app.post("/admin/markets/<int:mid>/unblock/<int:uid>")
 @admin_required
 def admin_unblock(mid, uid):
-    get_db().execute("DELETE FROM market_blocks WHERE market_id = ? AND user_id = ?", (mid, uid))
+    db = get_db()
+    u = db.execute("SELECT username FROM users WHERE id = ?", (uid,)).fetchone()
+    if db.execute("DELETE FROM market_blocks WHERE market_id = ? AND user_id = ?", (mid, uid)).rowcount and u:
+        log_audit("market.unblock", "user", uid, u["username"], f"Market #{mid}.")
     flash("They can bet on this market again.", "success")
     return redirect(url_for("market", mid=mid) + "#admin")
 
@@ -1977,12 +2233,14 @@ def admin_trading(uid):
         flash("The owner can't be banned from trading.", "error")
     elif db.execute("SELECT 1 FROM trade_bans WHERE user_id = ?", (uid,)).fetchone():
         db.execute("DELETE FROM trade_bans WHERE user_id = ?", (uid,))
+        log_audit("user.unban", "user", uid, u["username"])
         flash(f"{u['username']} can trade again.", "success")
     else:
         refund = ban_user_from_trading(db, uid)
+        log_audit("user.ban", "user", uid, u["username"], f"Refunded Ⓜ{refund:,.2f} from open bets.")
         flash(f"Trading turned off for {u['username']}."
               + (f" Refunded Ⓜ{refund:,.2f} from their open bets." if refund else ""), "success")
-    return redirect(url_for("admin") + "#users")
+    return back(url_for("admin") + "#users")
 
 
 @app.post("/admin/users/<int:uid>/grant")
@@ -1994,10 +2252,10 @@ def admin_grant(uid):
             raise ValueError
     except ValueError:
         flash("Enter an amount between -100,000 and 100,000.", "error")
-        return redirect(url_for("admin"))
+        return back(url_for("admin") + "#users")
     if not can_manage(uid):
         flash(NOT_ALLOWED, "error")
-        return redirect(url_for("admin") + "#users")
+        return back(url_for("admin") + "#users")
     db = get_db()
     db.execute("BEGIN IMMEDIATE")
     before = db.execute("SELECT balance FROM users WHERE id = ?", (uid,)).fetchone()
@@ -2009,8 +2267,10 @@ def admin_grant(uid):
     change = cents(after - before["balance"])  # can be less than asked if it would have gone below zero
     log_activity(db, uid, "admin", change, None, f"Balance adjusted by an admin ({g.user['username']})")
     db.execute("COMMIT")
+    target = db.execute("SELECT username FROM users WHERE id = ?", (uid,)).fetchone()["username"]
+    log_audit("user.grant", "user", uid, target, f"{'+' if change >= 0 else '−'}Ⓜ{abs(change):,.2f}")
     flash(f"Adjusted balance by {change:,.2f}.", "success")
-    return redirect(url_for("admin") + "#users")
+    return back(url_for("admin") + "#users")
 
 
 @app.post("/admin/users/<int:uid>/toggle-admin")
@@ -2021,13 +2281,293 @@ def admin_toggle(uid):
     elif uid == g.user["id"]:
         flash("You can't remove your own admin access.", "error")
     else:
-        get_db().execute("UPDATE users SET is_admin = 1 - is_admin WHERE id = ?", (uid,))
-    return redirect(url_for("admin") + "#users")
+        db = get_db()
+        u = db.execute("SELECT username, is_admin FROM users WHERE id = ?", (uid,)).fetchone()
+        if u is None:
+            abort(404)
+        db.execute("UPDATE users SET is_admin = 1 - is_admin WHERE id = ?", (uid,))
+        log_audit("user.admin_off" if u["is_admin"] else "user.admin_on", "user", uid, u["username"])
+    return back(url_for("admin") + "#users")
+
+
+def delete_account(db, user_id):
+    """Remove an account. Their bets in unresolved markets are reversed and refunded first (so prices go back
+    to what they'd have been); payouts from settled markets stay with whoever got them. Returns the amount
+    reversed. Raises TradeError if the account can't be deleted safely."""
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        if db.execute("SELECT 1 FROM disputes WHERE user_id = ? AND handled_at IS NULL", (user_id,)).fetchone():
+            raise TradeError("They have an open dispute on a proposed result. Confirm or change that result "
+                             "first, then delete the account.")
+        running = db.execute("SELECT id FROM markets WHERE created_by = ? AND status = 'open' ORDER BY id LIMIT 1",
+                             (user_id,)).fetchone()
+        if running:
+            raise TradeError(f"They created market #{running['id']}, which is still running. "
+                             "Resolve or cancel it first.")
+        reversed_total = 0.0
+        for r in db.execute("SELECT DISTINCT market_id FROM trades WHERE user_id = ? ORDER BY market_id",
+                            (user_id,)).fetchall():
+            reversed_total += refund_user_in_market(db, user_id, r["market_id"], "Refund (account deleted)")
+        for table in ("positions", "trades", "comments", "disputes", "market_blocks", "market_entries",
+                      "activity", "comment_mutes", "trade_bans", "proposals"):
+            db.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
+        db.execute("DELETE FROM market_entries WHERE creator_id = ?", (user_id,))
+        db.execute("UPDATE proposals SET reviewed_by = NULL WHERE reviewed_by = ?", (user_id,))
+        db.execute("UPDATE markets SET created_by = NULL WHERE created_by = ?", (user_id,))
+        db.execute("UPDATE markets SET proposed_by = NULL WHERE proposed_by = ?", (user_id,))
+        db.execute("UPDATE markets SET resolved_by = NULL WHERE resolved_by = ?", (user_id,))
+        db.execute("UPDATE clarifications SET admin_id = NULL WHERE admin_id = ?", (user_id,))
+        db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        db.execute("COMMIT")
+        return cents(reversed_total)
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+
+
+@app.get("/admin/users/<int:uid>")
+@admin_required
+def admin_user(uid):
+    db = get_db()
+    u = db.execute("SELECT u.*, (tb.user_id IS NOT NULL) AS banned, (cm.user_id IS NOT NULL) AS muted "
+                   "FROM users u LEFT JOIN trade_bans tb ON tb.user_id = u.id "
+                   "LEFT JOIN comment_mutes cm ON cm.user_id = u.id WHERE u.id = ?", (uid,)).fetchone()
+    if u is None:
+        abort(404)
+    return render_template("admin_user.html", u=u, manageable=can_manage(uid), me=u["id"] == g.user["id"],
+                           is_target_owner=u["id"] == g.owner_id)
+
+
+@app.post("/admin/users/<int:uid>/delete")
+@admin_required
+def admin_delete_user(uid):
+    db = get_db()
+    u = db.execute("SELECT id, username, is_admin FROM users WHERE id = ?", (uid,)).fetchone()
+    if uid == g.user["id"]:
+        flash("You can't delete your own account.", "error")
+    elif u is None:
+        abort(404)
+    elif uid == g.owner_id:
+        flash("The owner's account can't be deleted.", "error")
+    elif not can_manage(uid):
+        flash(NOT_ALLOWED, "error")
+    elif u["is_admin"]:
+        flash("Remove their admin role before deleting the account.", "error")
+    else:
+        try:
+            amount = delete_account(db, uid)
+        except TradeError as e:
+            flash(str(e), "error")
+            return redirect(url_for("admin_user", uid=uid))
+        log_audit("user.delete", "user", uid, u["username"], f"Open bets reversed (Ⓜ{amount:,.2f}).")
+        flash(f"Deleted {u['username']}'s account." + (f" Reversed Ⓜ{amount:,.2f} of open bets." if amount else ""),
+              "success")
+        return redirect(url_for("admin") + "#users")
+    return redirect(url_for("admin_user", uid=uid) if u else url_for("admin") + "#users")
+
+
+def _moderated_comment(cid):
+    """Load a comment for moderation, or None (with a flash) if it's gone or the admin may not act on it."""
+    c = get_db().execute("SELECT c.*, u.username FROM comments c JOIN users u ON u.id = c.user_id WHERE c.id = ?",
+                         (cid,)).fetchone()
+    if c is None:
+        flash("That comment no longer exists.", "error")
+    elif c["user_id"] != g.user["id"] and not can_manage(c["user_id"]):
+        flash(NOT_ALLOWED, "error")
+        return None
+    return c
+
+
+def _comment_detail(c):
+    body = c["body"] if len(c["body"]) <= 80 else c["body"][:80] + "…"
+    return f"Market #{c['market_id']}: “{body}”"
+
+
+@app.post("/admin/comments/<int:cid>/hide")
+@admin_required
+def admin_hide_comment(cid):
+    c = _moderated_comment(cid)
+    if c is None:
+        return redirect(url_for("index"))
+    hide = not c["hidden"]
+    get_db().execute("UPDATE comments SET hidden = ? WHERE id = ?", (int(hide), cid))
+    log_audit("comment.hide" if hide else "comment.unhide", "comment", cid, c["username"], _comment_detail(c))
+    flash("Comment hidden." if hide else "Comment restored.", "success")
+    return redirect(url_for("market", mid=c["market_id"]) + "#discussion")
+
+
+@app.post("/admin/comments/<int:cid>/delete")
+@admin_required
+def admin_delete_comment(cid):
+    c = _moderated_comment(cid)
+    if c:
+        get_db().execute("DELETE FROM comments WHERE id = ?", (cid,))
+        log_audit("comment.delete", "comment", cid, c["username"], _comment_detail(c))
+        flash("Comment deleted.", "success")
+        return redirect(url_for("market", mid=c["market_id"]) + "#discussion")
+    return redirect(url_for("index"))
+
+
+@app.post("/admin/markets/<int:mid>/close")
+@admin_required
+def admin_close_early(mid):
+    db = get_db()
+    m = db.execute("SELECT * FROM markets WHERE id = ?", (mid,)).fetchone()
+    if m is None:
+        abort(404)
+    if m["status"] != "open":
+        flash("Only unresolved markets can be closed.", "error")
+    elif market_state(m) != "open":
+        flash("Betting is already closed on this market.", "error")
+    else:
+        db.execute("UPDATE markets SET closes_at = ? WHERE id = ?", (now_str(), mid))
+        log_audit("market.close_early", "market", mid, m["question"])
+        flash("Betting closed. You can propose a result now.", "success")
+    return redirect(url_for("market", mid=mid))
+
+
+@app.post("/admin/markets/<int:mid>/reopen")
+@admin_required
+def admin_reopen(mid):
+    db = get_db()
+    m = db.execute("SELECT * FROM markets WHERE id = ?", (mid,)).fetchone()
+    if m is None:
+        abort(404)
+    try:
+        closes = datetime.fromisoformat(request.form.get("closes_at", ""))
+    except ValueError:
+        closes = None
+    if closes is None:
+        flash("Pick a valid closing time.", "error")
+    elif closes <= datetime.now():
+        flash("Pick a closing time in the future.", "error")
+    elif m["status"] != "open":
+        flash("Only unresolved markets can be reopened.", "error")
+    elif m["proposed_outcome_id"] is not None:
+        flash("A result is proposed for this market. Withdraw it before reopening betting.", "error")
+    elif market_state(m) != "closed":
+        flash("Betting is still open on this market.", "error")
+    else:
+        stamp = closes.strftime("%Y-%m-%d %H:%M:%S")
+        db.execute("UPDATE markets SET closes_at = ? WHERE id = ?", (stamp, mid))
+        log_audit("market.reopen", "market", mid, m["question"], f"New closing time {stamp}")
+        flash("Betting reopened.", "success")
+    return redirect(url_for("market", mid=mid))
+
+
+@app.post("/admin/markets/<int:mid>/feature")
+@admin_required
+def admin_feature(mid):
+    db = get_db()
+    m = db.execute("SELECT * FROM markets WHERE id = ?", (mid,)).fetchone()
+    if m is None:
+        abort(404)
+    now_featured = not m["featured"]
+    db.execute("UPDATE markets SET featured = ? WHERE id = ?", (int(now_featured), mid))
+    log_audit("market.feature" if now_featured else "market.unfeature", "market", mid, m["question"])
+    flash("Market featured: it now appears first on the home page." if now_featured
+          else "Market removed from featured.", "success")
+    return redirect(url_for("market", mid=mid))
+
+
+ANNOUNCEMENT_MAX = 300
+
+
+@app.post("/admin/announcement")
+@admin_required
+def admin_announcement():
+    db = get_db()
+    text = "" if request.form.get("clear") else request.form.get("text", "").strip()
+    if len(text) > ANNOUNCEMENT_MAX:
+        flash(f"Keep the announcement under {ANNOUNCEMENT_MAX} characters.", "error")
+    elif text:
+        db.execute("INSERT INTO site_settings (key, value, updated_at) VALUES ('announcement', ?, ?) "
+                   "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                   (text, now_str()))
+        log_audit("site.announcement", "site", "announcement", "Announcement", text)
+        flash("Announcement published.", "success")
+    else:
+        db.execute("DELETE FROM site_settings WHERE key = 'announcement'")
+        log_audit("site.announcement", "site", "announcement", "Announcement", "(cleared)")
+        flash("Announcement cleared.", "success")
+    return redirect(url_for("admin") + "#announcement")
+
+
+@app.post("/admin/users/<int:uid>/comment-mute")
+@admin_required
+def admin_comment_mute(uid):
+    db = get_db()
+    u = db.execute("SELECT id, username FROM users WHERE id = ?", (uid,)).fetchone()
+    if u is None:
+        abort(404)
+    if not can_manage(uid):
+        flash(NOT_ALLOWED, "error")
+    elif uid == g.owner_id:
+        flash("The owner can't be muted.", "error")
+    elif db.execute("DELETE FROM comment_mutes WHERE user_id = ?", (uid,)).rowcount:
+        log_audit("user.comment_unmute", "user", uid, u["username"])
+        flash(f"{u['username']} can comment again.", "success")
+    else:
+        db.execute("INSERT INTO comment_mutes (user_id, created_at) VALUES (?, ?)", (uid, now_str()))
+        log_audit("user.comment_mute", "user", uid, u["username"])
+        flash(f"{u['username']} can no longer comment.", "success")
+    return back(url_for("admin_user", uid=uid))
+
+
+AUDIT_PAGE = 50
+
+
+@app.get("/admin/log")
+@admin_required
+def admin_log():
+    db = get_db()
+    q = request.args.get("q", "").strip()
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+    except ValueError:
+        page = 1
+    where, args = "", []
+    if q:
+        like = f"%{q.lower()}%"
+        where = ("WHERE LOWER(actor_name) LIKE ? OR LOWER(action) LIKE ? OR LOWER(target_label) LIKE ? "
+                 "OR LOWER(detail) LIKE ?")
+        args = [like] * 4
+        # also match the readable label ("Banned a user from trading") by finding keys whose label matches
+        keys = [k for k, label in AUDIT_ACTIONS.items() if q.lower() in label.lower()]
+        if keys:
+            where += f" OR action IN ({','.join('?' * len(keys))})"
+            args += keys
+    total = db.execute(f"SELECT COUNT(*) FROM audit_log {where}", args).fetchone()[0]
+    pages = max(1, -(-total // AUDIT_PAGE))
+    page = min(page, pages)
+    rows = db.execute(f"SELECT a.*, (m.id IS NOT NULL) AS market_exists FROM audit_log a "
+                      "LEFT JOIN markets m ON a.target_type = 'market' AND m.id = CAST(a.target_id AS INTEGER) "
+                      f"{where} ORDER BY a.id DESC LIMIT ? OFFSET ?", args + [AUDIT_PAGE, (page - 1) * AUDIT_PAGE]).fetchall()
+    return render_template("admin_log.html", rows=rows, q=q, page=page, pages=pages, total=total,
+                           labels=AUDIT_ACTIONS)
+
+
+@app.post("/admin/users/<int:uid>/reset-password")
+@admin_required
+def admin_reset_password(uid):
+    db = get_db()
+    u = db.execute("SELECT id, username FROM users WHERE id = ?", (uid,)).fetchone()
+    if u is None:
+        abort(404)
+    if not can_manage(uid):
+        flash(NOT_ALLOWED, "error")
+    else:
+        pw = set_temporary_password(db, uid)
+        log_audit("user.password_reset", "user", uid, u["username"])
+        flash(f"Temporary password for {u['username']}: {pw}. Share it privately; they can change it on their "
+              "Portfolio page.", "success")
+    return back(url_for("admin") + "#users")
 
 
 @app.errorhandler(400)
 @app.errorhandler(403)
 @app.errorhandler(404)
+@app.errorhandler(500)
 def error_page(e):
     return render_template("error.html", error=e), e.code
 
