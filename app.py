@@ -62,7 +62,10 @@ CREATOR_MIN_BET = 10.0
 # Late-trading fee, to discourage piling in once the answer is nearly known:
 #   fee = LATE_FEE_RATE x shares traded x P x (1 - P) x T
 # P is the trade's average price per share; T depends on how long is left before betting closes.
+# P(1 - P) is tiny near 100¢, which would let people snipe near-certain outcomes cheaply, so buys pay the larger of
+# that and LATE_SNIPE_RATE x shares x P^2 x T (about 10% of the bet at 100¢ in the last 30 minutes).
 LATE_FEE_RATE = 0.07
+LATE_SNIPE_RATE = 0.017
 LATE_FEE_TIERS = [  # (less than this much time left, T), checked in order
     (timedelta(minutes=30), 6.0),
     (timedelta(hours=1), 4.0),
@@ -620,12 +623,16 @@ def late_multiplier(m, now=None):
     return 0.0
 
 
-def late_fee(shares, avg_price, t):
-    """F = LATE_FEE_RATE x C x P(1 - P) x T, rounded to the cent."""
+def late_fee(shares, avg_price, t, buy=True):
+    """F = LATE_FEE_RATE x C x P(1 - P) x T, rounded to the cent. Buys pay at least LATE_SNIPE_RATE x C x P^2 x T,
+    so near-certain outcomes can't be bought cheaply at the last minute; sells (cashing out) don't."""
     if t <= 0 or shares <= 0:
         return 0.0
     p = min(max(avg_price, 0.0), 1.0)
-    return cents(LATE_FEE_RATE * shares * p * (1 - p) * t)
+    fee = LATE_FEE_RATE * shares * p * (1 - p) * t
+    if buy:
+        fee = max(fee, LATE_SNIPE_RATE * shares * p * p * t)
+    return cents(fee)
 
 
 def check_trade(m, outs, idx, action, value, balance=None, held=None, fee=0.0):
@@ -664,7 +671,7 @@ def check_trade(m, outs, idx, action, value, balance=None, held=None, fee=0.0):
         coins = math.floor(lmsr.sell_value(q, m["b"], idx, shares) * 100) / 100
         if coins < 0.01:
             raise TradeError("That's worth less than Ⓜ0.01. Sell more shares at once.")
-        return shares, coins, min(late_fee(shares, coins / shares, t), coins)
+        return shares, coins, min(late_fee(shares, coins / shares, t, buy=False), coins)
     raise TradeError("Unknown action.")
 
 
@@ -1119,7 +1126,8 @@ def inject_globals():
             "owner_id": g.get("owner_id"), "is_owner": is_owner(),
             "CURRENCY": CURRENCY, "DAILY_BONUS": DAILY_BONUS, "CATEGORIES": CATEGORIES,
             "DISPUTE_HOURS": DISPUTE_HOURS, "CREATION_FEE": CREATION_FEE, "ENTRY_FEE": ENTRY_FEE,
-            "CREATOR_MIN_BET": CREATOR_MIN_BET, "LATE_FEE_RATE": LATE_FEE_RATE}
+            "CREATOR_MIN_BET": CREATOR_MIN_BET, "LATE_FEE_RATE": LATE_FEE_RATE,
+            "LATE_SNIPE_RATE": LATE_SNIPE_RATE}
 
 
 @app.template_filter("money")
@@ -1536,7 +1544,9 @@ def how_it_works():
     top = LATE_FEE_TIERS[0][1]
     return render_template("how_it_works.html", window_hours=DISPUTE_HOURS, late_rows=late_fee_table(),
                            late_top=top, late_example=cents(LATE_FEE_RATE * 100 * 0.25 * top),
-                           late_first_limit=late_fee_table()[-1][0].replace("Less than ", ""))
+                           late_first_limit=late_fee_table()[-1][0].replace("Less than ", ""),
+                           snipe_example=cents(LATE_SNIPE_RATE * 100 * 0.95 * 0.95 * top),
+                           snipe_old=cents(LATE_FEE_RATE * 100 * 0.95 * 0.05 * top))
 
 
 @app.post("/market/<int:mid>/trade")

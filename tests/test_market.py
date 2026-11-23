@@ -1576,9 +1576,28 @@ def test_late_multiplier_tiers_and_formula(monkeypatch):
     assert T(timedelta(seconds=1)) == 3
     # F = 0.07 x C x P(1-P) x T
     assert appmod.late_fee(100, 0.5, 3) == 5.25
-    assert appmod.late_fee(100, 0.9, 1.5) == pytest.approx(0.945, abs=0.006)  # 0.07 x 100 x 0.09 x 1.5
+    assert appmod.late_fee(100, 0.9, 1.5, buy=False) == pytest.approx(0.945, abs=0.006)  # 0.07 x 100 x 0.09 x 1.5
     assert appmod.late_fee(100, 0.5, 0) == 0
     assert appmod.late_fee(0, 0.5, 3) == 0
+
+
+def test_late_fee_buys_pay_the_larger_of_both_formulas():
+    # cheap or middling shares: the P(1 - P) formula is larger
+    assert appmod.late_fee(100, 0.5, 6) == pytest.approx(0.07 * 100 * 0.25 * 6, abs=0.006)
+    assert appmod.late_fee(100, 0.2, 6) == pytest.approx(0.07 * 100 * 0.16 * 6, abs=0.006)
+    # near-certain shares: the P^2 formula takes over, so the fee doesn't shrink to nothing
+    assert appmod.late_fee(100, 0.95, 6) == pytest.approx(0.017 * 100 * 0.9025 * 6, abs=0.006)
+    assert appmod.late_fee(100, 0.95, 6) > 0.07 * 100 * 0.95 * 0.05 * 6
+    # sniping a sure thing at 95¢ in the last 30 minutes no longer pays: fee > the 5¢ profit per share
+    assert appmod.late_fee(100, 0.95, 6) > 100 * 0.05
+    # sells only pay the original formula
+    assert appmod.late_fee(100, 0.95, 6, buy=False) == pytest.approx(0.07 * 100 * 0.95 * 0.05 * 6, abs=0.006)
+    # never higher than the larger of the two, and still nothing with time to spare
+    for p in (0.05, 0.3, 0.5, 0.7, 0.81, 0.9, 0.99):
+        both = max(0.07 * p * (1 - p), 0.017 * p * p) * 100 * 4
+        assert appmod.late_fee(100, p, 4) == pytest.approx(both, abs=0.006)
+        assert appmod.late_fee(100, p, 4) >= appmod.late_fee(100, p, 4, buy=False)
+    assert appmod.late_fee(100, 0.95, 0) == 0
 
 
 def test_late_fee_charged_on_buys_and_sells_near_the_deadline(monkeypatch):

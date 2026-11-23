@@ -64,6 +64,11 @@
   <p class="formula">fee = {{ '%g'|format(LATE_FEE_RATE) }} × shares traded × P × (1 − P) × T</p>
   <p class="muted small">P is the average price per share in your trade (so 55¢ means P = 0.55). P × (1 − P) is largest at
     50¢ and small near 0¢ or 100¢.</p>
+  <p>Because that would make near-certain outcomes cheap to grab at the last minute, <b>buys</b> pay whichever is larger:
+    the fee above, or</p>
+  <p class="formula">fee = {{ '%g'|format(LATE_SNIPE_RATE) }} × shares bought × P × P × T</p>
+  <p class="muted small">This only matters for expensive shares (above about 80¢). Sells only pay the first fee, so cashing
+    out stays cheap.</p>
   <table class="table late-table">
     <thead><tr><th>Time until betting closes</th><th class="num">T</th></tr></thead>
     <tbody>
@@ -74,6 +79,7 @@
   </table>
   <p>Example: buying 100 shares at 50¢ with less than {{ late_first_limit }} left costs
     {{ '%g'|format(LATE_FEE_RATE) }} × 100 × 0.25 × {{ '%g'|format(late_top) }} = <b>Ⓜ{{ late_example|money }}</b> on top of the bet.
+    Buying 100 shares at 95¢ in that window costs Ⓜ{{ snipe_example|money }} instead of Ⓜ{{ snipe_old|money }}.
     The bet panel shows the exact fee before you trade.</p>
 
   <h2>Read the rules, not just the title</h2>

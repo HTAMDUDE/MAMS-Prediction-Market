@@ -107,6 +107,7 @@ function setupTradeForm(form) {
   const balance = parseFloat(maxBtn.dataset.balance);
   const entryFee = parseFloat(form.dataset.entryFee) || 0;  // charged on your first bet in this market
   const lateT = parseFloat(form.dataset.lateT) || 0;        // late-trading multiplier T (0 = no fee)
+  const snipeRate = parseFloat(form.dataset.snipeRate) || 0; // buys pay at least this x T x shares x P^2
   // always shown in the summary: Ⓜ0.00 until the last 2 hours before betting closes
   const lateRow = (r, late, sign = '') => late
     ? row(`Late fee (×${r.late_multiplier}${r.late_fee_to ? `, to ${r.late_fee_to}` : ''})`, `${sign}${money(late)}`, 'down')
@@ -144,11 +145,13 @@ function setupTradeForm(form) {
   const floor6 = n => Math.floor(n * 1e6) / 1e6;
   const floor2 = n => Math.floor(n * 100) / 100;
   const round2 = n => Math.round(n * 100) / 100;
-  // Biggest bet you can afford. The late fee is 0.07 x T x bet x (1 - P), and buying only pushes P up from the
-  // current price, so using the current price leaves just enough room for the fee.
+  // Biggest bet you can afford. The late fee per coin bet is the larger of 0.07 x T x (1 - P) and snipeRate x T x P.
+  // Buying pushes P up from the current price, so the first part is largest at the current price and the second
+  // is at most snipeRate x T (P < 1). Using both bounds leaves enough room for the fee.
   const maxBuy = () => {
     const p = parseFloat(selected().dataset.price) || 0;
-    return Math.max(0, floor2((balance - entryFee) / (1 + 0.07 * lateT * (1 - p))));
+    const rate = Math.max(0.07 * lateT * (1 - p), snipeRate * lateT);
+    return Math.max(0, floor2((balance - entryFee) / (1 + rate)));
   };
 
   function requestQuote() {

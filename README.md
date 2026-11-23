@@ -23,9 +23,10 @@ assemblies, and anything else the admins post.
   and pays exactly Ⓜ1), so they don't earn a bonus. If the pot is short, the house covers it.
 - A **late trading fee** discourages trading right before betting closes: `0.07 × shares × P × (1 − P) × T`, where P
   is the trade's average price per share and T is 0 with more than 2 hours left, 2 at 1–2 hours, 4 at 30–60 minutes
-  and 6 in the last 30 minutes. Charged on buys (added) and sells (deducted) and paid to the market's creator (on markets with no
+  and 6 in the last 30 minutes. Buys pay at least `0.017 × shares × P² × T`, so near-certain outcomes can't be
+  sniped cheaply at the last minute. Charged on buys (added) and sells (deducted) and paid to the market's creator (on markets with no
   creator, or when creators trade their own market late, it isn't paid to anyone). Set by
-  `LATE_FEE_RATE` and `LATE_FEE_TIERS` in `app.py`.
+  `LATE_FEE_RATE`, `LATE_SNIPE_RATE` and `LATE_FEE_TIERS` in `app.py`.
 - The **Activity** page lists every trade made on the site (who, what, which market, how much), with filters by
   buys/sells, trader and market. **Your balance history** (linked from it) logs every change to your own balance
   (buys, sells, payouts, losses, refunds, bonuses, admin adjustments) with your balance after each one. Admins can
