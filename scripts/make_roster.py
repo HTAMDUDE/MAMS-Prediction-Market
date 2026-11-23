@@ -8,8 +8,10 @@ Existing users without an email get a placeholder address ending in .invalid, wh
 fine: people who already have an account log in with their password and are never sent a code.
 
 Usage (from the project folder):
-    python scripts/make_roster.py                      # usernames from the database only
-    python scripts/make_roster.py --emails people.csv  # plus names/emails from a CSV
+    python scripts/make_roster.py --export-csv people.csv  # 1. write every username to a CSV, emails blank
+    (fill in the emails and add rows for people without an account, e.g. in Google Sheets or Excel)
+    python scripts/make_roster.py --emails people.csv      # 2. build the roster from the database + that CSV
+    python scripts/make_roster.py                          # or: usernames from the database only
 Add --force to replace an existing roster file. The roster holds names and emails: never commit it.
 """
 
@@ -96,15 +98,39 @@ def build(db_path, csv_path=None):
     return entries, report
 
 
+def export_csv(db_path, csv_path):
+    """Write every existing username (and email, if the database has one) to a name,email CSV. Returns the count."""
+    db = sqlite3.connect(db_path)
+    cols = {r[1] for r in db.execute("PRAGMA table_info(users)")}
+    query = "SELECT username, email FROM users ORDER BY username COLLATE NOCASE" if "email" in cols \
+        else "SELECT username, '' FROM users ORDER BY username COLLATE NOCASE"
+    rows = [(name, (email or "").strip()) for name, email in db.execute(query)]
+    db.close()
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:  # utf-8-sig so Excel shows accents correctly
+        w = csv.writer(f)
+        w.writerow(["name", "email"])
+        w.writerows(rows)
+    return len(rows)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--db", default=os.environ.get("MAMS_DB", os.path.join(BASE_DIR, "instance", "mams.db")))
     ap.add_argument("--emails", help="CSV with columns name,email")
     ap.add_argument("--out", default=os.path.join(BASE_DIR, "instance", "login_roster.json"))
-    ap.add_argument("--force", action="store_true", help="replace an existing roster file")
+    ap.add_argument("--force", action="store_true", help="replace an existing roster or CSV file")
+    ap.add_argument("--export-csv", metavar="CSV", help="write existing usernames to a name,email CSV and stop")
     args = ap.parse_args()
     if not os.path.exists(args.db):
         sys.exit(f"No database at {args.db}")
+    if args.export_csv:
+        if os.path.exists(args.export_csv) and not args.force:
+            sys.exit(f"{args.export_csv} already exists. Add --force to replace it.")
+        n = export_csv(args.db, args.export_csv)
+        print(f"Wrote {n} usernames to {args.export_csv}. Fill in the email column (keep each name exactly as it is),")
+        print("add a row for anyone who doesn't have an account yet, then run:")
+        print(f"    python3 scripts/make_roster.py --emails {args.export_csv}")
+        return
     if os.path.exists(args.out) and not args.force:
         sys.exit(f"{args.out} already exists. Add --force to replace it.")
     entries, r = build(args.db, args.emails)

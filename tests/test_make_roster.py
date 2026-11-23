@@ -43,3 +43,21 @@ def test_script_output_loads_in_the_site(tmp_path):
                            cwd=ROOT, env=env, capture_output=True, text=True)
     assert check.stdout.strip() == "2", check.stderr
     assert {e["name"] for e in json.loads(out.read_text())} == {"Kaushik", "kp123"}
+
+
+def test_export_csv_then_build(tmp_path):
+    _db(tmp_path / "m.db", ["kp123", "Kaushik", "Zoë Ng"])
+    csv_path = tmp_path / "people.csv"
+    script = os.path.join(ROOT, "scripts", "make_roster.py")
+    out = subprocess.run([sys.executable, script, "--db", str(tmp_path / "m.db"), "--export-csv", str(csv_path)],
+                         capture_output=True, text=True)
+    assert out.returncode == 0 and "Wrote 3 usernames" in out.stdout
+    text = csv_path.read_text(encoding="utf-8-sig")
+    assert text.splitlines() == ["name,email", "Kaushik,", "kp123,", "Zoë Ng,"]
+    # fill it in like a person would, add someone new, and build the roster from it
+    csv_path.write_text(text.replace("Kaushik,", "Kaushik,k@example.com") + "New Kid,new@example.com\n",
+                        encoding="utf-8-sig")
+    entries, r = make_roster.build(str(tmp_path / "m.db"), str(csv_path))
+    by = {e["name"]: e["email"] for e in entries}
+    assert by["Kaushik"] == "k@example.com" and by["New Kid"] == "new@example.com" and len(by) == 4
+    assert r["from_csv"] == 1 and not r["no_way_in"]
