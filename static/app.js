@@ -12,7 +12,7 @@ function wallNow(tz) {
   return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
 }
 const fmt = n => n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const escapeHtml = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const escapeHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 function svg(tag, attrs, parent) {
   const el = document.createElementNS(SVG_NS, tag);

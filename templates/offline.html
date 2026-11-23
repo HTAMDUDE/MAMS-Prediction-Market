@@ -17,13 +17,14 @@
     <h1>You're offline</h1>
     <p class="muted">Prices and balances need a connection, so there's nothing to show right now.
       This page will reload by itself when you're back online.</p>
-    <button class="btn btn-lg" type="button" onclick="location.reload()">Try again</button>
+    <button class="btn btn-lg" type="button" id="retry">Try again</button>
   </div>
 </main>
-<script>
+<script nonce="{{ csp_nonce() }}">
   // Reload as soon as the connection comes back. The service worker only shows this page in place of the one you
   // asked for, so reloading fetches that page again.
   window.addEventListener('online', () => location.reload());
+  document.getElementById('retry').addEventListener('click', () => location.reload());
 </script>
 </body>
 </html>

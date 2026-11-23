@@ -459,7 +459,7 @@
 {% endblock %}
 
 {% block scripts %}
-<script>
+<script nonce="{{ csp_nonce() }}">
   drawChart(document.getElementById('chart'), {{ history|tojson }}, {{ b.outcomes|map(attribute='label')|list|tojson }},
             {{ (b.m.resolved_at if b.state in ('resolved', 'cancelled') else none)|tojson }},
             {{ (1 if b.binary and b.state not in ('resolved', 'cancelled') else b.outcomes|length)|tojson }},
