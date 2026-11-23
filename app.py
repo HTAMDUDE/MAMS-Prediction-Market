@@ -14,6 +14,7 @@ import time
 from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 from functools import wraps
+from urllib.parse import urlsplit
 
 from flask import (Flask, abort, flash, g, jsonify, make_response, redirect, render_template,
                    request, session, url_for, current_app)
@@ -88,7 +89,8 @@ def _secret_key():
         return os.environ["SECRET_KEY"]
     path = os.path.join(INSTANCE_DIR, "secret_key")
     if not os.path.exists(path):
-        with open(path, "w") as f:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # readable by the server's account only
+        with os.fdopen(fd, "w") as f:
             f.write(secrets.token_hex(32))
     with open(path) as f:
         return f.read().strip()
@@ -97,7 +99,9 @@ def _secret_key():
 app = Flask(__name__)
 app.config.update(SECRET_KEY=_secret_key(), PERMANENT_SESSION_LIFETIME=timedelta(days=30),
                   SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
-                  SESSION_COOKIE_SECURE=PRODUCTION)
+                  SESSION_COOKIE_SECURE=PRODUCTION,
+                  # the biggest real form is a few KB; refuse anything huge before it's parsed or hashed
+                  MAX_CONTENT_LENGTH=256 * 1024)
 if PRODUCTION:
     # Trust the hosting proxy's X-Forwarded-For / -Proto so we see real visitor IPs and HTTPS.
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
@@ -105,6 +109,21 @@ if PRODUCTION:
 # Simple in-memory rate limiting (one server process is plenty for a school site).
 # Limits are generous because a whole school can share one public IP address.
 _hits = {}
+HITS_MAX_KEYS = 10000
+HITS_MAX_WINDOW = 3600  # the longest window any limit uses
+
+
+def _prune_hits(now):
+    """Keep _hits bounded without forgetting live limits. (Clearing everything would let someone wipe every
+    lockout just by trying lots of different usernames.) Drops keys with no hit inside the longest window, then,
+    if still too many, the ones with the fewest recent hits (oldest first), so keys close to a limit survive a flood
+    of one-off keys."""
+    for key in [k for k, ts in _hits.items() if not ts or now - ts[-1] >= HITS_MAX_WINDOW]:
+        del _hits[key]
+    if len(_hits) > HITS_MAX_KEYS:
+        by_age = sorted(_hits, key=lambda k: (len(_hits[k]), _hits[k][-1]))
+        for key in by_age[:len(_hits) - int(HITS_MAX_KEYS * 0.8)]:
+            del _hits[key]
 
 
 def rate_limited(key, limit, window_seconds):
@@ -114,8 +133,8 @@ def rate_limited(key, limit, window_seconds):
     if not limited:
         recent.append(now)
     _hits[key] = recent
-    if len(_hits) > 10000:
-        _hits.clear()
+    if len(_hits) > HITS_MAX_KEYS:
+        _prune_hits(now)
     return limited
 
 
@@ -276,11 +295,19 @@ def write_email_csv(db):
     rows = db.execute("SELECT username, CASE WHEN email_verified = 1 THEN email ELSE '' END FROM users "
                       "ORDER BY username COLLATE NOCASE").fetchall()
     tmp = email_csv_path() + ".tmp"
-    with open(tmp, "w", newline="", encoding="utf-8-sig") as f:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # names and emails: server account only
+    with os.fdopen(fd, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         w.writerow(["name", "email"])
-        w.writerows([tuple(r) for r in rows])
+        w.writerows([tuple(csv_safe(v) for v in r) for r in rows])
+    os.chmod(tmp, 0o600)
     os.replace(tmp, email_csv_path())
+
+
+def csv_safe(value):
+    """Spreadsheets run cells starting with = + - @ as formulas; a leading ' makes them plain text."""
+    value = value or ""
+    return "'" + value if value[:1] in ("=", "+", "-", "@", "\t", "\r") else value
 
 
 def login_code_hash(username, code):
@@ -1092,10 +1119,28 @@ def can_manage(target_id):
 NOT_ALLOWED = "Only the site owner can do that to an admin."
 
 
+def safe_path(url, default):
+    """`url` if it's a path on this site, else `default`. Rejects //host and /\\host (browsers read a backslash as
+    a slash), schemes and control characters, so `next` parameters can't send people to another site."""
+    url = url or ""
+    if (not url.startswith("/") or url.startswith("//") or "\\" in url
+            or any(ord(ch) < 32 or ord(ch) == 127 for ch in url)):
+        return default
+    parts = urlsplit(url)
+    return url if not parts.scheme and not parts.netloc else default
+
+
+def referrer_or(default):
+    """The page the request came from, if it's on this site, else `default`."""
+    parts = urlsplit(request.referrer or "")
+    if parts.netloc and parts.netloc == request.host and parts.scheme in ("http", "https"):
+        return safe_path(parts.path + (f"?{parts.query}" if parts.query else ""), default)
+    return default
+
+
 def back(default):
     """Redirect to the page a form came from (a same-site `next` path) or to `default`."""
-    nxt = request.form.get("next", "")
-    return redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else default)
+    return redirect(safe_path(request.form.get("next", ""), default))
 
 # Every admin action is written to audit_log (Admin -> Admin log). The key is stored; this map gives the label.
 AUDIT_ACTIONS = {
@@ -1231,6 +1276,42 @@ def until_filter(s):
     return "<1m left"
 
 
+# ---------------------------------------------------------------- security headers
+
+@app.template_global()
+def csp_nonce():
+    """A per-request random value. Inline <script> tags carry it, and the CSP only runs scripts that do."""
+    if "csp_nonce" not in g:
+        g.csp_nonce = secrets.token_urlsafe(16)
+    return g.csp_nonce
+
+
+# Google Fonts is the only outside origin the pages use. Styles allow 'unsafe-inline' because templates and
+# app.js use style="" attributes; scripts don't.
+CSP = ("default-src 'self'; script-src 'self' 'nonce-{nonce}'; "
+       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; "
+       "img-src 'self' data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; object-src 'none'; "
+       "base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
+
+
+@app.after_request
+def security_headers(resp):
+    h = resp.headers
+    h.setdefault("X-Content-Type-Options", "nosniff")
+    h.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    h.setdefault("X-Frame-Options", "DENY")  # no framing, so nobody can trick clicks onto Buy buttons
+    h.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    h.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    if PRODUCTION:
+        h.setdefault("Strict-Transport-Security", "max-age=31536000")
+    if resp.mimetype == "text/html":
+        h["Content-Security-Policy"] = CSP.format(nonce=csp_nonce())
+        # personal pages (balances, admin screens, one-time passwords) aren't kept in the browser's cache
+        if g.get("user") is not None and "Cache-Control" not in h:
+            h["Cache-Control"] = "no-store"
+    return resp
+
+
 # ---------------------------------------------------------------- installable app (PWA)
 
 def _asset_version():
@@ -1317,8 +1398,8 @@ def register():
             flash("Enter a valid email address.", "error")
         elif email_taken(get_db(), email):
             flash("That email is already used by another account.", "error")
-        elif len(password) < 6:
-            flash("Password must be at least 6 characters.", "error")
+        elif not PASSWORD_MIN <= len(password) <= PASSWORD_MAX:
+            flash(f"Password must be {PASSWORD_MIN}–{PASSWORD_MAX} characters.", "error")
         elif password != request.form.get("confirm", ""):
             flash("Passwords don't match.", "error")
         elif rate_limited(("register", request.remote_addr), 40, 3600):
@@ -1364,17 +1445,22 @@ def login():
             flash("Too many wrong passwords for this account. Wait 5 minutes and try again.", "error")
             return render_template("login.html")
         u = get_db().execute("SELECT * FROM users WHERE username = ?", (name,)).fetchone()
-        if u and check_password_hash(u["password_hash"], request.form.get("password", "")):
+        # Unknown usernames still pay for a hash check, so response time doesn't reveal which accounts exist.
+        ok = check_password_hash(u["password_hash"] if u else DUMMY_PASSWORD_HASH, request.form.get("password", ""))
+        if u and ok:
             _hits.pop(fail_key, None)
             session.clear()
             session.permanent = True
             session["uid"] = u["id"]
             session["gen"] = u["session_gen"]
-            nxt = request.args.get("next", "")
-            return redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else url_for("index"))
+            return redirect(safe_path(request.args.get("next", ""), url_for("index")))
         rate_limited(fail_key, 10, 300)  # record the failure
         flash("Wrong username or password.", "error")
     return render_template("login.html")
+
+
+DUMMY_PASSWORD_HASH = generate_password_hash(secrets.token_hex(16))
+PASSWORD_MIN, PASSWORD_MAX = 6, 128
 
 
 def email_taken(db, email, except_id=None):
@@ -1473,8 +1559,8 @@ def change_password():
         flash("Enter your current password.", "error")
     elif not check_password_hash(g.user["password_hash"], cur):
         flash("Your current password is wrong.", "error")
-    elif len(new) < 6:
-        flash("Password must be at least 6 characters.", "error")
+    elif not PASSWORD_MIN <= len(new) <= PASSWORD_MAX:
+        flash(f"Password must be {PASSWORD_MIN}–{PASSWORD_MAX} characters.", "error")
     elif new != request.form.get("confirm", ""):
         flash("Passwords don't match.", "error")
     else:
@@ -1510,7 +1596,7 @@ def bonus():
         session["celebrate"] = {"kind": "bonus", "from": g.user["balance"]}
     else:
         flash("You already claimed today's bonus. Come back tomorrow.", "error")
-    return redirect(request.referrer or url_for("index"))
+    return redirect(referrer_or(url_for("index")))
 
 
 # ---------------------------------------------------------------- routes: markets
@@ -1651,6 +1737,9 @@ def market(mid):
 @app.post("/market/<int:mid>/dispute")
 @login_required
 def dispute(mid):
+    if rate_limited(("dispute", g.user["id"]), 10, 3600):
+        flash("Too many disputes. Try again later.", "error")
+        return redirect(url_for("market", mid=mid))
     try:
         add_dispute(get_db(), g.user["id"], mid, request.form.get("reason", "").strip())
         flash("Dispute sent. The result won't finalize until an admin reviews it.", "success")
@@ -1740,6 +1829,8 @@ def comment(mid):
         flash("Keep comments under 500 characters.", "error")
     elif get_db().execute("SELECT 1 FROM comment_mutes WHERE user_id = ?", (g.user["id"],)).fetchone():
         flash(COMMENTS_OFF, "error")
+    elif rate_limited(("comment", g.user["id"]), 10, 60):
+        flash("You're commenting too fast. Wait a minute and try again.", "error")
     elif get_db().execute("SELECT 1 FROM markets WHERE id = ?", (mid,)).fetchone():
         get_db().execute("INSERT INTO comments (market_id, user_id, body, created_at) VALUES (?, ?, ?, ?)",
                          (mid, g.user["id"], body, now_str()))
@@ -2300,7 +2391,7 @@ def admin_propose_result(mid):
         flash(f"Result proposed. It finalizes in {DISPUTE_HOURS} hours unless someone disputes it.", "success")
     except (TradeError, ValueError) as e:
         flash(str(e) or "Pick a winning outcome.", "error")
-    return redirect(request.referrer or url_for("market", mid=mid))
+    return redirect(referrer_or(url_for("market", mid=mid)))
 
 
 def convert_to_over_under(db, market_id, line, unit, yes_means, admin_id):
@@ -2399,7 +2490,7 @@ def admin_clarify(mid):
                    (mid, g.user["id"], body, now_str()))
         log_audit("market.clarify", "market", mid, market_label(db, mid), body)
         flash("Clarification added to the rules.", "success")
-    return redirect(request.referrer or url_for("market", mid=mid))
+    return redirect(referrer_or(url_for("market", mid=mid)))
 
 
 @app.post("/admin/markets/<int:mid>/cancel")
@@ -2412,7 +2503,7 @@ def admin_cancel(mid):
         flash("Market cancelled and bets refunded.", "success")
     except TradeError as e:
         flash(str(e), "error")
-    return redirect(request.referrer or url_for("admin"))
+    return redirect(referrer_or(url_for("admin")))
 
 
 def parse_outcome_lines(text):
@@ -2553,6 +2644,9 @@ def admin_block(mid):
 def admin_unblock(mid, uid):
     db = get_db()
     u = db.execute("SELECT username FROM users WHERE id = ?", (uid,)).fetchone()
+    if u is not None and not can_manage(uid):
+        flash(NOT_ALLOWED, "error")
+        return redirect(url_for("market", mid=mid) + "#admin")
     if db.execute("DELETE FROM market_blocks WHERE market_id = ? AND user_id = ?", (mid, uid)).rowcount and u:
         log_audit("market.unblock", "user", uid, u["username"], f"Market #{mid}.")
     flash("They can bet on this market again.", "success")
@@ -2906,6 +3000,7 @@ def admin_reset_password(uid):
 @app.errorhandler(400)
 @app.errorhandler(403)
 @app.errorhandler(404)
+@app.errorhandler(413)
 @app.errorhandler(500)
 def error_page(e):
     return render_template("error.html", error=e), e.code

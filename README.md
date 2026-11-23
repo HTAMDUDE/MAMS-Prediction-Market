@@ -203,6 +203,19 @@ accounts or bets.
 
 Starting balance, daily bonus and the category list are constants at the top of `app.py`.
 
+## Security
+
+- **Claim the owner and admin accounts right after deploying.** Owner and admin rights go to whoever signs up
+  first with the `MAMS_OWNER` username or a name in `MAMS_ADMINS`, so create those accounts before sharing the link.
+- Every page is sent with a Content-Security-Policy (scripts only from this site, plus inline `<script>` tags that
+  carry `nonce="{{ csp_nonce() }}"`; fonts only from Google Fonts), can't be shown inside another site's frame, and
+  personal pages aren't kept in the browser cache. If you add a new outside script, font or stylesheet, add its
+  origin to `CSP` in `app.py`; new inline scripts need the nonce.
+- Log-in, sign-up, email codes, comments and disputes are rate limited. `next=` links only go to pages on this site.
+- Form posts over 256 KB are refused. Passwords are 6–128 characters.
+- `instance/` (database, `secret_key`, `people.csv`) and `.env` are never committed; `secret_key` and `people.csv`
+  are readable only by the server's account.
+
 ## Tests
 
 ```bash
