@@ -10,7 +10,13 @@
 </form>
 {% endmacro %}
 
-<div class="activity-head"><h1>Admin</h1><a class="btn btn-small btn-ghost" href="{{ url_for('admin_log') }}">Admin log →</a></div>
+<div class="activity-head"><h1>Admin</h1>
+  <div class="row-actions">
+    <a class="btn btn-small btn-ghost" href="{{ url_for('admin_security') }}">Alerts &amp; security{% if review_counts.get('held') or review_counts.get('flagged') %} <span class="badge" title="{{ review_counts.get('held', 0) }} held, {{ review_counts.get('flagged', 0) }} flagged">{{ review_counts.get('held', 0) + review_counts.get('flagged', 0) }}</span>{% endif %}</a>
+    <a class="btn btn-small btn-ghost" href="{{ url_for('admin_events') }}">Events</a>
+    <a class="btn btn-small btn-ghost" href="{{ url_for('admin_log') }}">Admin log →</a>
+  </div>
+</div>
 
 <div class="card" id="proposals">
   <h2>Proposals waiting for approval {% if proposals %}<span class="badge">{{ proposals|length }}</span>{% endif %}</h2>
@@ -111,7 +117,7 @@
   </p>
   <form method="get" action="{{ url_for('admin') }}#users" class="inline filters">
     <label for="user-q" class="sr-only">Search users</label>
-    <input id="user-q" type="search" name="q" value="{{ uv.q }}" placeholder="Search by username" aria-label="Search users">
+    <input id="user-q" type="search" name="q" value="{{ uv.q }}" placeholder="Username, email or IP" aria-label="Search users">
     <label for="user-filter" class="sr-only">Filter users</label>
     <select id="user-filter" name="filter" aria-label="Filter users">
       {% for key, label in uv.filters.items() %}<option value="{{ key }}" {{ 'selected' if uv.filter == key }}>{{ label }}</option>{% endfor %}
@@ -120,18 +126,37 @@
     {% if uv.q or uv.filter %}<a class="btn btn-small btn-ghost" href="{{ url_for('admin') }}#users">Clear</a>{% endif %}
   </form>
   {% if users %}
+  <form method="post" action="{{ url_for('admin_users_bulk') }}" id="bulk-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <input type="hidden" name="next" value="{{ request.full_path.rstrip('?') }}#users">
+  <div class="bulk-bar" role="group" aria-label="Actions for ticked accounts">
+    <span class="muted small"><span data-bulk-count>0</span> ticked</span>
+    <button class="btn btn-small btn-ghost" name="action" value="approve">Approve</button>
+    <button class="btn btn-small btn-ghost" name="action" value="hold" data-confirm="Hold the ticked accounts? They can look around but not bet, lend, comment or propose." data-confirm-title="Hold accounts?" data-confirm-label="Hold accounts">Hold</button>
+    <button class="btn btn-small btn-ghost" name="action" value="rescan">Re-scan</button>
+    <button class="btn btn-small btn-ghost" name="action" value="ban" data-confirm="Turn off trading for the ticked accounts? Their bets in all unresolved markets are refunded and removed." data-confirm-title="Ban from trading?" data-confirm-label="Ban from trading">Ban trading</button>
+    <button class="btn btn-small btn-ghost" name="action" value="allow">Allow trading</button>
+    <button class="btn btn-small btn-ghost" name="action" value="mute">Mute</button>
+    <button class="btn btn-small btn-ghost" name="action" value="unmute">Unmute</button>
+    <button class="btn btn-small btn-danger" name="action" value="delete" data-confirm="Delete the ticked accounts for good? Open bets are reversed and refunded, comments and history are removed, and their emails stay blocked. Admins, the owner and you are skipped." data-confirm-title="Delete accounts?" data-confirm-label="Delete accounts">Delete</button>
+  </div>
   <div class="table-scroll">
   <table class="table stack-mobile">
-    <thead><tr><th>User</th><th>Status</th><th class="num">Balance</th><th></th></tr></thead>
+    <thead><tr><th class="tick"><input type="checkbox" data-bulk-all aria-label="Tick every account on this page"></th><th>User</th><th>Email</th><th>Status</th><th>Risk</th><th>Last IP</th><th class="num">Balance</th><th></th></tr></thead>
     <tbody>
     {% for u in users %}
       <tr>
+        <td class="tick">{% if u.id != user.id and u.id != owner_id %}<input type="checkbox" name="uids" value="{{ u.id }}" data-bulk-row aria-label="Tick {{ u.username }}">{% endif %}</td>
         <td data-label="User"><a href="{{ url_for('balance_history', user=u.username) }}" title="View balance history"><strong>{{ u.username }}</strong></a>{% if u.id == user.id %} <span class="muted small">(you)</span>{% endif %}</td>
+        <td data-label="Email" class="small">{% if u.peek %}{% if u.email_verified %}{{ u.email }}{% elif u.pending_email %}<span class="muted" title="Not confirmed yet">{{ u.pending_email }}</span>{% else %}<span class="muted">none</span>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
         <td data-label="Status">
           {% if u.id == owner_id %}<span class="tag">Owner</span>{% elif u.is_admin %}<span class="tag">Admin</span>{% endif %}
+          {% if u.held %}<span class="status status-rejected">Held</span>{% elif u.risk_status == 'flagged' %}<span class="status status-closed">Flagged</span>{% endif %}
           {% if u.banned %}<span class="status status-rejected">Trading off</span>{% endif %}
           {% if u.muted %}<span class="status status-closed">Muted</span>{% endif %}
         </td>
+        <td data-label="Risk">{% if u.risk_score is not none %}<span class="risk risk-{{ 'high' if u.risk_score >= 60 else 'medium' if u.risk_score >= 30 else 'low' }}" title="Risk score out of 100">{{ u.risk_score }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td data-label="Last IP" class="small">{% if u.peek and u.last_ip %}{{ u.last_ip }}{% else %}<span class="muted">—</span>{% endif %}</td>
         <td data-label="Balance" class="num">Ⓜ{{ u.balance|money }}</td>
         <td class="num"><a class="btn btn-small btn-ghost" href="{{ url_for('admin_user', uid=u.id) }}">Manage</a></td>
       </tr>
@@ -139,6 +164,7 @@
     </tbody>
   </table>
   </div>
+  </form>
   <p class="muted small">Page {{ uv.page }} of {{ uv.pages }} · {{ uv.total }} user{{ '' if uv.total == 1 else 's' }}
     {% if uv.page > 1 %}· <a href="{{ url_for('admin', q=uv.q or None, filter=uv.filter or None, upage=uv.page - 1) }}#users">← Previous</a>{% endif %}
     {% if uv.page < uv.pages %}· <a href="{{ url_for('admin', q=uv.q or None, filter=uv.filter or None, upage=uv.page + 1) }}#users">Next →</a>{% endif %}</p>

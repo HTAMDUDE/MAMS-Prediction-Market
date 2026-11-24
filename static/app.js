@@ -831,3 +831,22 @@ function setupBetBar() {
     }
   }));
 })();
+
+
+// Admin bulk actions: "tick all" and the ticked counter (works on any form with data-bulk-row checkboxes).
+(function setupBulk() {
+  document.querySelectorAll('form').forEach(form => {
+    const all = form.querySelector('[data-bulk-all]');
+    const rows = () => Array.from(form.querySelectorAll('[data-bulk-row]'));
+    const count = form.querySelector('[data-bulk-count]');
+    if (!all && !count) return;
+    const update = () => {
+      const ticked = rows().filter(r => r.checked).length;
+      if (count) count.textContent = ticked;
+      if (all) { all.checked = ticked > 0 && ticked === rows().length; all.indeterminate = ticked > 0 && ticked < rows().length; }
+    };
+    if (all) all.addEventListener('change', () => { rows().forEach(r => { r.checked = all.checked; }); update(); });
+    form.addEventListener('change', e => { if (e.target.matches('[data-bulk-row]')) update(); });
+    update();
+  });
+})();

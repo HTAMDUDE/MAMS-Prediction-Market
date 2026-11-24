@@ -224,3 +224,85 @@ CREATE TABLE IF NOT EXISTS loans (
 CREATE INDEX IF NOT EXISTS idx_loans_due ON loans(status, due_at);
 CREATE INDEX IF NOT EXISTS idx_loans_lender ON loans(lender_id);
 CREATE INDEX IF NOT EXISTS idx_loans_borrower ON loans(borrower_id);
+
+-- ---- Alt detection (see security.py). None of these tables has a foreign key to users: names are copied in and rows
+-- survive an account being deleted, so a deleted alt's device and IP keep catching the next alt. Times are epoch seconds.
+
+-- Every IP / device / fingerprint value an account has been seen with. kind: ip | net | device | fp | fp_parts |
+-- fp_canvas | fp_webgl | fp_audio | fp_fonts
+CREATE TABLE IF NOT EXISTS sightings (
+    user_id    INTEGER NOT NULL,
+    username   TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    first_seen REAL NOT NULL,
+    last_seen  REAL NOT NULL,
+    hits       INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (user_id, kind, value)
+);
+CREATE INDEX IF NOT EXISTS idx_sightings_value ON sightings(kind, value);
+
+-- Sign-ups, log-ins and email confirmations, with what the browser looked like.
+CREATE TABLE IF NOT EXISTS login_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER,
+    username   TEXT NOT NULL,
+    event      TEXT NOT NULL,         -- signup | login | login_fail | verify
+    ip         TEXT NOT NULL DEFAULT '',
+    ua         TEXT NOT NULL DEFAULT '',
+    device_id  TEXT NOT NULL DEFAULT '',
+    fp_hash    TEXT NOT NULL DEFAULT '',
+    fp_json    TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_user ON login_events(user_id, id);
+CREATE INDEX IF NOT EXISTS idx_events_ip ON login_events(event, ip, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_device ON login_events(event, device_id, created_at);
+
+-- The latest risk assessment per account. status: clear | flagged | held | approved.
+-- `ack` lists the signal kinds an admin had seen when approving, so only new kinds re-flag an approved account.
+CREATE TABLE IF NOT EXISTS user_risk (
+    user_id     INTEGER PRIMARY KEY,
+    score       INTEGER NOT NULL DEFAULT 0,
+    level       TEXT NOT NULL DEFAULT 'low',
+    reasons     TEXT NOT NULL DEFAULT '[]',
+    links       TEXT NOT NULL DEFAULT '{}',
+    status      TEXT NOT NULL DEFAULT 'clear',
+    ack         TEXT NOT NULL DEFAULT '[]',
+    reviewed_by TEXT,
+    reviewed_at REAL,
+    updated_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_risk_status ON user_risk(status, score);
+
+-- Every canonical email ever used. An email can only ever belong to one account; a deleted account's email stays
+-- blocked (status 'deleted') until an admin releases it. status: active | deleted | released
+CREATE TABLE IF NOT EXISTS email_ledger (
+    canonical      TEXT PRIMARY KEY,
+    first_username TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'active',
+    created_at     REAL NOT NULL,
+    released_by    TEXT,
+    released_at    REAL
+);
+
+-- The event log (Admin -> Events): one row per notable thing that happened. No foreign keys, so it survives deleted
+-- accounts. severity: info | warn | alert. Never holds passwords, codes or tokens.
+CREATE TABLE IF NOT EXISTS security_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at REAL NOT NULL,
+    kind       TEXT NOT NULL,
+    severity   TEXT NOT NULL DEFAULT 'info',
+    user_id    INTEGER,
+    username   TEXT NOT NULL DEFAULT '',
+    ip         TEXT NOT NULL DEFAULT '',
+    ua         TEXT NOT NULL DEFAULT '',
+    device_id  TEXT NOT NULL DEFAULT '',
+    request_id TEXT NOT NULL DEFAULT '',
+    path       TEXT NOT NULL DEFAULT '',
+    detail     TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_sevents_time ON security_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_sevents_kind ON security_events(kind, created_at);
+CREATE INDEX IF NOT EXISTS idx_sevents_user ON security_events(user_id, id);
+CREATE INDEX IF NOT EXISTS idx_sevents_ip ON security_events(ip);

@@ -5,6 +5,7 @@
   <p class="error-code">{{ error.code }}</p>
   <h1>{{ error.name }}</h1>
   <p class="muted">{{ error.description }}</p>
+  {% if error.code == 500 and reference %}<p class="muted small">If this keeps happening, tell an admin this reference: <code>{{ reference }}</code></p>{% endif %}
   <a class="btn" href="{{ url_for('index') }}">Back to markets</a>
 </div>
 {% endblock %}

@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Events · MAMS Prediction Market{% endblock %}
+{% block content %}
+<div class="activity-head">
+  <div>
+    <h1>Events</h1>
+    <p class="muted">Sign-ups, log-ins, failures, emails, holds, errors and admin actions, newest first. Kept for 180 days.
+      Last 24 hours: <strong>{{ summary.get('alert', 0) }}</strong> alert{{ '' if summary.get('alert', 0) == 1 else 's' }},
+      <strong>{{ summary.get('warn', 0) }}</strong> warning{{ '' if summary.get('warn', 0) == 1 else 's' }},
+      {{ summary.get('info', 0) }} info.</p>
+  </div>
+  <a class="btn btn-small btn-ghost" href="{{ url_for('admin') }}">← Admin</a>
+</div>
+
+<form method="get" class="inline filters" style="margin-bottom:1rem">
+  <label for="ev-q" class="sr-only">Search events</label>
+  <input id="ev-q" type="search" name="q" value="{{ q }}" placeholder="Username, IP, detail or reference" aria-label="Search events">
+  <label for="ev-sev" class="sr-only">Severity</label>
+  <select id="ev-sev" name="severity" aria-label="Severity">
+    <option value="">Any severity</option>
+    {% for s in ['alert', 'warn', 'info'] %}<option value="{{ s }}" {{ 'selected' if sev == s }}>{{ s|capitalize }}</option>{% endfor %}
+  </select>
+  <label for="ev-kind" class="sr-only">Event type</label>
+  <select id="ev-kind" name="kind" aria-label="Event type">
+    <option value="">Any event</option>
+    {% for k, v in catalog.items() %}<option value="{{ k }}" {{ 'selected' if kind == k }}>{{ v[1] }}</option>{% endfor %}
+  </select>
+  <button class="btn btn-small">Filter</button>
+  {% if q or sev or kind %}<a class="btn btn-small btn-ghost" href="{{ url_for('admin_events') }}">Clear</a>{% endif %}
+</form>
+
+<div class="card">
+  {% if rows %}
+  <div class="table-scroll">
+  <table class="table stack-mobile">
+    <thead><tr><th>When</th><th>Event</th><th>User</th><th>IP</th><th>Detail</th><th>Ref</th></tr></thead>
+    <tbody>
+    {% for e in rows %}
+      <tr>
+        <td data-label="When" class="muted small nowrap" title="{{ e.created_at|ts|when }}">{{ e.created_at|ts|ago }}</td>
+        <td data-label="Event"><span class="sev sev-{{ e.severity }}">{{ e.severity }}</span> {{ catalog.get(e.kind, ['', e.kind])[1] }}</td>
+        <td data-label="User" class="small">{% if e.user_id %}<a href="{{ url_for('admin_user', uid=e.user_id) }}">{{ e.username or e.user_id }}</a>{% else %}{{ e.username or '—' }}{% endif %}</td>
+        <td data-label="IP" class="small">{{ e.ip or '—' }}</td>
+        <td data-label="Detail" class="small muted" title="{{ e.path }}">{{ e.detail }}</td>
+        <td data-label="Ref" class="small muted"><a href="{{ url_for('admin_events', q=e.request_id) }}">{{ e.request_id }}</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="muted small">Page {{ page }} of {{ pages }} · {{ total }} event{{ '' if total == 1 else 's' }}
+    {% if page > 1 %}· <a href="{{ url_for('admin_events', q=q or None, severity=sev or None, kind=kind or None, page=page - 1) }}">← Newer</a>{% endif %}
+    {% if page < pages %}· <a href="{{ url_for('admin_events', q=q or None, severity=sev or None, kind=kind or None, page=page + 1) }}">Older →</a>{% endif %}</p>
+  {% else %}<p class="muted">No events match.</p>{% endif %}
+</div>
+{% endblock %}

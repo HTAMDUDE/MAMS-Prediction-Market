@@ -1,0 +1,41 @@
+# Services that add risk points but are not refused. Format: domain,points   (subdomains match; .* = any TLD)
+# Relay / forwarding aliases: the real inbox is hidden, so one person can mint unlimited addresses.
+duck.com,20
+mozmail.com,20
+privaterelay.appleid.com,15
+simplelogin.*,25
+simplelogin.com,25
+anonaddy.*,25
+addy.io,25
+33mail.com,25
+spamgourmet.com,25
+erine.email,25
+relay.firefox.com,20
+passinbox.com,25
+# Anonymous / low-reputation providers that are popular for throwaway accounts.
+cock.li,25
+airmail.cc,25
+firemail.cc,25
+8chan.co,25
+tutanota.*,12
+tuta.io,12
+tutamail.com,12
+tutanota.com,12
+mail.ru,15
+bk.ru,15
+inbox.ru,15
+list.ru,15
+internet.ru,15
+yandex.*,12
+rambler.ru,15
+inbox.lv,15
+gmx.*,10
+mail.com,12
+email.com,12
+usa.com,12
+post.com,12
+consultant.com,12
+engineer.com,12
+programmer.net,12
+techie.com,12
+mailbox.org,8

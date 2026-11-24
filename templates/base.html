@@ -94,6 +94,7 @@
     </div>
   </div>
 </header>
+{% if user and user.held and not user.is_admin %}<div class="announcement held-banner" role="status"><div class="wrap"><span class="ann-tag">On hold</span><span>An admin needs to review your account before you can bet, lend, comment or propose. You can still look around. This usually only takes a little while.</span></div></div>{% endif %}
 {% if announcement %}<div class="announcement" role="status"><div class="wrap"><span class="ann-tag">Notice</span><span>{{ announcement }}</span></div></div>{% endif %}
 
 <main class="wrap">

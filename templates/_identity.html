@@ -1,0 +1,92 @@
+{# Identity & risk card for one user (admin only). `ident` comes from user_identity() in app.py. #}
+{% set risk = ident.risk %}
+<div class="card" id="identity">
+  <h2>Identity &amp; risk
+    {% if risk %}<span class="risk risk-{{ risk.level }}" title="Risk score out of 100">{{ risk.score }}</span>
+      <span class="status {{ 'status-rejected' if risk.status == 'held' else 'status-closed' if risk.status == 'flagged' else 'status-resolved' if risk.status == 'approved' else 'status-cancelled' }}">{{ risk.status|capitalize }}</span>
+    {% elif u.is_admin %}<span class="muted small">Admins aren't scored</span>{% endif %}</h2>
+
+  <dl class="facts">
+    <dt>Email</dt>
+    <dd>{% if ident.email %}{{ ident.email }}{% if not ident.email_verified %} <span class="muted small">(not confirmed yet)</span>{% endif %}
+        {% set cls = ident.provider %}
+        {% if cls[0] == 'shady' %}<span class="status status-closed" title="{{ cls[2] }}">Shady provider</span>
+        {% elif cls[0] == 'school' %}<span class="status status-resolved">School domain</span>{% endif %}
+      {% else %}<span class="muted">none</span>{% endif %}</dd>
+    {% if ident.signup %}
+    <dt>Signed up</dt>
+    <dd>{{ ident.signup.created_at|ts|when }} from <strong>{{ ident.signup.ip or 'unknown' }}</strong> · {{ ident.signup.agent.text }}{% if ident.signup.agent.bot %} <span class="status status-rejected">looks automated</span>{% endif %}
+      {% set cap = ident.signup.meta.get('captcha') %}{% if cap == 'ok' %} · <span class="muted small">human check passed</span>{% elif cap == 'unreachable' %} · <span class="status status-closed">human check couldn't run</span>{% endif %}</dd>
+    {% endif %}
+  </dl>
+
+  {% if risk and risk.reasons %}
+  <h3>Why this score</h3>
+  <ul class="reasons">
+    {% for pts, kind, text in risk.reasons %}<li><span class="pts {{ 'neg' if pts < 0 }}">{{ '%+d'|format(pts) }}</span> {{ text }}</li>{% endfor %}
+  </ul>
+  {% elif risk %}<p class="muted small">Nothing suspicious found.</p>{% endif %}
+
+  {% if risk and risk.links %}
+  <h3>Linked accounts</h3>
+  <ul class="reasons">
+    {% for oid, o in risk.links.items() %}<li>
+      {% if o.deleted %}<span class="muted">{{ o.username }} (deleted)</span>{% else %}<a href="{{ url_for('admin_user', uid=oid) }}"><strong>{{ o.username }}</strong></a>{% endif %}
+      <span class="muted small">· {{ o.why|join(', ') }}</span></li>{% endfor %}
+  </ul>
+  {% endif %}
+
+  {% for kind, title in [('ip', 'IP addresses'), ('device', 'Devices (cookie / stored token)'), ('fp', 'Browser fingerprints'), ('fp_parts', 'Graphics and font signatures')] %}
+    {% set rows = ident.sightings[kind] %}
+    {% if rows %}
+    <h3>{{ title }}</h3>
+    <div class="table-scroll"><table class="table">
+      <thead><tr><th>Value</th><th>First seen</th><th>Last seen</th><th class="num">Visits</th><th>Also seen on</th></tr></thead>
+      <tbody>{% for r in rows %}<tr>
+        <td class="small"><code>{{ r.value if kind == 'ip' else r.value[:12] ~ '…' }}</code></td>
+        <td class="small muted" title="{{ r.first_seen|ts|when }}">{{ r.first_seen|ts|ago }}</td>
+        <td class="small muted" title="{{ r.last_seen|ts|when }}">{{ r.last_seen|ts|ago }}</td>
+        <td class="num">{{ r.hits }}</td>
+        <td class="small">{% if r.others %}{% for name, live, oid in r.others[:6] %}{% if live %}<a href="{{ url_for('admin_user', uid=oid) }}">{{ name }}</a>{% else %}<span class="muted">{{ name }} (deleted)</span>{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}{% if r.others|length > 6 %} and {{ r.others|length - 6 }} more{% endif %}{% else %}<span class="muted">nobody else</span>{% endif %}</td>
+      </tr>{% endfor %}</tbody>
+    </table></div>
+    {% endif %}
+  {% endfor %}
+
+  {% if ident.events %}
+  <h3>Recent activity</h3>
+  <div class="table-scroll"><table class="table">
+    <thead><tr><th>When</th><th>Event</th><th>IP</th><th>Browser</th></tr></thead>
+    <tbody>{% for e in ident.events %}<tr>
+      <td class="small muted" title="{{ e.created_at|ts|when }}">{{ e.created_at|ts|ago }}</td>
+      <td class="small">{{ {'signup': 'Signed up', 'login': 'Logged in', 'login_fail': 'Wrong password', 'verify': 'Confirmed email'}.get(e.event, e.event) }}</td>
+      <td class="small">{{ e.ip or '—' }}</td>
+      <td class="small">{{ e.agent.text }}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+  {% endif %}
+
+  {% if ident.log %}
+  <h3>Event log <a class="small" href="{{ url_for('admin_events', q=u.username) }}">all events →</a></h3>
+  <div class="table-scroll"><table class="table">
+    <thead><tr><th>When</th><th>Event</th><th>Detail</th></tr></thead>
+    <tbody>{% for e in ident.log %}<tr>
+      <td class="small muted nowrap" title="{{ e.created_at|ts|when }}">{{ e.created_at|ts|ago }}</td>
+      <td class="small"><span class="sev sev-{{ e.severity }}">{{ e.severity }}</span> {{ catalog.get(e.kind, ['', e.kind])[1] }}</td>
+      <td class="small muted">{{ e.detail }}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+  {% endif %}
+
+  {% if not u.is_admin %}
+  <div class="row-actions" style="margin-top:1rem">
+    <form method="post" action="{{ url_for('admin_risk', uid=u.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="next" value="{{ back_url }}">
+      <button class="btn btn-small" name="action" value="approve">Approve account</button>
+      <button class="btn btn-small btn-ghost" name="action" value="hold">Hold for review</button>
+      <button class="btn btn-small btn-ghost" name="action" value="rescan">Re-scan</button>
+    </form>
+  </div>
+  <p class="muted small">Held accounts can look around but can't bet, claim the bonus, lend, comment or propose. Approving remembers what you've seen, so only a new kind of evidence flags the account again.</p>
+  {% endif %}
+</div>
