@@ -14,8 +14,9 @@ import time
 from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 from functools import wraps
+from urllib.parse import urlsplit
 
-from flask import (Flask, abort, flash, g, jsonify, redirect, render_template,
+from flask import (Flask, abort, flash, g, jsonify, make_response, redirect, render_template,
                    request, session, url_for, current_app)
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -92,7 +93,8 @@ def _secret_key():
         return os.environ["SECRET_KEY"]
     path = os.path.join(INSTANCE_DIR, "secret_key")
     if not os.path.exists(path):
-        with open(path, "w") as f:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # readable by the server's account only
+        with os.fdopen(fd, "w") as f:
             f.write(secrets.token_hex(32))
     with open(path) as f:
         return f.read().strip()
@@ -101,7 +103,9 @@ def _secret_key():
 app = Flask(__name__)
 app.config.update(SECRET_KEY=_secret_key(), PERMANENT_SESSION_LIFETIME=timedelta(days=30),
                   SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
-                  SESSION_COOKIE_SECURE=PRODUCTION)
+                  SESSION_COOKIE_SECURE=PRODUCTION,
+                  # the biggest real form is a few KB; refuse anything huge before it's parsed or hashed
+                  MAX_CONTENT_LENGTH=256 * 1024)
 if PRODUCTION:
     # Trust the hosting proxy's X-Forwarded-For / -Proto so we see real visitor IPs and HTTPS.
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
@@ -109,6 +113,21 @@ if PRODUCTION:
 # Simple in-memory rate limiting (one server process is plenty for a school site).
 # Limits are generous because a whole school can share one public IP address.
 _hits = {}
+HITS_MAX_KEYS = 10000
+HITS_MAX_WINDOW = 3600  # the longest window any limit uses
+
+
+def _prune_hits(now):
+    """Keep _hits bounded without forgetting live limits. (Clearing everything would let someone wipe every
+    lockout just by trying lots of different usernames.) Drops keys with no hit inside the longest window, then,
+    if still too many, the ones with the fewest recent hits (oldest first), so keys close to a limit survive a flood
+    of one-off keys."""
+    for key in [k for k, ts in _hits.items() if not ts or now - ts[-1] >= HITS_MAX_WINDOW]:
+        del _hits[key]
+    if len(_hits) > HITS_MAX_KEYS:
+        by_age = sorted(_hits, key=lambda k: (len(_hits[k]), _hits[k][-1]))
+        for key in by_age[:len(_hits) - int(HITS_MAX_KEYS * 0.8)]:
+            del _hits[key]
 
 
 def rate_limited(key, limit, window_seconds):
@@ -118,8 +137,8 @@ def rate_limited(key, limit, window_seconds):
     if not limited:
         recent.append(now)
     _hits[key] = recent
-    if len(_hits) > 10000:
-        _hits.clear()
+    if len(_hits) > HITS_MAX_KEYS:
+        _prune_hits(now)
     return limited
 
 
@@ -280,11 +299,19 @@ def write_email_csv(db):
     rows = db.execute("SELECT username, CASE WHEN email_verified = 1 THEN email ELSE '' END FROM users "
                       "ORDER BY username COLLATE NOCASE").fetchall()
     tmp = email_csv_path() + ".tmp"
-    with open(tmp, "w", newline="", encoding="utf-8-sig") as f:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # names and emails: server account only
+    with os.fdopen(fd, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         w.writerow(["name", "email"])
-        w.writerows([tuple(r) for r in rows])
+        w.writerows([tuple(csv_safe(v) for v in r) for r in rows])
+    os.chmod(tmp, 0o600)
     os.replace(tmp, email_csv_path())
+
+
+def csv_safe(value):
+    """Spreadsheets run cells starting with = + - @ as formulas; a leading ' makes them plain text."""
+    value = value or ""
+    return "'" + value if value[:1] in ("=", "+", "-", "@", "\t", "\r") else value
 
 
 def login_code_hash(username, code):
@@ -418,6 +445,51 @@ def bundle(db, m):
         "volume": stats["volume"],
         "traders": stats["traders"],
     }
+
+
+def price_trends(db, market_ids, points=32):
+    """Per market id: `spark`, a downsampled list of price snapshots (each a list with one price per outcome) for
+    sparklines, and `delta`, each outcome's change since the last snapshot at least 24 hours old (or since the
+    first snapshot when the market is younger than that). Times are school wall-clock strings, like now_str()."""
+    market_ids = list(market_ids)
+    if not market_ids:
+        return {}
+    cutoff = (parse_dt(now_str()) - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+    series = {}
+    for r in db.execute(f"SELECT market_id, prices, created_at FROM price_history WHERE market_id IN "
+                        f"({','.join('?' * len(market_ids))}) ORDER BY id", market_ids):
+        series.setdefault(r["market_id"], []).append((r["created_at"], json.loads(r["prices"])))
+    out = {}
+    for mid, s in series.items():
+        latest = s[-1][1]
+        base = s[0][1]
+        for t, p in s:
+            if t <= cutoff:
+                base = p
+            else:
+                break
+        if len(s) > points:  # keep the first and last snapshot, evenly spaced in between
+            s = [s[round(i * (len(s) - 1) / (points - 1))] for i in range(points)]
+        out[mid] = {"spark": [p for _, p in s], "delta": [a - b for a, b in zip(latest, base)]}
+    return out
+
+
+@app.template_global()
+def spark_points(trend, i=0, w=120, h=32):
+    """SVG polyline points for outcome i's sparkline in a w x h box (prices 0..1, padded so the stroke fits)."""
+    if not trend or not trend["spark"]:
+        return ""
+    vals = [p[i] if i < len(p) else 0 for p in trend["spark"]]
+    if len(vals) == 1:
+        vals = vals * 2
+    lo, hi = min(vals), max(vals)
+    if hi - lo < 0.08:  # flat-ish lines stay flat-ish instead of being blown up to full height
+        mid = (hi + lo) / 2
+        lo, hi = mid - 0.04, mid + 0.04
+    pad = 3
+    n = len(vals) - 1
+    return " ".join(f"{pad + k * (w - 2 * pad) / n:.1f},{pad + (hi - v) / (hi - lo) * (h - 2 * pad):.1f}"
+                    for k, v in enumerate(vals))
 
 
 def snapshot_prices(db, market_id, b):
@@ -1002,7 +1074,7 @@ def load_user_and_check_csrf():
         elif g.user["id"] == g.owner_id and not g.user["is_admin"]:
             db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (g.user["id"],))  # owner is always admin
             g.user = db.execute("SELECT * FROM users WHERE id = ?", (g.user["id"],)).fetchone()
-    if request.endpoint != "static":
+    if request.endpoint not in PWA_ENDPOINTS:
         finalize_due(get_db())
         collect_overdue_loans(get_db())
     if request.method == "POST":
@@ -1011,7 +1083,9 @@ def load_user_and_check_csrf():
             abort(400, "Your form expired. Go back, reload the page and try again.")
 
 
-EMAIL_EXEMPT = {"account_email", "logout", "static", "how_it_works"}
+EMAIL_EXEMPT = {"account_email", "logout", "static", "how_it_works", "manifest", "service_worker", "offline"}
+# files the browser fetches on its own (app install, offline support): no per-request bookkeeping needed
+PWA_ENDPOINTS = {"static", "manifest", "service_worker", "offline"}
 
 
 @app.before_request
@@ -1059,10 +1133,28 @@ def can_manage(target_id):
 NOT_ALLOWED = "Only the site owner can do that to an admin."
 
 
+def safe_path(url, default):
+    """`url` if it's a path on this site, else `default`. Rejects //host and /\\host (browsers read a backslash as
+    a slash), schemes and control characters, so `next` parameters can't send people to another site."""
+    url = url or ""
+    if (not url.startswith("/") or url.startswith("//") or "\\" in url
+            or any(ord(ch) < 32 or ord(ch) == 127 for ch in url)):
+        return default
+    parts = urlsplit(url)
+    return url if not parts.scheme and not parts.netloc else default
+
+
+def referrer_or(default):
+    """The page the request came from, if it's on this site, else `default`."""
+    parts = urlsplit(request.referrer or "")
+    if parts.netloc and parts.netloc == request.host and parts.scheme in ("http", "https"):
+        return safe_path(parts.path + (f"?{parts.query}" if parts.query else ""), default)
+    return default
+
+
 def back(default):
     """Redirect to the page a form came from (a same-site `next` path) or to `default`."""
-    nxt = request.form.get("next", "")
-    return redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else default)
+    return redirect(safe_path(request.form.get("next", ""), default))
 
 # Every admin action is written to audit_log (Admin -> Admin log). The key is stored; this map gives the label.
 AUDIT_ACTIONS = {
@@ -1144,6 +1236,7 @@ def inject_globals():
             "loan_alerts": loan_alerts,
             "SCHOOL_TZ": os.environ.get("TZ", "America/New_York"),
             "announcement": get_setting(get_db(), "announcement"),
+            "celebrate": session.pop("celebrate", None),
             "owner_id": g.get("owner_id"), "is_owner": is_owner(),
             "CURRENCY": CURRENCY, "DAILY_BONUS": DAILY_BONUS, "CATEGORIES": CATEGORIES,
             "DISPUTE_HOURS": DISPUTE_HOURS, "CREATION_FEE": CREATION_FEE, "ENTRY_FEE": ENTRY_FEE,
@@ -1204,6 +1297,114 @@ def until_filter(s):
     return "<1m left"
 
 
+# ---------------------------------------------------------------- security headers
+
+@app.template_global()
+def csp_nonce():
+    """A per-request random value. Inline <script> tags carry it, and the CSP only runs scripts that do."""
+    if "csp_nonce" not in g:
+        g.csp_nonce = secrets.token_urlsafe(16)
+    return g.csp_nonce
+
+
+# Google Fonts is the only outside origin the pages use. Styles allow 'unsafe-inline' because templates and
+# app.js use style="" attributes; scripts don't.
+CSP = ("default-src 'self'; script-src 'self' 'nonce-{nonce}'; "
+       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; "
+       "img-src 'self' data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; object-src 'none'; "
+       "base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
+
+
+@app.after_request
+def security_headers(resp):
+    h = resp.headers
+    h.setdefault("X-Content-Type-Options", "nosniff")
+    h.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    h.setdefault("X-Frame-Options", "DENY")  # no framing, so nobody can trick clicks onto Buy buttons
+    h.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    h.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    if PRODUCTION:
+        h.setdefault("Strict-Transport-Security", "max-age=31536000")
+    if resp.mimetype == "text/html":
+        h["Content-Security-Policy"] = CSP.format(nonce=csp_nonce())
+        # personal pages (balances, admin screens, one-time passwords) aren't kept in the browser's cache
+        if g.get("user") is not None and "Cache-Control" not in h:
+            h["Cache-Control"] = "no-store"
+    return resp
+
+
+# ---------------------------------------------------------------- installable app (PWA)
+
+def _asset_version():
+    """A short hash of everything in static/. Static URLs carry it (?v=...), so a deploy gives every file a new URL
+    and the service worker, which caches static files forever, picks up the new copies."""
+    digest = hashlib.sha256()
+    static_dir = os.path.join(BASE_DIR, "static")
+    for root, _dirs, files in sorted(os.walk(static_dir)):
+        for name in sorted(files):
+            with open(os.path.join(root, name), "rb") as f:
+                digest.update(name.encode() + f.read())
+    return digest.hexdigest()[:10]
+
+
+ASSET_VERSION = _asset_version()
+# cached by the service worker when it installs, so the offline page has its styles and icon
+PRECACHE_ASSETS = ["style.css", "app.js", "icons/icon-192.png", "icons/favicon-32.png"]
+
+
+@app.template_global()
+def asset(filename):
+    return url_for("static", filename=filename, v=ASSET_VERSION)
+
+
+@app.route("/manifest.webmanifest")
+def manifest():
+    icon = lambda f, size, purpose="any": {"src": asset(f"icons/{f}"), "sizes": size, "type": "image/png",
+                                           "purpose": purpose}
+    data = {
+        "name": "MAMS Prediction Market",
+        "short_name": "MAMS Markets",
+        "description": f"Trade {CURRENCY} on what happens next at Mass Academy.",
+        "id": "/",
+        "start_url": "/?source=app",
+        "scope": "/",
+        "display": "standalone",
+        "orientation": "portrait-primary",
+        "background_color": "#f4f5f6",
+        "theme_color": "#ffffff",
+        "categories": ["education", "games"],
+        "icons": [icon("icon-192.png", "192x192"), icon("icon-512.png", "512x512"),
+                  icon("maskable-512.png", "512x512", "maskable")],
+        "shortcuts": [
+            {"name": "Markets", "url": "/", "icons": [icon("icon-192.png", "192x192")]},
+            {"name": "Portfolio", "url": "/portfolio", "icons": [icon("icon-192.png", "192x192")]},
+            {"name": "Leaderboard", "url": "/leaderboard", "icons": [icon("icon-192.png", "192x192")]},
+        ],
+    }
+    resp = make_response(json.dumps(data))
+    resp.headers["Content-Type"] = "application/manifest+json"
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+@app.route("/sw.js")
+def service_worker():
+    """Served from the site root so it can control every page. Its text includes ASSET_VERSION, so each deploy is a
+    new service worker that installs itself and clears the old caches."""
+    resp = make_response(render_template("sw.js", version=ASSET_VERSION, offline_url=url_for("offline"),
+                                         precache=[asset(f) for f in PRECACHE_ASSETS]))
+    resp.headers["Content-Type"] = "application/javascript; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+@app.route("/offline")
+def offline():
+    """Shown by the service worker when a page can't load. It's cached, so it must not contain anything personal
+    (no username, balance or form tokens): it doesn't extend base.html for that reason."""
+    return render_template("offline.html")
+
+
 # ---------------------------------------------------------------- routes: accounts
 
 @app.route("/register", methods=["GET", "POST"])
@@ -1218,8 +1419,8 @@ def register():
             flash("Enter a valid email address.", "error")
         elif email_taken(get_db(), email):
             flash("That email is already used by another account.", "error")
-        elif len(password) < 6:
-            flash("Password must be at least 6 characters.", "error")
+        elif not PASSWORD_MIN <= len(password) <= PASSWORD_MAX:
+            flash(f"Password must be {PASSWORD_MIN}–{PASSWORD_MAX} characters.", "error")
         elif password != request.form.get("confirm", ""):
             flash("Passwords don't match.", "error")
         elif rate_limited(("register", request.remote_addr), 40, 3600):
@@ -1265,17 +1466,22 @@ def login():
             flash("Too many wrong passwords for this account. Wait 5 minutes and try again.", "error")
             return render_template("login.html")
         u = get_db().execute("SELECT * FROM users WHERE username = ?", (name,)).fetchone()
-        if u and check_password_hash(u["password_hash"], request.form.get("password", "")):
+        # Unknown usernames still pay for a hash check, so response time doesn't reveal which accounts exist.
+        ok = check_password_hash(u["password_hash"] if u else DUMMY_PASSWORD_HASH, request.form.get("password", ""))
+        if u and ok:
             _hits.pop(fail_key, None)
             session.clear()
             session.permanent = True
             session["uid"] = u["id"]
             session["gen"] = u["session_gen"]
-            nxt = request.args.get("next", "")
-            return redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else url_for("index"))
+            return redirect(safe_path(request.args.get("next", ""), url_for("index")))
         rate_limited(fail_key, 10, 300)  # record the failure
         flash("Wrong username or password.", "error")
     return render_template("login.html")
+
+
+DUMMY_PASSWORD_HASH = generate_password_hash(secrets.token_hex(16))
+PASSWORD_MIN, PASSWORD_MAX = 6, 128
 
 
 def email_taken(db, email, except_id=None):
@@ -1374,8 +1580,8 @@ def change_password():
         flash("Enter your current password.", "error")
     elif not check_password_hash(g.user["password_hash"], cur):
         flash("Your current password is wrong.", "error")
-    elif len(new) < 6:
-        flash("Password must be at least 6 characters.", "error")
+    elif not PASSWORD_MIN <= len(new) <= PASSWORD_MAX:
+        flash(f"Password must be {PASSWORD_MIN}–{PASSWORD_MAX} characters.", "error")
     elif new != request.form.get("confirm", ""):
         flash("Passwords don't match.", "error")
     else:
@@ -1408,9 +1614,10 @@ def bonus():
     db.execute("COMMIT")
     if cur.rowcount:
         flash(f"Claimed your daily {DAILY_BONUS:.0f} {CURRENCY}!", "success")
+        session["celebrate"] = {"kind": "bonus", "from": g.user["balance"]}
     else:
         flash("You already claimed today's bonus. Come back tomorrow.", "error")
-    return redirect(request.referrer or url_for("index"))
+    return redirect(referrer_or(url_for("index")))
 
 
 # ---------------------------------------------------------------- routes: markets
@@ -1448,8 +1655,27 @@ def index():
     markets.sort(key=sort_key)
     visible = {b["m"]["id"] for b in markets
                if matches_status(b["state"], status) and (not cat or b["m"]["category"] == cat)}
+    live = [b for b in markets if b["state"] == "open"]
+    trends = price_trends(db, [b["m"]["id"] for b in markets if b["state"] in ("open", "closed", "proposed",
+                                                                               "disputed")])
+    for b in markets:
+        b["trend"] = trends.get(b["m"]["id"])
+    # Movers: the open markets whose price moved most in the last day (a binary market by its first outcome,
+    # a multiple-choice one by whichever outcome moved most).
+    movers = []
+    for b in live:
+        if not b["trend"]:
+            continue
+        idx = 0 if b["binary"] else max(range(len(b["outcomes"])), key=lambda i: abs(b["trend"]["delta"][i])
+                                        if i < len(b["trend"]["delta"]) else 0)
+        delta = b["trend"]["delta"][idx] if idx < len(b["trend"]["delta"]) else 0
+        if abs(delta) >= 0.005:
+            movers.append({"b": b, "o": b["outcomes"][idx], "idx": idx, "delta": delta})
+    movers.sort(key=lambda x: -abs(x["delta"]))
+    spotlight = [b for b in live if b["m"]["featured"]][:5]
     return render_template("index.html", markets=markets, visible=visible, status=status, cat=cat,
-                           tabs=STATUS_TABS)
+                           tabs=STATUS_TABS, movers=movers[:8], spotlight=spotlight,
+                           default_view=(status == "open" and not cat))
 
 
 @app.route("/market/<int:mid>")
@@ -1459,6 +1685,7 @@ def market(mid):
     if m is None:
         abort(404)
     b = bundle(db, m)
+    trend = price_trends(db, [mid]).get(mid) if b["state"] not in ("resolved", "cancelled") else None
     history = [{"t": r["created_at"], "p": json.loads(r["prices"])}
                for r in db.execute("SELECT * FROM price_history WHERE market_id = ? ORDER BY id", (mid,))]
     trades = db.execute(
@@ -1516,7 +1743,9 @@ def market(mid):
         all_users = [r["username"] for r in db.execute("SELECT username FROM users ORDER BY username")]
     creator = creator_name(db, m)
     my_entry_fee = entry_fee_due(db, m, g.user["id"]) if g.user else (ENTRY_FEE if creator else 0.0)
+    pick = request.args.get("pick", type=int)
     return render_template("market.html", b=b, history=history, trades=trades, comments=comments,
+                           trend=trend, pick=pick if pick in {o["id"] for o in b["outcomes"]} else None,
                            my_positions=my_positions, block_reason=block_reason,
                            creator=creator, my_entry_fee=my_entry_fee,
                            late_t=late_multiplier(m) if b["state"] == "open" else 0.0,
@@ -1529,6 +1758,9 @@ def market(mid):
 @app.post("/market/<int:mid>/dispute")
 @login_required
 def dispute(mid):
+    if rate_limited(("dispute", g.user["id"]), 10, 3600):
+        flash("Too many disputes. Try again later.", "error")
+        return redirect(url_for("market", mid=mid))
     try:
         add_dispute(get_db(), g.user["id"], mid, request.form.get("reason", "").strip())
         flash("Dispute sent. The result won't finalize until an admin reviews it.", "success")
@@ -1589,8 +1821,17 @@ def trade(mid):
     except ValueError:
         min_out = None
     try:
-        flash(execute_trade(get_db(), g.user["id"], mid, outcome_id, request.form.get("action"), value, min_out),
-              "success")
+        db = get_db()
+        action = request.form.get("action")
+        flash(execute_trade(db, g.user["id"], mid, outcome_id, action, value, min_out), "success")
+        # the next page plays a short animation: confetti in the outcome's colour, the balance ticking over
+        m = db.execute("SELECT ou_line FROM markets WHERE id = ?", (mid,)).fetchone()
+        labels = [o["label"] for o in get_outcomes(db, mid)]
+        ids = [o["id"] for o in get_outcomes(db, mid)]
+        idx = ids.index(outcome_id) if outcome_id in ids else 0
+        binary = is_binary(labels) or (m is not None and m["ou_line"] is not None)
+        session["celebrate"] = {"kind": "buy" if action == "buy" else "sell", "from": g.user["balance"],
+                                "color": ("--yes" if idx == 0 else "--no") if binary else f"--c{idx}"}
     except TradeError as e:
         flash(str(e), "error")
     return redirect(url_for("market", mid=mid))
@@ -1609,6 +1850,8 @@ def comment(mid):
         flash("Keep comments under 500 characters.", "error")
     elif get_db().execute("SELECT 1 FROM comment_mutes WHERE user_id = ?", (g.user["id"],)).fetchone():
         flash(COMMENTS_OFF, "error")
+    elif rate_limited(("comment", g.user["id"]), 10, 60):
+        flash("You're commenting too fast. Wait a minute and try again.", "error")
     elif get_db().execute("SELECT 1 FROM markets WHERE id = ?", (mid,)).fetchone():
         get_db().execute("INSERT INTO comments (market_id, user_id, body, created_at) VALUES (?, ?, ?, ?)",
                          (mid, g.user["id"], body, now_str()))
@@ -2435,7 +2678,7 @@ def admin_propose_result(mid):
         flash(f"Result proposed. It finalizes in {DISPUTE_HOURS} hours unless someone disputes it.", "success")
     except (TradeError, ValueError) as e:
         flash(str(e) or "Pick a winning outcome.", "error")
-    return redirect(request.referrer or url_for("market", mid=mid))
+    return redirect(referrer_or(url_for("market", mid=mid)))
 
 
 def convert_to_over_under(db, market_id, line, unit, yes_means, admin_id):
@@ -2534,7 +2777,7 @@ def admin_clarify(mid):
                    (mid, g.user["id"], body, now_str()))
         log_audit("market.clarify", "market", mid, market_label(db, mid), body)
         flash("Clarification added to the rules.", "success")
-    return redirect(request.referrer or url_for("market", mid=mid))
+    return redirect(referrer_or(url_for("market", mid=mid)))
 
 
 @app.post("/admin/markets/<int:mid>/cancel")
@@ -2547,7 +2790,7 @@ def admin_cancel(mid):
         flash("Market cancelled and bets refunded.", "success")
     except TradeError as e:
         flash(str(e), "error")
-    return redirect(request.referrer or url_for("admin"))
+    return redirect(referrer_or(url_for("admin")))
 
 
 def parse_outcome_lines(text):
@@ -2688,6 +2931,9 @@ def admin_block(mid):
 def admin_unblock(mid, uid):
     db = get_db()
     u = db.execute("SELECT username FROM users WHERE id = ?", (uid,)).fetchone()
+    if u is not None and not can_manage(uid):
+        flash(NOT_ALLOWED, "error")
+        return redirect(url_for("market", mid=mid) + "#admin")
     if db.execute("DELETE FROM market_blocks WHERE market_id = ? AND user_id = ?", (mid, uid)).rowcount and u:
         log_audit("market.unblock", "user", uid, u["username"], f"Market #{mid}.")
     flash("They can bet on this market again.", "success")
@@ -3042,13 +3288,14 @@ def admin_reset_password(uid):
         pw = set_temporary_password(db, uid)
         log_audit("user.password_reset", "user", uid, u["username"])
         flash(f"Temporary password for {u['username']}: {pw}. Share it privately; they can change it on their "
-              "Portfolio page.", "success")
+              "Portfolio page.", "notice")
     return back(url_for("admin") + "#users")
 
 
 @app.errorhandler(400)
 @app.errorhandler(403)
 @app.errorhandler(404)
+@app.errorhandler(413)
 @app.errorhandler(500)
 def error_page(e):
     return render_template("error.html", error=e), e.code

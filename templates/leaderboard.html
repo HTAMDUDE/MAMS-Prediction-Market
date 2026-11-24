@@ -1,8 +1,25 @@
 {% extends "base.html" %}
 {% block title %}Leaderboard · MAMS Prediction Market{% endblock %}
 {% block content %}
-<h1>Leaderboard</h1>
-<p class="muted">Net worth = cash + what your open bets would sell for right now.</p>
+<div class="page-head">
+  <div>
+    <h1>Leaderboard</h1>
+    <p class="muted">Net worth = cash + what your open bets would sell for right now.</p>
+  </div>
+  {% if board|selectattr('is_me')|list %}<a class="btn btn-small btn-ghost" href="#me">Jump to me ↓</a>{% endif %}
+</div>
+{% if board|length >= 3 %}
+<div class="podium" aria-label="Top three">
+  {% for row in board[:3] %}
+    <div class="podium-spot rise p{{ loop.index }} {{ 'me' if row.is_me }}" style="--i: {{ 3 - loop.index }}">
+      <div class="podium-medal" aria-hidden="true">{{ ['🥇', '🥈', '🥉'][loop.index0] }}</div>
+      <div class="podium-name">{{ row.username }}</div>
+      <div class="podium-worth">Ⓜ{{ row.worth|money }}</div>
+      <div class="muted small">{{ row.trades }} trade{{ '' if row.trades == 1 else 's' }}</div>
+    </div>
+  {% endfor %}
+</div>
+{% endif %}
 <div class="card">
   {% if board %}
   <div class="table-scroll">
@@ -10,11 +27,11 @@
     <thead><tr><th>#</th><th>Trader</th><th class="num">Net worth</th><th class="num">Cash</th><th class="num">Trades</th></tr></thead>
     <tbody>
     {% for row in board %}
-      <tr class="{{ 'me' if row.is_me }}">
+      <tr class="{{ 'me' if row.is_me }}" {% if row.is_me %}id="me"{% endif %}>
         <td class="rank">{% if loop.index == 1 %}🥇{% elif loop.index == 2 %}🥈{% elif loop.index == 3 %}🥉{% else %}{{ loop.index }}{% endif %}</td>
         <td><strong>{{ row.username }}</strong>{% if row.is_me %} <span class="muted small">(you)</span>{% endif %}</td>
-        <td class="num">Ⓜ{{ row.worth|money }}</td>
-        <td class="num">Ⓜ{{ row.balance|money }}</td>
+        <td class="num"><b>Ⓜ{{ row.worth|money }}</b></td>
+        <td class="num muted">Ⓜ{{ row.balance|money }}</td>
         <td class="num">{{ row.trades }}</td>
       </tr>
     {% endfor %}

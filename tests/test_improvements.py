@@ -481,7 +481,7 @@ def test_home_renders_every_market_and_hides_by_filter():
     cancelled = _open_market(db, "Cancelled market?")
     appmod.cancel_market(db, cancelled)
     page = c["boss"].get("/").get_data(as_text=True)
-    card = lambda text, html: next(x for x in html.split("<a class=\"card market-card\"")[1:] if text in x)
+    card = lambda text, html: next(x for x in html.split("class=\"card market-card")[1:] if text in x)
     assert " hidden" in card("Cancelled market?", page)[:300]
     assert " hidden" not in card("Still open market?", page)[:300]
     assert ">Cancelled</a>" in page  # the new tab
@@ -505,7 +505,7 @@ def test_market_page_has_quote_guard_bet_bar_and_school_timezone():
     assert 'aria-pressed="true">Buy' in page and 'for="value"' in page
     # logged-out visitors get no trade form but still see the page and the menu
     anon = appmod.app.test_client().get(f"/market/{mid}").get_data(as_text=True)
-    assert 'id="menu-sheet"' in anon and "Log in" in anon and 'name="min_out"' not in anon
+    assert 'class="tabbar"' in anon and "Log in" in anon and 'name="min_out"' not in anon
 
 
 def test_nav_marks_current_page_and_footer_links():
@@ -630,3 +630,152 @@ def test_kaushik_is_still_the_owner(monkeypatch):
     c.post("/register", data={"csrf_token": csrf(c.get("/register")), "username": "kaushik", "email": "k@example.com",
                               "password": "secret1", "confirm": "secret1"})
     assert db.execute("SELECT is_admin FROM users WHERE username = 'kaushik'").fetchone()[0] == 1
+
+
+# ---------------------------------------------------------------- installable app (PWA)
+
+def test_manifest_lists_working_icons_and_start_url():
+    _fresh_db()
+    client = appmod.app.test_client()
+    r = client.get("/manifest.webmanifest")
+    assert r.status_code == 200 and r.headers["Content-Type"].startswith("application/manifest+json")
+    data = r.get_json(force=True)
+    assert data["display"] == "standalone" and data["start_url"].startswith("/") and data["scope"] == "/"
+    sizes = {(i["sizes"], i["purpose"]) for i in data["icons"]}
+    assert {("192x192", "any"), ("512x512", "any"), ("512x512", "maskable")} <= sizes
+    for icon in data["icons"]:
+        assert client.get(icon["src"]).status_code == 200, icon["src"]
+
+
+def test_service_worker_is_served_from_root_and_precaches_real_files():
+    _fresh_db()
+    client = appmod.app.test_client()
+    r = client.get("/sw.js")
+    body = r.get_data(as_text=True)
+    assert r.status_code == 200 and "javascript" in r.headers["Content-Type"] and r.headers["Cache-Control"] == "no-cache"
+    assert appmod.ASSET_VERSION in body and '"/offline"' in body
+    for name in appmod.PRECACHE_ASSETS:
+        url = f"/static/{name}?v={appmod.ASSET_VERSION}"
+        assert url in body and client.get(url).status_code == 200
+    # pages link the manifest and use versioned static URLs, so a deploy never serves stale cached CSS/JS
+    page = client.get("/").get_data(as_text=True)
+    assert 'rel="manifest"' in page and f"style.css?v={appmod.ASSET_VERSION}" in page
+
+
+def test_offline_page_is_never_personal_and_needs_no_confirmed_email():
+    db, c, uid = _site("boss", "newbie")
+    db.execute("UPDATE users SET email_verified = 0 WHERE username = 'newbie'")
+    db.commit()
+    for path in ("/offline", "/sw.js", "/manifest.webmanifest"):
+        assert c["newbie"].get(path).status_code == 200, path  # not redirected to the email page
+    page = c["boss"].get("/offline").get_data(as_text=True)
+    assert "You're offline" in page and "boss" not in page and "csrf_token" not in page and "Ⓜ" not in page
+
+
+# ---------------------------------------------------------------- security hardening
+
+def test_next_links_only_go_to_pages_on_this_site():
+    for bad in ("/\\evil.com", "//evil.com", "https://evil.com", "/\tevil", "javascript:alert(1)", ""):
+        with appmod.app.test_request_context():
+            assert appmod.safe_path(bad, "/home") == "/home", bad
+    with appmod.app.test_request_context():
+        assert appmod.safe_path("/portfolio?x=1#a", "/home") == "/portfolio?x=1#a"
+    _fresh_db()
+    appmod.app.test_client()
+    c = appmod.app.test_client()
+    signup(appmod.app.test_client(), "walker")
+    db = appmod.connect()
+    db.execute("UPDATE users SET password_hash = ? WHERE username = 'walker'",
+               (appmod.generate_password_hash("secret1"),))
+    db.close()
+    for nxt, where in (("/\\evil.com", "/"), ("https://evil.com", "/"), ("/portfolio", "/portfolio")):
+        r = c.post(f"/login?next={nxt}", data={"csrf_token": csrf(c.get("/login")), "username": "walker",
+                                               "password": "secret1"})
+        assert r.status_code == 302 and r.headers["Location"] == where, nxt
+
+
+def test_admin_back_link_and_referrer_stay_on_site():
+    db, c, uid = _site("boss", "bob")
+    r = c["boss"].post(f"/admin/users/{uid('bob')}/grant", data={"csrf_token": csrf(c["boss"].get("/")), "amount": "5",
+                                                                 "next": "/\\evil.com"})
+    assert r.status_code == 302 and "evil" not in r.headers["Location"]
+    r = c["bob"].post("/bonus", data={"csrf_token": csrf(c["bob"].get("/"))},
+                      headers={"Referer": "https://evil.com/x"})
+    assert r.status_code == 302 and "evil" not in r.headers["Location"]
+    r = c["bob"].post("/bonus", data={"csrf_token": csrf(c["bob"].get("/"))},
+                      headers={"Referer": "http://localhost/leaderboard"})
+    assert r.headers["Location"] == "/leaderboard"
+
+
+def test_flooding_rate_limiter_keys_keeps_existing_lockouts():
+    appmod._hits.clear()
+    for _ in range(10):
+        appmod.rate_limited(("login-fail", "victim"), 10, 300)
+    for i in range(appmod.HITS_MAX_KEYS + 50):
+        appmod.rate_limited(("login-fail", f"junk{i}"), 10, 300)
+    assert len(appmod._hits) <= appmod.HITS_MAX_KEYS
+    assert appmod.rate_limited(("login-fail", "victim"), 10, 300)  # still locked out
+    appmod._hits.clear()
+
+
+def test_security_headers_and_csp_nonce():
+    db, c, uid = _site("boss")
+    r = appmod.app.test_client().get("/")
+    csp = r.headers["Content-Security-Policy"]
+    assert r.headers["X-Frame-Options"] == "DENY" and r.headers["X-Content-Type-Options"] == "nosniff"
+    assert "frame-ancestors 'none'" in csp and "object-src 'none'" in csp
+    nonce = csp.split("'nonce-")[1].split("'")[0]
+    html = r.get_data(as_text=True)
+    assert html.count("<script") == html.count(f'nonce="{nonce}"') + html.count("<script src=")
+    assert "Cache-Control" not in r.headers or "no-store" not in r.headers["Cache-Control"]
+    mid, _ = _market(db)
+    page = c["boss"].get(f"/market/{mid}")
+    assert page.headers["Cache-Control"] == "no-store"
+    nonce = page.headers["Content-Security-Policy"].split("'nonce-")[1].split("'")[0]
+    assert f'<script nonce="{nonce}">\n  drawChart' in page.get_data(as_text=True)
+    sw = c["boss"].get("/sw.js")
+    assert "Content-Security-Policy" not in sw.headers and sw.headers["Cache-Control"] == "no-cache"
+    assert 'nonce="' in c["boss"].get("/offline").get_data(as_text=True)
+
+
+def test_oversized_posts_and_long_passwords_are_refused(monkeypatch):
+    _fresh_db()
+    _capture_codes(monkeypatch)
+    c = appmod.app.test_client()
+    tok = csrf(c.get("/register"))
+    assert c.post("/register", data={"csrf_token": tok, "body": "x" * 300_000}).status_code == 413
+    long_pw = "p" * 129
+    page = c.post("/register", data={"csrf_token": tok, "username": "longpw", "email": "l@example.com",
+                                     "password": long_pw, "confirm": long_pw}, follow_redirects=True)
+    assert "6–128 characters" in page.get_data(as_text=True)
+    assert appmod.connect().execute("SELECT 1 FROM users WHERE username = 'longpw'").fetchone() is None
+
+
+def test_comment_rate_limit():
+    db, c, uid = _site("boss", "chatty")
+    mid, _ = _market(db)
+    for i in range(10):
+        _post(c["chatty"], f"/market/{mid}/comment", body=f"comment {i}")
+    page = _post(c["chatty"], f"/market/{mid}/comment", body="one too many").get_data(as_text=True)
+    assert "commenting too fast" in page
+    assert _q(db, "SELECT COUNT(*) FROM comments WHERE market_id = ?", mid) == 10
+
+
+def test_admins_cannot_unblock_people_they_cannot_manage():
+    db, c, uid = _site("boss", "mod", "bob")
+    db.execute("UPDATE users SET is_admin = 1 WHERE username = 'mod'")
+    mid, _ = _market(db)
+    db.execute("INSERT INTO market_blocks (market_id, user_id, created_at) VALUES (?, ?, ?)",
+               (mid, uid("boss"), appmod.now_str()))
+    _post(c["mod"], f"/admin/markets/{mid}/unblock/{uid('boss')}")
+    assert _q(db, "SELECT COUNT(*) FROM market_blocks WHERE market_id = ?", mid) == 1
+
+
+def test_people_csv_neutralises_formulas_and_is_private():
+    db = _fresh_db()
+    _user(db, "-cmd")
+    db.execute("UPDATE users SET email = '=HYPERLINK(1)@x.com' WHERE username = '-cmd'")
+    appmod.write_email_csv(db)
+    text = open(appmod.email_csv_path(), encoding="utf-8-sig").read()
+    assert "'-cmd,'=HYPERLINK(1)@x.com" in text
+    assert os.stat(appmod.email_csv_path()).st_mode & 0o777 == 0o600

@@ -1,0 +1,30 @@
+<!doctype html>
+{# Cached by the service worker and shown to anyone who is offline, so nothing personal goes on this page. #}
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Offline · MAMS Prediction Market</title>
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0e0f10" media="(prefers-color-scheme: dark)">
+  <link rel="stylesheet" href="{{ asset('style.css') }}">
+  <link rel="icon" type="image/png" href="{{ asset('icons/favicon-32.png') }}">
+</head>
+<body>
+<main class="wrap">
+  <div class="error-page offline-page">
+    <img class="offline-icon" src="{{ asset('icons/icon-192.png') }}" alt="" width="72" height="72">
+    <h1>You're offline</h1>
+    <p class="muted">Prices and balances need a connection, so there's nothing to show right now.
+      This page will reload by itself when you're back online.</p>
+    <button class="btn btn-lg" type="button" id="retry">Try again</button>
+  </div>
+</main>
+<script nonce="{{ csp_nonce() }}">
+  // Reload as soon as the connection comes back. The service worker only shows this page in place of the one you
+  // asked for, so reloading fetches that page again.
+  window.addEventListener('online', () => location.reload());
+  document.getElementById('retry').addEventListener('click', () => location.reload());
+</script>
+</body>
+</html>

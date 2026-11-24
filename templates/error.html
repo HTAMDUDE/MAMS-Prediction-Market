@@ -1,8 +1,9 @@
 {% extends "base.html" %}
 {% block title %}{{ error.code }} · MAMS Prediction Market{% endblock %}
 {% block content %}
-<div class="empty">
-  <h1>{{ error.code }} — {{ error.name }}</h1>
+<div class="error-page">
+  <p class="error-code">{{ error.code }}</p>
+  <h1>{{ error.name }}</h1>
   <p class="muted">{{ error.description }}</p>
   <a class="btn" href="{{ url_for('index') }}">Back to markets</a>
 </div>
