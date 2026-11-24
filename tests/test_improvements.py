@@ -824,3 +824,48 @@ def test_codes_at_most_once_a_minute_per_account_and_per_address(monkeypatch):
         appmod._hits[k] = [t - 61 for t in appmod._hits[k]]
     _email_post(a, action="send", email="two@example.com")
     assert len(sent) == 2 and sent[-1][0] == "two@example.com"
+
+
+def test_turnstile_on_signup(monkeypatch):
+    import io
+    import json as _json
+    db = _fresh_db()
+    _capture_codes(monkeypatch)
+    c = appmod.app.test_client()
+    form = lambda name, **kw: {"csrf_token": csrf(c.get("/register")), "username": name, "email": f"{name}@example.com",
+                               "password": "secret1", "confirm": "secret1", **kw}
+    # off by default: no widget, sign-up works
+    assert "cf-turnstile" not in c.get("/register").get_data(as_text=True)
+
+    monkeypatch.setattr(appmod, "TURNSTILE_SITE_KEY", "site-key")
+    monkeypatch.setattr(appmod, "TURNSTILE_SECRET", "secret-key")
+    seen = []
+
+    def fake_urlopen(req, timeout):
+        body = dict(x.split("=") for x in req.data.decode().split("&"))
+        seen.append(body)
+        return io.BytesIO(_json.dumps({"success": body["response"] == "good"}).encode())
+    monkeypatch.setattr(appmod.urllib.request, "urlopen", fake_urlopen)
+
+    r = c.get("/register")
+    html = r.get_data(as_text=True)
+    assert 'data-sitekey="site-key"' in html and "challenges.cloudflare.com/turnstile/v0/api.js" in html
+    csp = r.headers["Content-Security-Policy"]
+    assert "frame-src https://challenges.cloudflare.com" in csp and "script-src 'self'" in csp
+
+    assert "verify you" in c.post("/register", data=form("botty"), follow_redirects=True).get_data(as_text=True)
+    assert "verify you" in c.post("/register", data=form("botty", **{"cf-turnstile-response": "fake"}),
+                                  follow_redirects=True).get_data(as_text=True)
+    assert _q(db, "SELECT COUNT(*) FROM users WHERE username = 'botty'") == 0
+    assert seen[-1]["secret"] == "secret-key"
+    c.post("/register", data=form("human", **{"cf-turnstile-response": "good"}))
+    assert _q(db, "SELECT COUNT(*) FROM users WHERE username = 'human'") == 1
+
+    # Cloudflare unreachable: let people sign up rather than lock everyone out
+    def down(req, timeout):
+        raise OSError("network unreachable")
+    monkeypatch.setattr(appmod.urllib.request, "urlopen", down)
+    c2 = appmod.app.test_client()
+    c2.post("/register", data={"csrf_token": csrf(c2.get("/register")), "username": "later", "email": "later@example.com",
+                               "password": "secret1", "confirm": "secret1", "cf-turnstile-response": "x"})
+    assert _q(db, "SELECT COUNT(*) FROM users WHERE username = 'later'") == 1
