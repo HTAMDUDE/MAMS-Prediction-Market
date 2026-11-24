@@ -220,7 +220,10 @@ CREATE TABLE IF NOT EXISTS loans (
     due_at      TEXT,
     created_at  TEXT NOT NULL,
     accepted_at TEXT,
-    closed_at   TEXT
+    closed_at   TEXT,
+    min_score   INTEGER,                        -- only borrowers with at least this credit score may take it
+    late_at     TEXT,                           -- when the late fee was added
+    penalty     REAL NOT NULL DEFAULT 0         -- the late fee
 );
 CREATE INDEX IF NOT EXISTS idx_loans_due ON loans(status, due_at);
 CREATE INDEX IF NOT EXISTS idx_loans_lender ON loans(lender_id);

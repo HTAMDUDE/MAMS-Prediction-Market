@@ -5,7 +5,8 @@
 <h1>Loans</h1>
 <p class="muted">Lend your {{ CURRENCY }} to other players at an interest rate you choose, or borrow from them.
   Interest is a flat percentage of the amount: borrow Ⓜ100 at 10% and you pay back Ⓜ110, whenever you like before
-  the due date. Anything still owed after that is <b>taken from the borrower's cash automatically</b>, including
+  the due date. After that a <b>{{ (LOAN_LATE_FEE * 100)|round|int }}% late fee</b> is added (it goes to the lender), and anything
+  still owed is <b>taken from the borrower's cash automatically</b>, including
   money they get later, until it's paid off. While a loan is overdue the borrower can't buy, lend or create markets,
   and if it's still unpaid {{ LOAN_GRACE_DAYS }} days after the due date the lender can <b>sell or take over their
   bets</b> to cover it. You can owe at most the larger of Ⓜ500 or half of your cash and bets minus your debts, adjusted

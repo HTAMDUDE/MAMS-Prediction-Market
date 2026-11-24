@@ -105,7 +105,8 @@ def test_overdue_loans_are_collected_from_cash_including_later_money():
     db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(), lid))
     assert appmod.has_overdue_loan(db, bob)
     appmod.collect_overdue_loans(db)
-    assert bal(db, bob) == 0 and loan(db, lid)["owed"] == 90 and bal(db, ann) == 930
+    assert loan(db, lid)["penalty"] == 12                         # the 10% late fee on the 120 owed
+    assert bal(db, bob) == 0 and loan(db, lid)["owed"] == 102 and bal(db, ann) == 930
 
     other = appmod.offer_loan(db, ann, "", 10, 0, 1)
     with pytest.raises(appmod.TradeError, match="overdue"):
@@ -113,7 +114,7 @@ def test_overdue_loans_are_collected_from_cash_including_later_money():
 
     db.execute("UPDATE users SET balance = 200 WHERE id = ?", (bob,))  # e.g. a payout later
     appmod.collect_overdue_loans(db)
-    assert loan(db, lid)["status"] == "repaid" and bal(db, bob) == 110 and bal(db, ann) == 1010
+    assert loan(db, lid)["status"] == "repaid" and bal(db, bob) == 98 and bal(db, ann) == 1022
     assert not appmod.has_overdue_loan(db, bob)
     detail = db.execute("SELECT detail FROM activity WHERE user_id = ? ORDER BY id DESC LIMIT 1", (bob,)).fetchone()[0]
     assert "Overdue loan collected" in detail and "paid off" in detail
@@ -272,7 +273,8 @@ def test_overdue_borrower_is_frozen_but_can_sell_and_repay():
     appmod.execute_trade(db, bob, mid, yes, "sell", shares(db, bob, yes))   # selling is fine...
     appmod.collect_overdue_loans(db)                                         # ...and the money goes to the lender
     l = loan(db, lid)
-    assert l["repaid"] > 40 and l["owed"] == pytest.approx(100 - l["repaid"])          # the sale's proceeds, all of it
+    assert l["repaid"] > 40 and l["owed"] == pytest.approx(110 - l["repaid"])          # the sale's proceeds, all of it
+    assert l["penalty"] == 10                                                           # 10% late fee on the 100
     assert bal(db, bob) == 0 and bal(db, ann) == pytest.approx(900 + l["repaid"])
 
 
@@ -285,7 +287,7 @@ def test_overdue_borrowers_open_offers_are_withdrawn_and_collected():
                (ann, bob, past(2), appmod.now_str(), appmod.now_str()))
     appmod.collect_overdue_loans(db)
     assert loan(db, offer)["status"] == "cancelled"
-    assert bal(db, ann) == 1100 and bal(db, bob) == 900              # the refunded 80 and 20 more of cash went to ann
+    assert bal(db, ann) == 1110 and bal(db, bob) == 890              # 100 owed + the 10 late fee went to ann
 
 
 def test_overdue_borrower_cannot_create_or_propose_markets():
@@ -571,3 +573,39 @@ def test_take_over_needs_cash_for_the_entry_fee():
     with pytest.raises(appmod.TradeError, match="entry fee"):
         appmod.seize_position(db, lid, ann, yes, "take")
     assert shares(db, ann, yes) == 0 and loan(db, lid)["status"] == "active" and bal(db, ann) == 5
+
+
+def test_late_fee_is_added_once_when_a_loan_goes_overdue():
+    db = _fresh_db()
+    ann, bob = _user(db, "ann"), _user(db, "bob", balance=0)
+    lid = appmod.offer_loan(db, ann, "bob", 100, 0, 7)
+    appmod.accept_loan(db, lid, bob)
+    db.execute("UPDATE users SET balance = 0 WHERE id = ?", (bob,))
+    appmod.collect_overdue_loans(db)
+    assert loan(db, lid)["late_at"] is None and loan(db, lid)["owed"] == 100     # not due yet: no fee
+    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(), lid))
+    appmod.collect_overdue_loans(db)
+    appmod.collect_overdue_loans(db)                                            # runs every request, charged once
+    l = loan(db, lid)
+    assert l["late_at"] and l["penalty"] == 10 and l["owed"] == 110
+
+
+def test_old_min_credit_offers_keep_their_requirement_after_migrating():
+    db = _fresh_db()
+    ann = _user(db, "ann")
+    lid = appmod.offer_loan(db, ann, "", 50, 0, 7)
+    db.execute("ALTER TABLE loans ADD COLUMN min_credit INTEGER NOT NULL DEFAULT 0")
+    db.execute("UPDATE loans SET min_credit = 700, min_score = NULL WHERE id = ?", (lid,))
+    appmod.migrate(db)
+    assert loan(db, lid)["min_score"] == 700
+
+
+def test_deleting_an_account_clears_the_old_credit_events_table():
+    db = _fresh_db()
+    bob = _user(db, "bob")
+    db.execute("CREATE TABLE credit_events (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), "
+               "loan_id INTEGER, change INTEGER, score_after INTEGER, reason TEXT, created_at TEXT)")
+    db.execute("INSERT INTO credit_events (user_id, change, score_after, reason, created_at) "
+               "VALUES (?, -40, 560, 'late', '2026-01-01 00:00:00')", (bob,))
+    appmod.delete_account(db, bob)
+    assert db.execute("SELECT COUNT(*) FROM credit_events").fetchone()[0] == 0

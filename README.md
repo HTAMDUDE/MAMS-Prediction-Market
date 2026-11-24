@@ -29,7 +29,8 @@ assemblies, and anything else the admins post.
   `LATE_FEE_RATE`, `LATE_SNIPE_RATE` and `LATE_FEE_TIERS` in `app.py`.
 - **Loans**: on the Loans page players can lend each other money at a flat interest rate they choose (0–100%),
   to one player or to anyone, for 1–30 days. The lender's money is held until the offer is taken. Borrowers can repay
-  early or in parts; after the due date whatever is still owed is taken from the borrower's cash automatically
+  early or in parts; when a loan goes past its due date a one-time late fee (`LOAN_LATE_FEE`, 10% of what's still
+  owed, paid to the lender) is added, and whatever is still owed is taken from the borrower's cash automatically
   (including money they get later). Loans count towards net worth. Limits are `LOAN_MIN`, `LOAN_MAX_RATE` and
   `LOAN_MAX_DAYS` in `app.py`.
   - **Borrowing limit**: total owed can't exceed the larger of `LOAN_CREDIT_FLOOR` or `LOAN_CREDIT_RATIO` × (cash +

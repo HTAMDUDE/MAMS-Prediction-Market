@@ -93,6 +93,7 @@ LOAN_CREDIT_FLOOR = 500.0   # anyone can owe at least this much in total...
 LOAN_CREDIT_RATIO = 0.5     # ...or this share of cash + bets - debts, whichever is more
 LOAN_MAX_ACTIVE = 5         # running loans as a borrower
 LOAN_GRACE_DAYS = 2         # after the due date, before lenders may sell or take over the borrower's bets
+LOAN_LATE_FEE = 0.10        # added once to what's still owed when a loan goes past its due date; goes to the lender
 OWNER_USERNAME = os.environ.get("MAMS_OWNER", "Kaushik").strip()
 LOGIN_CODE_LIFETIME = 10 * 60
 LOGIN_CODE_RESEND_DELAY = 60  # at most one code a minute per account, and per email address
@@ -291,7 +292,9 @@ NEW_COLUMNS = {
     # via: 'loan' marks shares handed from a borrower to their lender to pay off an overdue loan
     "trades": [("via", "TEXT")],
     # min_score: an offer only borrowers with at least this credit score may take
-    "loans": [("min_score", "INTEGER")],
+    "loans": [("min_score", "INTEGER"),
+              # late_at: when the late fee was added; penalty: how much it was
+              ("late_at", "TEXT"), ("penalty", "REAL NOT NULL DEFAULT 0")],
 }
 
 
@@ -316,6 +319,9 @@ def migrate(db):
         db.execute("ALTER TABLE clarifications_new RENAME TO clarifications")
         db.execute("CREATE INDEX IF NOT EXISTS idx_clarifications_market ON clarifications(market_id)")
         db.execute("COMMIT")
+    # offers made under the older credit system kept their minimum score in min_credit
+    if "min_credit" in {r["name"] for r in db.execute("PRAGMA table_info(loans)")}:
+        db.execute("UPDATE loans SET min_score = min_credit WHERE min_score IS NULL AND min_credit > 0")
     # one account per confirmed email
     db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email COLLATE NOCASE) "
                "WHERE email_verified = 1")
@@ -1709,7 +1715,7 @@ def inject_globals():
             "CURRENCY": CURRENCY, "DAILY_BONUS": DAILY_BONUS, "CATEGORIES": CATEGORIES,
             "DISPUTE_HOURS": DISPUTE_HOURS, "CREATION_FEE": CREATION_FEE, "ENTRY_FEE": ENTRY_FEE,
             "CREATOR_MIN_BET": CREATOR_MIN_BET, "LATE_FEE_RATE": LATE_FEE_RATE,
-            "LATE_SNIPE_RATE": LATE_SNIPE_RATE}
+            "LATE_SNIPE_RATE": LATE_SNIPE_RATE, "LOAN_LATE_FEE": LOAN_LATE_FEE}
 
 
 @app.template_filter("ts")
@@ -2793,8 +2799,10 @@ def collect_overdue_loans(db):
     """Take what's owed on overdue loans out of the borrower's cash, as much as they have. Runs on every request,
     so money a borrower gets later (sales, payouts, bonuses) goes to their lenders until the debt is cleared.
     Oldest loans are paid first. Loan offers an overdue borrower still has open are withdrawn first, so the money
-    they hold goes to their lenders as well."""
-    if not db.execute("SELECT 1 FROM loans l JOIN users u ON u.id = l.borrower_id WHERE l.status = 'active' "
+    they hold goes to their lenders as well. A loan that has just gone past its due date first gets a late fee
+    (LOAN_LATE_FEE of what's still owed), added once."""
+    if not db.execute("SELECT 1 FROM loans WHERE status = 'active' AND due_at <= ? AND late_at IS NULL LIMIT 1",
+                      (now_str(),)).fetchone() and not db.execute("SELECT 1 FROM loans l JOIN users u ON u.id = l.borrower_id WHERE l.status = 'active' "
                       "AND l.due_at <= ? AND u.balance >= 0.01 LIMIT 1", (now_str(),)).fetchone() \
             and not db.execute("SELECT 1 FROM loans o WHERE o.status = 'offered' AND EXISTS (SELECT 1 FROM loans a "
                                "WHERE a.status = 'active' AND a.borrower_id = o.lender_id AND a.due_at <= ?) LIMIT 1",
@@ -2803,6 +2811,14 @@ def collect_overdue_loans(db):
     paid_borrowers = []
     db.execute("BEGIN IMMEDIATE")
     try:
+        for l in db.execute("SELECT * FROM loans WHERE status = 'active' AND due_at <= ? AND late_at IS NULL",
+                            (now_str(),)).fetchall():
+            fee = cents(l["owed"] * LOAN_LATE_FEE)
+            db.execute("UPDATE loans SET late_at = ?, penalty = ?, owed = ROUND(owed + ?, 2) WHERE id = ?",
+                       (now_str(), fee, fee, l["id"]))
+            if fee > 0:
+                log_activity(db, l["borrower_id"], "loan", 0, None,
+                             f"Late fee of Ⓜ{fee:,.2f} added to an overdue loan ({LOAN_LATE_FEE:.0%} of what was owed)")
         for offer in db.execute("SELECT * FROM loans o WHERE o.status = 'offered' AND EXISTS (SELECT 1 FROM loans a "
                                 "WHERE a.status = 'active' AND a.borrower_id = o.lender_id AND a.due_at <= ?)",
                                 (now_str(),)).fetchall():
@@ -4373,6 +4389,8 @@ def delete_account(db, user_id):
         db.execute("DELETE FROM user_risk WHERE user_id = ?", (user_id,))
         db.execute("DELETE FROM user_credit WHERE user_id = ?", (user_id,))
         db.execute("DELETE FROM credit_history WHERE user_id = ?", (user_id,))
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'credit_events'").fetchone():
+            db.execute("DELETE FROM credit_events WHERE user_id = ?", (user_id,))  # left over from the older credit system
         db.execute("DELETE FROM login_challenges WHERE username = ? COLLATE NOCASE", (gone["username"],))
         db.execute("DELETE FROM users WHERE id = ?", (user_id,))
         db.execute("COMMIT")

@@ -86,7 +86,8 @@
   <p>Players can lend each other {{ CURRENCY }} on the <b>Loans</b> page. The lender picks the amount, a flat interest
     rate and how many days the borrower has to pay it back, and can offer it to one player or to anyone. The money is
     held until someone borrows it. Borrow Ⓜ100 at 10% and you owe Ⓜ110, which you can pay back early, in parts or all
-    at once. If anything is still owed after the due date, it's <b>taken from the borrower's cash automatically</b>,
+    at once. A loan that goes past its due date gets a <b>{{ (LOAN_LATE_FEE * 100)|round|int }}% late fee</b> (paid to the lender), and
+    anything still owed is <b>taken from the borrower's cash automatically</b>,
     including money they receive later, until the loan is paid off. Loans count towards net worth: money you're owed
     adds to yours, and money you owe is subtracted.</p>
   <p>There are limits so nobody can borrow and vanish. You can owe at most the larger of Ⓜ500 or half of your cash
