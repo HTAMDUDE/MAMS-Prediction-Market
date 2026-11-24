@@ -15,7 +15,7 @@
 </div>
 
 <div class="tabs">
-  {% for key, label in [('', 'All'), ('trades', 'Buys & sells'), ('results', 'Payouts & refunds'), ('fees', 'Fees & earnings'), ('other', 'Bonuses & other')] %}
+  {% for key, label in [('', 'All'), ('trades', 'Buys & sells'), ('results', 'Payouts & refunds'), ('fees', 'Fees & earnings'), ('other', 'Bonuses, loans & other')] %}
     <a href="{{ url_for('balance_history', show=key or None, user=target.username if viewing_other else None) }}" class="tab {{ 'active' if show == key }}">{{ label }}</a>
   {% endfor %}
 </div>
@@ -30,7 +30,7 @@
       <tr>
         <td class="muted small nowrap" title="{{ r.created_at|when }}" data-label="When">{{ r.created_at|ago }}</td>
         <td data-label="What happened">
-          <span class="kind kind-{{ r.kind }}">{{ {'signup': 'Joined', 'bonus': 'Bonus', 'buy': 'Bought', 'sell': 'Sold', 'payout': 'Won', 'loss': 'Lost', 'refund': 'Refund', 'admin': 'Admin', 'fee': 'Fee', 'earning': 'Earned'}[r.kind] or r.kind }}</span>
+          <span class="kind kind-{{ r.kind }}">{{ {'signup': 'Joined', 'bonus': 'Bonus', 'buy': 'Bought', 'sell': 'Sold', 'payout': 'Won', 'loss': 'Lost', 'refund': 'Refund', 'admin': 'Admin', 'fee': 'Fee', 'earning': 'Earned', 'loan': 'Loan'}[r.kind] or r.kind }}</span>
           {{ r.detail }}
           {% if r.market_title %}
             <div class="muted small">

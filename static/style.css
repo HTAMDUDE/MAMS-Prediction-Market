@@ -317,6 +317,7 @@ main { padding-top: 8px; padding-bottom: 32px; }
 .fee-box { font-size: .9rem; background: color-mix(in srgb, var(--gold) 14%, var(--surface)); border: 1px solid
            color-mix(in srgb, var(--gold) 40%, transparent); border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; }
 .kind-fee { background: color-mix(in srgb, var(--down) 12%, transparent); color: var(--down); }
+.kind-loan { background: color-mix(in srgb, var(--gold) 22%, transparent); }
 .kind-earning { background: color-mix(in srgb, var(--up) 14%, transparent); color: var(--up); }
 .stake-field { margin-top: 14px; }
 .stake-field .row { margin-top: 4px; }

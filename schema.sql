@@ -202,3 +202,25 @@ CREATE TABLE IF NOT EXISTS site_settings (
     value      TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- Player-to-player loans. The lender's money is held when they offer; the borrower gets it on accepting and owes
+-- principal x (1 + rate/100) by due_at. Overdue loans are collected from the borrower's cash automatically.
+CREATE TABLE IF NOT EXISTS loans (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    lender_id   INTEGER NOT NULL REFERENCES users(id),
+    borrower_id INTEGER REFERENCES users(id),   -- NULL on an offer anyone can take
+    principal   REAL NOT NULL,
+    rate        REAL NOT NULL,                  -- flat interest, percent of principal
+    days        INTEGER NOT NULL,               -- loan length, counted from acceptance
+    note        TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'offered', -- offered | active | repaid | declined | cancelled
+    owed        REAL NOT NULL DEFAULT 0,        -- still to pay back (active loans)
+    repaid      REAL NOT NULL DEFAULT 0,
+    due_at      TEXT,
+    created_at  TEXT NOT NULL,
+    accepted_at TEXT,
+    closed_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_loans_due ON loans(status, due_at);
+CREATE INDEX IF NOT EXISTS idx_loans_lender ON loans(lender_id);
+CREATE INDEX IF NOT EXISTS idx_loans_borrower ON loans(borrower_id);

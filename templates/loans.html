@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %}Loans · MAMS Prediction Market{% endblock %}
+{% block content %}
+<h1>Loans</h1>
+<p class="muted">Lend your {{ CURRENCY }} to other players at an interest rate you choose, or borrow from them.
+  Interest is a flat percentage of the amount: borrow Ⓜ100 at 10% and you pay back Ⓜ110, whenever you like before
+  the due date. Anything still owed after that is <b>taken from the borrower's cash automatically</b>, including
+  money they get later, until it's paid off.</p>
+
+<div class="kpis">
+  <div class="kpi"><span>You owe</span><strong class="{{ 'down' if owe }}">Ⓜ{{ owe|money }}</strong></div>
+  <div class="kpi"><span>Owed to you</span><strong class="{{ 'up' if owed_to_me }}">Ⓜ{{ owed_to_me|money }}</strong></div>
+  <div class="kpi"><span>Held in your offers</span><strong>Ⓜ{{ held|money }}</strong></div>
+</div>
+
+{% if borrowing %}
+<div class="card">
+  <h2>Loans you're paying back</h2>
+  <div class="table-scroll">
+  <table class="table stack-mobile">
+    <thead><tr><th>From</th><th class="num">Borrowed</th><th class="num">Interest</th><th class="num">Still owed</th><th>Due</th><th>Pay back</th></tr></thead>
+    <tbody>
+    {% for l in borrowing %}
+      <tr>
+        <td data-label="From">{{ l.lender }}{% if l.note %}<div class="muted small">“{{ l.note }}”</div>{% endif %}</td>
+        <td class="num" data-label="Borrowed">Ⓜ{{ l.principal|money }}</td>
+        <td class="num" data-label="Interest">{{ '%g'|format(l.rate) }}%</td>
+        <td class="num down" data-label="Still owed">Ⓜ{{ l.owed|money }}</td>
+        <td data-label="Due">{% if l.due_at <= now %}<span class="status status-rejected">overdue</span>{% else %}<span title="{{ l.due_at|when }}">{{ l.due_at|until }}</span>{% endif %}</td>
+        <td data-label="Pay back">
+          <form method="post" action="{{ url_for('loan_repay', lid=l.id) }}" class="inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="number" name="amount" min="0.01" step="0.01" max="{{ l.owed }}" placeholder="{{ l.owed|money }}" aria-label="Amount to pay back" style="width:7rem">
+            <button class="btn btn-small">Pay</button>
+          </form>
+          <span class="muted small">Leave blank to pay it all.</span>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Offers you can take</h2>
+  {% if for_me %}
+  <div class="table-scroll">
+  <table class="table stack-mobile">
+    <thead><tr><th>From</th><th class="num">Amount</th><th class="num">Interest</th><th class="num">You'd pay back</th><th class="num">Days</th><th></th></tr></thead>
+    <tbody>
+    {% for l in for_me %}
+      <tr>
+        <td data-label="From">{{ l.lender }}{% if l.borrower %} <span class="tag">just for you</span>{% endif %}
+          {% if l.note %}<div class="muted small">“{{ l.note }}”</div>{% endif %}</td>
+        <td class="num" data-label="Amount">Ⓜ{{ l.principal|money }}</td>
+        <td class="num" data-label="Interest">{{ '%g'|format(l.rate) }}%</td>
+        <td class="num" data-label="You'd pay back">Ⓜ{{ owed_total(l.principal, l.rate)|money }}</td>
+        <td class="num" data-label="Days">{{ l.days }}</td>
+        <td><div class="row-actions">
+          <form method="post" action="{{ url_for('loan_accept', lid=l.id) }}" data-confirm="Borrow Ⓜ{{ l.principal|money }} from {{ l.lender }}? You'll owe Ⓜ{{ owed_total(l.principal, l.rate)|money }} within {{ l.days }} days, and anything unpaid after that is taken from your cash automatically.">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="btn btn-small">Borrow</button>
+          </form>
+          {% if l.borrower %}
+          <form method="post" action="{{ url_for('loan_decline', lid=l.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="btn btn-small btn-ghost">Decline</button>
+          </form>
+          {% endif %}
+        </div></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}<p class="muted">No offers right now.</p>{% endif %}
+</div>
+
+<div class="card">
+  <h2>Lend money</h2>
+  <form method="post" action="{{ url_for('loan_offer') }}" class="stack" data-loan-form>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="row">
+      <div class="stack"><label for="loan-amount">Amount (Ⓜ)</label>
+        <input id="loan-amount" type="number" name="amount" min="{{ LOAN_MIN }}" step="0.01" max="{{ user.balance }}" required></div>
+      <div class="stack"><label for="loan-rate">Interest (%)</label>
+        <input id="loan-rate" type="number" name="rate" min="0" max="{{ LOAN_MAX_RATE|int }}" step="0.1" value="10" required></div>
+      <div class="stack"><label for="loan-days">Pay back within (days)</label>
+        <input id="loan-days" type="number" name="days" min="1" max="{{ LOAN_MAX_DAYS }}" step="1" value="7" required></div>
+      <div class="stack"><label for="loan-borrower">To (username)</label>
+        <input id="loan-borrower" type="text" name="borrower" maxlength="20" placeholder="Anyone"></div>
+    </div>
+    <label for="loan-note">Note (optional)</label>
+    <input id="loan-note" type="text" name="note" maxlength="120" placeholder="e.g. for the basketball market">
+    <p class="muted small" data-loan-summary>The amount is taken from your balance now and held until someone borrows
+      it. You can withdraw the offer until then. Leave “To” blank to let anyone take it.</p>
+    <button class="btn">Offer loan</button>
+  </form>
+</div>
+
+{% if lending %}
+<div class="card">
+  <h2>Your loans and offers</h2>
+  <div class="table-scroll">
+  <table class="table stack-mobile">
+    <thead><tr><th>To</th><th class="num">Amount</th><th class="num">Interest</th><th class="num">Owed to you</th><th>Status</th><th></th></tr></thead>
+    <tbody>
+    {% for l in lending %}
+      <tr>
+        <td data-label="To">{{ l.borrower or 'Anyone' }}{% if l.note %}<div class="muted small">“{{ l.note }}”</div>{% endif %}</td>
+        <td class="num" data-label="Amount">Ⓜ{{ l.principal|money }}</td>
+        <td class="num" data-label="Interest">{{ '%g'|format(l.rate) }}%</td>
+        <td class="num" data-label="Owed to you">{% if l.status == 'active' %}Ⓜ{{ l.owed|money }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td data-label="Status">
+          {% if l.status == 'offered' %}<span class="status status-pending">waiting to be taken</span>
+          {% elif l.due_at <= now %}<span class="status status-rejected">overdue</span> <span class="muted small">collected as they get money</span>
+          {% else %}<span class="status status-approved">{{ l.due_at|until }}</span>{% endif %}
+        </td>
+        <td>{% if l.status == 'offered' %}
+          <form method="post" action="{{ url_for('loan_cancel', lid=l.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="btn btn-small btn-ghost">Withdraw</button>
+          </form>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+
+{% if history %}
+<div class="card">
+  <h2>Past loans</h2>
+  <div class="table-scroll">
+  <table class="table stack-mobile">
+    <tbody>
+    {% for l in history %}
+      <tr>
+        <td>{% if l.lender_id == user.id %}You lent {{ l.borrower or 'anyone' }}{% else %}{{ l.lender }} lent you{% endif %}
+          Ⓜ{{ l.principal|money }} at {{ '%g'|format(l.rate) }}%</td>
+        <td>{{ {'repaid': 'Paid back Ⓜ' ~ (l.repaid|money), 'declined': 'Declined', 'cancelled': 'Withdrawn'}[l.status] }}</td>
+        <td class="num muted small">{{ l.closed_at|ago }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

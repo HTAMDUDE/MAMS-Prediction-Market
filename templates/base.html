@@ -17,6 +17,7 @@
       {% if not user or request.endpoint == 'how_it_works' %}<a href="{{ url_for('how_it_works') }}" {% if request.endpoint == 'how_it_works' %}class="active" aria-current="page"{% endif %}>How it works</a>{% endif %}
       {% if user %}
         <a href="{{ url_for('portfolio') }}" {% if request.endpoint == 'portfolio' %}class="active" aria-current="page"{% endif %}>Portfolio</a>
+        <a href="{{ url_for('loans') }}" {% if request.endpoint == 'loans' %}class="active" aria-current="page"{% endif %}>Loans{% if loan_alerts %} <span class="badge" title="Loan offers for you or overdue loans">{{ loan_alerts }}</span>{% endif %}</a>
         <a href="{{ url_for('propose') }}" {% if request.endpoint == 'propose' %}class="active" aria-current="page"{% endif %}>Propose</a>
         {% if user.is_admin %}<a href="{{ url_for('admin') }}" {% if request.endpoint in ('admin', 'admin_review', 'admin_edit', 'admin_user', 'admin_log') %}class="active" aria-current="page"{% endif %}>Admin{% if pending_proposals %} <span class="badge" title="{{ pending_proposals }} proposal(s) waiting">{{ pending_proposals }}</span>{% endif %}</a>{% endif %}
       {% endif %}

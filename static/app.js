@@ -357,6 +357,21 @@ function setupMarketForm(form) {
 document.querySelectorAll('form[data-market-form]').forEach(setupMarketForm);
 
 
+// Loan offer form: show what the borrower would pay back.
+document.querySelectorAll('[data-loan-form]').forEach(form => {
+  const out = form.querySelector('[data-loan-summary]');
+  const base = out.textContent;
+  const update = () => {
+    const amt = parseFloat(form.amount.value), rate = parseFloat(form.rate.value), days = parseInt(form.days.value, 10);
+    if (!(amt > 0) || !(rate >= 0) || !(days > 0)) { out.textContent = base; return; }
+    const back = Math.round(amt * (1 + rate / 100) * 100) / 100;
+    const who = form.borrower.value.trim() || 'The borrower';
+    out.textContent = `${who} would pay back Ⓜ${back.toFixed(2)} (Ⓜ${(back - amt).toFixed(2)} interest) within ${days} day${days === 1 ? '' : 's'}. ` + base;
+  };
+  form.addEventListener('input', update);
+  update();
+});
+
 // Confirmation dialogs: any form with data-confirm="message" (and optionally data-confirm-title /
 // data-confirm-label), or a submit button with its own data-confirm, asks first.
 (function setupConfirm() {

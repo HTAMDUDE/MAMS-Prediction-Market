@@ -7,6 +7,9 @@
   <div class="kpi"><span>Cash</span><strong>Ⓜ{{ user.balance|money }}</strong></div>
   <div class="kpi"><span>In open bets (if sold now)</span><strong>Ⓜ{{ invested|money }}</strong></div>
 </div>
+{% if loan_totals.owe or loan_totals.owed or loan_totals.held %}
+<p class="muted">Net worth includes loans: you owe Ⓜ{{ loan_totals.owe|money }}, you're owed Ⓜ{{ loan_totals.owed|money }}{% if loan_totals.held %} and Ⓜ{{ loan_totals.held|money }} is held in your loan offers{% endif %}. <a href="{{ url_for('loans') }}">Loans →</a></p>
+{% endif %}
 
 <div class="card">
   <h2>Open positions</h2>

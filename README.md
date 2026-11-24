@@ -27,6 +27,11 @@ assemblies, and anything else the admins post.
   sniped cheaply at the last minute. Charged on buys (added) and sells (deducted) and paid to the market's creator (on markets with no
   creator, or when creators trade their own market late, it isn't paid to anyone). Set by
   `LATE_FEE_RATE`, `LATE_SNIPE_RATE` and `LATE_FEE_TIERS` in `app.py`.
+- **Loans**: on the Loans page players can lend each other money at a flat interest rate they choose (0–100%),
+  to one player or to anyone, for 1–30 days. The lender's money is held until the offer is taken. Borrowers can repay
+  early or in parts; after the due date whatever is still owed is taken from the borrower's cash automatically
+  (including money they get later). Loans count towards net worth. Limits are `LOAN_MIN`, `LOAN_MAX_RATE` and
+  `LOAN_MAX_DAYS` in `app.py`.
 - The **Activity** page lists every trade made on the site (who, what, which market, how much), with filters by
   buys/sells, trader and market. **Your balance history** (linked from it) logs every change to your own balance
   (buys, sells, payouts, losses, refunds, bonuses, admin adjustments) with your balance after each one. Admins can
