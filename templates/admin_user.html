@@ -21,6 +21,7 @@
   <a href="{{ url_for('balance_history', user=u.username) }}">View their balance history →</a></div>
 {% else %}
 {% include "_identity.html" %}
+{% if cred is defined and (cred or not u.is_admin) %}{% include "_credit_admin.html" %}{% endif %}
 <div class="card">
   <h2>Balance</h2>
   <form method="post" action="{{ url_for('admin_grant', uid=u.id) }}" class="inline">

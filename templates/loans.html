@@ -1,22 +1,30 @@
 {% extends "base.html" %}
+{% from "_credit.html" import pill %}
 {% block title %}Loans · MAMS Prediction Market{% endblock %}
 {% block content %}
-<div class="activity-head"><h1>Loans</h1><a class="btn btn-small btn-ghost" href="{{ url_for('all_loans') }}">See all running loans →</a></div>
+<h1>Loans</h1>
 <p class="muted">Lend your {{ CURRENCY }} to other players at an interest rate you choose, or borrow from them.
   Interest is a flat percentage of the amount: borrow Ⓜ100 at 10% and you pay back Ⓜ110, whenever you like before
-  the due date. Miss it and a <b>{{ (LOAN_LATE_FEE * 100)|int }}% late fee</b> is added and your credit score drops;
-  anything still owed is <b>taken from your cash automatically</b>, including money you get later, until it's paid off.
-  Still unpaid {{ LOAN_DEFAULT_DAYS }} days after the due date and the loan <b>defaults</b>. <a href="#credit">How credit works ↓</a></p>
+  the due date. Anything still owed after that is <b>taken from the borrower's cash automatically</b>, including
+  money they get later, until it's paid off. While a loan is overdue the borrower can't buy, lend or create markets,
+  and if it's still unpaid {{ LOAN_GRACE_DAYS }} days after the due date the lender can <b>sell or take over their
+  bets</b> to cover it. You can owe at most the larger of Ⓜ500 or half of your cash and bets minus your debts, adjusted
+  by your <a href="{{ url_for('my_credit') }}">credit score</a> (a good score raises the limit, a poor one lowers it), across
+  at most {{ LOAN_MAX_ACTIVE }} loans, and you can't lend while you're borrowing.</p>
 
-{% if defaulted %}
-<div class="late-note"><b>You've defaulted on a loan.</b> Until it's paid off you can't borrow or lend, and the
-  leaderboard shows you as defaulted. Everything you receive goes to your lender until then.</div>
+{% if overdue_message %}
+<div class="card" role="alert" style="border-color: color-mix(in srgb, var(--no) 35%, var(--line))"><b>Overdue loan.</b> {{ overdue_message }}
+  {% for l in borrowing if l.due_at <= now %}
+  <div class="small">Owed to {{ l.lender }}: Ⓜ{{ l.owed|money }}. From {{ grace_end[l.id]|when }} they can sell or take over your bets in open markets to cover it.</div>
+  {% endfor %}
+</div>
 {% endif %}
 
 <div class="kpis">
-  <div class="kpi"><span>Credit score</span><strong class="credit credit-{{ band|lower }}">{{ score }}</strong>
-    <span class="muted small">{{ band }} · can owe up to Ⓜ{{ limit|money }}</span></div>
   <div class="kpi"><span>You owe</span><strong class="{{ 'down' if owe }}">Ⓜ{{ owe|money }}</strong></div>
+  <div class="kpi"><span>You can still borrow</span><strong title="Limit Ⓜ{{ credit_limit|money }} in total">Ⓜ{{ borrow_room|money }}</strong>
+    {% if my_credit %}<small><a href="{{ url_for('my_credit') }}" title="See what makes up your score">{{ pill(my_credit.score, my_credit.tier) }} {{ my_credit.tier }} · ×{{ '%g'|format(limit_detail.multiplier) }} limit</a></small>
+    {% elif limit_detail.frozen %}<small class="down">Borrowing paused</small>{% endif %}</div>
   <div class="kpi"><span>Owed to you</span><strong class="{{ 'up' if owed_to_me }}">Ⓜ{{ owed_to_me|money }}</strong></div>
   <div class="kpi"><span>Held in your offers</span><strong>Ⓜ{{ held|money }}</strong></div>
 </div>
@@ -34,9 +42,7 @@
         <td class="num" data-label="Borrowed">Ⓜ{{ l.principal|money }}</td>
         <td class="num" data-label="Interest">{{ '%g'|format(l.rate) }}%</td>
         <td class="num down" data-label="Still owed">Ⓜ{{ l.owed|money }}</td>
-        <td data-label="Due">{% if l.defaulted_at %}<span class="status status-rejected">defaulted</span>
-          {% elif l.due_at <= now %}<span class="status status-rejected">overdue</span>{% else %}<span title="{{ l.due_at|when }}">{{ l.due_at|until }}</span>{% endif %}
-          {% if l.penalty %}<div class="muted small">incl. Ⓜ{{ l.penalty|money }} late fee</div>{% endif %}</td>
+        <td data-label="Due">{% if grace_end[l.id] <= now %}<span class="status status-rejected">in default</span> <span class="muted small">{{ l.lender }} can collect from your bets</span>{% elif l.due_at <= now %}<span class="status status-rejected">overdue</span>{% else %}<span title="{{ l.due_at|when }}">{{ l.due_at|until }}</span>{% endif %}</td>
         <td data-label="Pay back">
           <form method="post" action="{{ url_for('loan_repay', lid=l.id) }}" class="inline">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -62,17 +68,19 @@
     <tbody>
     {% for l in for_me %}
       <tr>
+        {% set short = l.min_score and my_credit and my_credit.score < l.min_score %}
         <td data-label="From">{{ l.lender }}{% if l.borrower %} <span class="tag">just for you</span>{% endif %}
-          {% if l.min_credit %}<span class="tag {{ 'down' if score < l.min_credit }}" title="Minimum credit score">{{ l.min_credit }}+ credit</span>{% endif %}
+          {% if l.min_score %}<span class="tag" title="The lender only lends to players with at least this credit score">Needs {{ l.min_score }}+</span>{% endif %}
+          {% if short %}<div class="down small">Your score is {{ my_credit.score }}, so you can't take this one yet.</div>{% endif %}
           {% if l.note %}<div class="muted small">“{{ l.note }}”</div>{% endif %}</td>
         <td class="num" data-label="Amount">Ⓜ{{ l.principal|money }}</td>
         <td class="num" data-label="Interest">{{ '%g'|format(l.rate) }}%</td>
         <td class="num" data-label="You'd pay back">Ⓜ{{ owed_total(l.principal, l.rate)|money }}</td>
         <td class="num" data-label="Days">{{ l.days }}</td>
         <td><div class="row-actions">
-          <form method="post" action="{{ url_for('loan_accept', lid=l.id) }}" data-confirm="Borrow Ⓜ{{ l.principal|money }} from {{ l.lender }}? You'll owe Ⓜ{{ owed_total(l.principal, l.rate)|money }} within {{ l.days }} days, and anything unpaid after that is taken from your cash automatically.">
+          <form method="post" action="{{ url_for('loan_accept', lid=l.id) }}" data-confirm="Borrow Ⓜ{{ l.principal|money }} from {{ l.lender }}? You'll owe Ⓜ{{ owed_total(l.principal, l.rate)|money }} within {{ l.days }} days. Once it's overdue you can't buy or lend and anything you receive goes to the lender, and {{ LOAN_GRACE_DAYS }} days after that they can sell or take over your bets.">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button class="btn btn-small">Borrow</button>
+            <button class="btn btn-small" {% if short %}disabled aria-disabled="true" title="Your credit score is below {{ l.min_score }}"{% endif %}>Borrow</button>
           </form>
           {% if l.borrower %}
           <form method="post" action="{{ url_for('loan_decline', lid=l.id) }}">
@@ -89,8 +97,10 @@
   {% else %}<p class="muted">No offers right now.</p>{% endif %}
 </div>
 
-<div class="card">
+<div class="card" id="lend">
   <h2>Lend money</h2>
+  <p class="muted small">Not sure who to lend to? <a href="{{ url_for('loan_borrowers') }}">Browse borrowers by credit score</a>,
+    or set a minimum score below so only trusted players can take an open offer.</p>
   <form method="post" action="{{ url_for('loan_offer') }}" class="stack" data-loan-form>
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="row">
@@ -101,9 +111,14 @@
       <div class="stack"><label for="loan-days">Pay back within (days)</label>
         <input id="loan-days" type="number" name="days" min="1" max="{{ LOAN_MAX_DAYS }}" step="1" value="7" required></div>
       <div class="stack"><label for="loan-borrower">To (username)</label>
-        <input id="loan-borrower" type="text" name="borrower" maxlength="20" placeholder="Anyone"></div>
-      <div class="stack"><label for="loan-credit">Minimum credit score</label>
-        <input id="loan-credit" type="number" name="min_credit" min="{{ CREDIT_MIN }}" max="{{ CREDIT_MAX }}" step="1" placeholder="Any"></div>
+        <input id="loan-borrower" type="text" name="borrower" maxlength="20" placeholder="Anyone" value="{{ prefill_to }}"></div>
+    </div>
+    <div class="row">
+      <div class="stack"><label for="loan-tier">Minimum credit tier</label>
+        <select id="loan-tier" name="min_tier"><option value="">Anyone</option>
+          {% for slug, name, floor in tier_options %}<option value="{{ slug }}">{{ name }} or better ({{ floor }}+)</option>{% endfor %}</select></div>
+      <div class="stack"><label for="loan-minscore">…or an exact minimum score</label>
+        <input id="loan-minscore" type="number" name="min_score" min="300" max="850" step="1" placeholder="e.g. 650" style="width:8rem"></div>
     </div>
     <label for="loan-note">Note (optional)</label>
     <input id="loan-note" type="text" name="note" maxlength="120" placeholder="e.g. for the basketball market">
@@ -122,16 +137,16 @@
     <tbody>
     {% for l in lending %}
       <tr>
-        <td data-label="To">{{ l.borrower or 'Anyone' }}{% if l.borrower_id and credit.get(l.borrower_id) %}{% set c = credit[l.borrower_id] %}
-          <span class="muted small" title="Their credit score">· {{ c.score }} {{ c.band }}</span>{% if c.defaulted %} <span class="status status-rejected">defaulter</span>{% endif %}{% endif %}
-          {% if l.min_credit %}<div class="muted small">needs {{ l.min_credit }}+ credit</div>{% endif %}{% if l.note %}<div class="muted small">“{{ l.note }}”</div>{% endif %}</td>
+        <td data-label="To">{{ l.borrower or 'Anyone' }}{% if not l.borrower and l.min_score %} <span class="tag">needs {{ l.min_score }}+</span>{% endif %}
+          {% if l.borrower_id and records[l.borrower_id] %}{% set r = records[l.borrower_id] %}<div class="muted small" title="Loans this player has taken before">{% if scores[l.borrower_id] %}<a href="{{ url_for('user_credit', username=l.borrower) }}">{{ pill(scores[l.borrower_id].score, scores[l.borrower_id].tier) }}</a> {% endif %}{{ r.ontime }} on time · {{ r.late }} late · {{ r.default }} in default</div>{% endif %}
+          {% if l.note %}<div class="muted small">“{{ l.note }}”</div>{% endif %}</td>
         <td class="num" data-label="Amount">Ⓜ{{ l.principal|money }}</td>
         <td class="num" data-label="Interest">{{ '%g'|format(l.rate) }}%</td>
         <td class="num" data-label="Owed to you">{% if l.status == 'active' %}Ⓜ{{ l.owed|money }}{% else %}<span class="muted">—</span>{% endif %}</td>
         <td data-label="Status">
           {% if l.status == 'offered' %}<span class="status status-pending">waiting to be taken</span>
-          {% elif l.defaulted_at %}<span class="status status-rejected">defaulted</span> <span class="muted small">collected as they get money</span>
-          {% elif l.due_at <= now %}<span class="status status-rejected">overdue</span> <span class="muted small">collected as they get money</span>
+          {% elif grace_end[l.id] <= now %}<span class="status status-rejected">in default</span> <span class="muted small">you can collect from their bets</span>
+          {% elif l.due_at <= now %}<span class="status status-rejected">overdue</span> <span class="muted small">collected as they get money; from {{ grace_end[l.id]|when }} you can collect from their bets</span>
           {% else %}<span class="status status-approved">{{ l.due_at|until }}</span>{% endif %}
         </td>
         <td>{% if l.status == 'offered' %}
@@ -140,6 +155,40 @@
             <button class="btn btn-small btn-ghost">Withdraw</button>
           </form>{% endif %}</td>
       </tr>
+      {% if collect.get(l.id) is not none and l.status == 'active' %}
+      <tr>
+        <td colspan="6">
+          <b>Collect from {{ l.borrower }}'s bets</b>
+          <span class="muted small">Ⓜ{{ l.owed|money }} still owed. Their cash has already been taken. <b>Force sell</b> sells just enough shares on their behalf and pays you. <b>Take over</b> moves those shares to you at today's sell-now value, which comes off the debt (you pay the market's entry fee if it's your first bet there, and it isn't offered in the last hours before betting closes).</span>
+          {% if collect[l.id] %}
+          <div class="table-scroll"><table class="table stack-mobile">
+            <thead><tr><th>Market</th><th class="num">Shares used</th><th class="num">Worth</th><th></th></tr></thead>
+            <tbody>
+            {% for p in collect[l.id] %}
+              <tr>
+                <td data-label="Market"><a href="{{ url_for('market', mid=p.market_id) }}">{{ p.question }}</a> <span class="tag">{{ p.label }}</span></td>
+                <td class="num" data-label="Shares used">{{ p.shares|money }} of {{ p.held|money }}</td>
+                <td class="num" data-label="Worth">Ⓜ{{ p.value|money }}</td>
+                <td><div class="row-actions">
+                  <form method="post" action="{{ url_for('loan_collect', lid=l.id) }}" data-confirm="Sell {{ p.shares|money }} of {{ l.borrower }}'s shares of “{{ p.label }}” now for about Ⓜ{{ p.value|money }}?">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="outcome_id" value="{{ p.outcome_id }}"><input type="hidden" name="mode" value="sell">
+                    <button class="btn btn-small">Force sell</button>
+                  </form>
+                  {% if p.can_take %}
+                  <form method="post" action="{{ url_for('loan_collect', lid=l.id) }}" data-confirm="Take over {{ p.shares|money }} shares of “{{ p.label }}” worth Ⓜ{{ p.value|money }}? That comes off what {{ l.borrower }} owes you.">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="outcome_id" value="{{ p.outcome_id }}"><input type="hidden" name="mode" value="take">
+                    <button class="btn btn-small btn-ghost">Take over</button>
+                  </form>
+                  {% endif %}
+                </div></td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table></div>
+          {% else %}<p class="muted small">They have no bets in open markets right now. Anything they receive later still goes to you automatically.</p>{% endif %}
+        </td>
+      </tr>
+      {% endif %}
     {% endfor %}
     </tbody>
   </table>
@@ -157,7 +206,7 @@
       <tr>
         <td>{% if l.lender_id == user.id %}You lent {{ l.borrower or 'anyone' }}{% else %}{{ l.lender }} lent you{% endif %}
           Ⓜ{{ l.principal|money }} at {{ '%g'|format(l.rate) }}%</td>
-        <td>{{ {'repaid': 'Paid back Ⓜ' ~ (l.repaid|money), 'declined': 'Declined', 'cancelled': 'Withdrawn'}[l.status] }}</td>
+        <td>{{ {'repaid': 'Paid back Ⓜ' ~ (l.repaid|money), 'declined': 'Declined', 'cancelled': 'Withdrawn', 'forgiven': 'Forgiven by an admin'}[l.status] }}</td>
         <td class="num muted small">{{ l.closed_at|ago }}</td>
       </tr>
     {% endfor %}
@@ -166,40 +215,4 @@
   </div>
 </div>
 {% endif %}
-<div class="card" id="credit">
-  <h2>Your credit</h2>
-  <p>Your credit score ({{ CREDIT_MIN }}–{{ CREDIT_MAX }}) shows lenders how reliably you pay back. It decides how much
-    you can owe at once, and lenders can refuse borrowers below a score they choose.</p>
-  <ul>
-    <li><b>Pay off a loan on time:</b> +1 for every Ⓜ10 borrowed, up to +15.</li>
-    <li><b>Miss the due date:</b> {{ CREDIT_LATE }}, and a {{ (LOAN_LATE_FEE * 100)|int }}% late fee is added to what you
-      owe (it goes to the lender). Paying it off later earns a little back.</li>
-    <li><b>Still unpaid {{ LOAN_DEFAULT_DAYS }} days after the due date:</b> the loan defaults: {{ CREDIT_DEFAULT }},
-      no borrowing or lending until it's paid off, and a “defaulted” tag on the leaderboard. Paying it off removes the tag
-      and earns some points back.</li>
-  </ul>
-  <div class="table-scroll">
-  <table class="table late-table">
-    <thead><tr><th>Score</th><th>Rating</th><th class="num">You can owe up to</th></tr></thead>
-    <tbody>
-    {% for low, name, lim in CREDIT_BANDS %}
-      <tr class="{{ 'me' if name == band }}"><td>{{ low }}+</td><td>{{ name }}</td><td class="num">{% if lim %}Ⓜ{{ lim|money }}{% else %}Can't borrow{% endif %}</td></tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  </div>
-  {% if credit_events %}
-  <h3>Recent changes</h3>
-  <div class="table-scroll">
-  <table class="table">
-    <tbody>
-    {% for e in credit_events %}
-      <tr><td>{{ e.reason }}</td><td class="num {{ 'up' if e.change > 0 else 'down' }}">{{ '+' if e.change > 0 }}{{ e.change }}</td>
-        <td class="num">{{ e.score_after }}</td><td class="num muted small">{{ e.created_at|ago }}</td></tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  </div>
-  {% else %}<p class="muted small">No changes yet. Everyone starts at 600.</p>{% endif %}
-</div>
 {% endblock %}

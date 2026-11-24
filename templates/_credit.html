@@ -1,0 +1,13 @@
+{# Credit pieces shared by several pages. Import with: {% from "_credit.html" import pill, scale %} #}
+
+{# A score as a coloured pill: {{ pill(score, tier) }}. Nothing known yet shows a dash. #}
+{% macro pill(score, tier) -%}
+{%- if score is none -%}<span class="credit credit-none" title="Not scored yet">—</span>
+{%- else -%}<span class="credit credit-{{ tier|slug }}" title="{{ tier }} credit">{{ score }}</span>{%- endif -%}
+{%- endmacro %}
+
+{# The 300-850 bar with a marker at the score. #}
+{% macro scale(score, lo=300, hi=850) -%}
+<div class="credit-scale" role="img" aria-label="Score {{ score }} on a scale from {{ lo }} to {{ hi }}"><i style="left: {{ ((score - lo) / (hi - lo) * 100)|round(1) }}%"></i></div>
+<div class="credit-scale-labels"><span>{{ lo }}</span><span>{{ hi }}</span></div>
+{%- endmacro %}

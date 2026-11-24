@@ -89,10 +89,20 @@
     at once. If anything is still owed after the due date, it's <b>taken from the borrower's cash automatically</b>,
     including money they receive later, until the loan is paid off. Loans count towards net worth: money you're owed
     adds to yours, and money you owe is subtracted.</p>
-  <p>Everyone has a <b>credit score</b> from 300 to 850 (starting at 600). Paying loans back on time raises it. Missing the
-    due date adds a 10% late fee and costs 40 points; still owing a week after that is a <b>default</b>: 100 more points,
-    a “defaulted” tag on the leaderboard, and no borrowing or lending until it's paid off. Your score sets how much you
-    can owe at once, and lenders can require a minimum score. Details are on the Loans page.</p>
+  <p>There are limits so nobody can borrow and vanish. You can owe at most the larger of Ⓜ500 or half of your cash
+    plus the sell-now value of your bets, minus your debts, across at most {{ LOAN_MAX_ACTIVE }} loans, and you can't
+    lend while you're borrowing. <b>While a loan is overdue</b> you can't buy, lend or create markets (selling and
+    repaying still work), and everything you receive goes to your lenders. If it's <b>still unpaid
+    {{ LOAN_GRACE_DAYS }} days after the due date</b>, the lender can <b>force a sale</b> of your bets in open markets
+    or <b>take them over</b> at their current sell-now value, only as much as covers what you owe. Bets in markets
+    that have closed are paid to lenders when the market resolves. Debts never expire, and admins can extend or
+    forgive a loan.</p>
+
+  <p>Everyone also has a <b>credit score</b> from 300 to 850, worked out from how you've handled loans: paying back on
+    time (recent and larger loans count most), how much of your limit you're using, how long you've been borrowing,
+    how many different lenders you've repaid, how steady your balance is, and how many loans you've taken lately. A
+    loan that's overdue or in default caps your score. The score sets how much you can borrow, and lenders can require
+    a minimum score or browse borrowers by score. See yours, and what's moving it, on your <a href="{{ url_for('my_credit') if user else url_for('login') }}">credit report</a>.</p>
 
   <h2>Read the rules, not just the title</h2>
   <p>A market called “Will the bill pass?” might really mean “signed into law by December 31” or “passed by the House”.

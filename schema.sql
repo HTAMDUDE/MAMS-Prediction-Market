@@ -204,7 +204,8 @@ CREATE TABLE IF NOT EXISTS site_settings (
 );
 
 -- Player-to-player loans. The lender's money is held when they offer; the borrower gets it on accepting and owes
--- principal x (1 + rate/100) by due_at. Overdue loans are collected from the borrower's cash automatically.
+-- principal x (1 + rate/100) by due_at. Overdue loans are collected from the borrower's cash automatically, and after
+-- a grace period the lender can sell or take over the borrower's bets (see seize_position in app.py).
 CREATE TABLE IF NOT EXISTS loans (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     lender_id   INTEGER NOT NULL REFERENCES users(id),
@@ -213,17 +214,13 @@ CREATE TABLE IF NOT EXISTS loans (
     rate        REAL NOT NULL,                  -- flat interest, percent of principal
     days        INTEGER NOT NULL,               -- loan length, counted from acceptance
     note        TEXT NOT NULL DEFAULT '',
-    status      TEXT NOT NULL DEFAULT 'offered', -- offered | active | repaid | declined | cancelled
+    status      TEXT NOT NULL DEFAULT 'offered', -- offered | active | repaid | declined | cancelled | forgiven
     owed        REAL NOT NULL DEFAULT 0,        -- still to pay back (active loans)
     repaid      REAL NOT NULL DEFAULT 0,
     due_at      TEXT,
     created_at  TEXT NOT NULL,
     accepted_at TEXT,
-    closed_at   TEXT,
-    min_credit  INTEGER NOT NULL DEFAULT 0,  -- lowest credit score the lender accepts (0 = anyone)
-    late_at     TEXT,                       -- when it went past due with money still owed (late fee added)
-    penalty     REAL NOT NULL DEFAULT 0,    -- the late fee added to what's owed
-    defaulted_at TEXT                       -- still unpaid LOAN_DEFAULT_DAYS after the due date
+    closed_at   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_loans_due ON loans(status, due_at);
 CREATE INDEX IF NOT EXISTS idx_loans_lender ON loans(lender_id);
@@ -311,14 +308,37 @@ CREATE INDEX IF NOT EXISTS idx_sevents_kind ON security_events(kind, created_at)
 CREATE INDEX IF NOT EXISTS idx_sevents_user ON security_events(user_id, id);
 CREATE INDEX IF NOT EXISTS idx_sevents_ip ON security_events(ip);
 
--- Every change to a player's credit score (see adjust_credit), shown on the Loans page.
-CREATE TABLE IF NOT EXISTS credit_events (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id     INTEGER NOT NULL REFERENCES users(id),
-    loan_id     INTEGER,
-    change      INTEGER NOT NULL,
-    score_after INTEGER NOT NULL,
-    reason      TEXT NOT NULL,
-    created_at  TEXT NOT NULL
+-- ---- Credit scores (see credit.py). One row per user with the latest score, plus the admin's overrides, and a
+-- thin history of how the score moved. No foreign keys, so rows survive account deletion like the event log.
+CREATE TABLE IF NOT EXISTS user_credit (
+    user_id        INTEGER PRIMARY KEY,
+    score          INTEGER NOT NULL,
+    tier           TEXT NOT NULL,
+    multiplier     REAL NOT NULL DEFAULT 1,
+    factors        TEXT NOT NULL DEFAULT '[]',   -- JSON, from credit.compute_credit
+    reasons        TEXT NOT NULL DEFAULT '[]',
+    caps           TEXT NOT NULL DEFAULT '[]',
+    thin           INTEGER NOT NULL DEFAULT 1,
+    utilisation    REAL NOT NULL DEFAULT 0,      -- owed / base limit, for the directory and admin filters
+    ontime         INTEGER NOT NULL DEFAULT 0,
+    late           INTEGER NOT NULL DEFAULT 0,
+    defaulted      INTEGER NOT NULL DEFAULT 0,
+    adjust         INTEGER NOT NULL DEFAULT 0,   -- admin: manual points added to the score
+    adjust_reason  TEXT NOT NULL DEFAULT '',
+    frozen         INTEGER NOT NULL DEFAULT 0,   -- admin: may not borrow
+    limit_override REAL,                         -- admin: fixed borrowing limit
+    reviewed_by    TEXT,
+    reviewed_at    TEXT,
+    updated_at     TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_credit_events_user ON credit_events(user_id, id);
+CREATE INDEX IF NOT EXISTS idx_credit_score ON user_credit(score);
+
+CREATE TABLE IF NOT EXISTS credit_history (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    score      INTEGER NOT NULL,
+    tier       TEXT NOT NULL,
+    reason     TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_credit_history_user ON credit_history(user_id, created_at);

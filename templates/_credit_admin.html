@@ -1,0 +1,68 @@
+{# Credit card on a user's admin page. `cred` etc. come from admin_user_credit() in app.py. #}
+{% from "_credit.html" import pill %}
+<div class="card" id="credit">
+  <h2>Credit
+    {% if cred %}{{ pill(cred.score, cred.tier) }} <span class="muted small">{{ cred.tier }}{% if cred.thin %} · new borrower{% endif %}</span>
+      {% if cred.frozen %}<span class="status status-rejected">Borrowing frozen</span>{% endif %}
+    {% elif u.is_admin %}<span class="muted small">Admins aren't scored</span>{% endif %}</h2>
+  {% if cred %}
+  <dl class="facts">
+    <dt>Borrowing limit</dt><dd>Ⓜ{{ cred_detail.limit|money }}
+      <span class="muted small">{% if cred_detail.override is not none %}fixed by an admin (the score would give Ⓜ{{ cred_detail.score_limit|money }}){% else %}net worth rule Ⓜ{{ cred_detail.base|money }}, score multiplier ×{{ '%g'|format(cred_detail.multiplier) }}{% endif %}</span></dd>
+    <dt>Owes now</dt><dd>Ⓜ{{ cred_detail.owe|money }} <span class="muted small">({{ (cred.utilisation * 100)|round|int }}% of base limit)</span></dd>
+    <dt>Record</dt><dd>{{ cred.ontime }} on time · {{ cred.late }} late · {{ cred.defaulted }} in default</dd>
+    {% if cred.adjust %}<dt>Adjustment</dt><dd>{{ '%+d'|format(cred.adjust) }} points <span class="muted small">“{{ cred.adjust_reason }}”</span></dd>{% endif %}
+    {% if cred.reviewed_by %}<dt>Last admin change</dt><dd class="small">{{ cred.reviewed_by }}, {{ cred.reviewed_at|ago }}</dd>{% endif %}
+    <dt>Updated</dt><dd class="small">{{ cred.updated_at|ago }}</dd>
+  </dl>
+
+  {% for f in cred.factors %}
+  <div class="factor">
+    <div><strong>{{ f.label }}</strong> <span class="muted small">{{ (f.weight * 100)|round|int }}% · {{ f.points|round|int }} pts</span></div>
+    <div class="factor-bar"><b style="width: {{ (f.value * 100)|round|int }}%"></b></div>
+    <div class="factor-note muted small">{{ f.detail }}</div>
+  </div>
+  {% endfor %}
+  {% if cred.caps %}<ul class="reason-list">{% for text in cred.caps %}<li><span class="pts down">cap</span><span>{{ text }}</span></li>{% endfor %}</ul>{% endif %}
+  {% if cred.reasons %}<h3>Biggest movers</h3><ul class="reason-list">
+    {% for pts, text in cred.reasons %}<li><span class="pts {{ 'up' if pts > 0 else 'down' }}">{{ '+' if pts > 0 }}{{ pts }}</span><span>{{ text }}</span></li>{% endfor %}</ul>{% endif %}
+  {% if cred_points %}<h3>Last 90 days</h3>
+  <svg class="credit-line" viewBox="0 0 240 56" preserveAspectRatio="none" role="img" aria-label="Score history"><polyline points="{{ cred_points }}"/></svg>{% endif %}
+
+  <h3>Actions</h3>
+  <div class="stack">
+    <form method="post" action="{{ url_for('admin_credit_adjust', uid=u.id) }}" class="inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label for="cr-points" class="sr-only">Points</label>
+      <input id="cr-points" type="number" name="points" min="-{{ CREDIT_MAX_ADJUST }}" max="{{ CREDIT_MAX_ADJUST }}" step="1" value="{{ cred.adjust }}" class="narrow" required>
+      <label for="cr-reason" class="sr-only">Reason</label>
+      <input id="cr-reason" type="text" name="reason" maxlength="200" placeholder="Reason (required)" value="{{ cred.adjust_reason }}">
+      <button class="btn btn-small btn-ghost">Set adjustment</button>
+      <span class="muted small">±{{ CREDIT_MAX_ADJUST }} points, replaces the current one. 0 clears it.</span>
+    </form>
+    <form method="post" action="{{ url_for('admin_credit_limit', uid=u.id) }}" class="inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label for="cr-limit" class="sr-only">Fixed borrowing limit</label>
+      <input id="cr-limit" type="number" name="limit" min="0" step="0.01" placeholder="Follow the score" value="{{ cred.limit_override if cred.limit_override is not none }}" class="narrow">
+      <button class="btn btn-small btn-ghost">Set limit</button>
+      <span class="muted small">A fixed limit ignores the score. Blank goes back to the score.</span>
+    </form>
+    <form method="post" action="{{ url_for('admin_credit_freeze', uid=u.id) }}" class="inline"
+          {% if not cred.frozen %}data-confirm="Stop {{ u.username }} from borrowing? Their existing loans are not affected."{% endif %}>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="freeze" value="{{ 0 if cred.frozen else 1 }}">
+      <input type="text" name="reason" maxlength="200" placeholder="Reason (optional)">
+      <button class="btn btn-small btn-ghost">{{ 'Allow borrowing again' if cred.frozen else 'Freeze borrowing' }}</button>
+    </form>
+  </div>
+
+  {% if cred_loans %}<h3>Loans</h3>
+  <div class="table-scroll"><table class="table stack-mobile">
+    <thead><tr><th>Lender</th><th>Borrower</th><th class="num">Amount</th><th>Status</th></tr></thead>
+    <tbody>{% for l in cred_loans %}<tr>
+      <td data-label="Lender">{{ l.lender }}</td><td data-label="Borrower">{{ l.borrower }}</td>
+      <td class="num" data-label="Amount">Ⓜ{{ l.principal|money }} <span class="muted small">at {{ '%g'|format(l.rate) }}%</span></td>
+      <td data-label="Status">{{ l.status }}{% if l.status == 'active' %} <span class="muted small">Ⓜ{{ l.owed|money }} owed, due {{ l.due_at|when }}</span>{% endif %}</td></tr>{% endfor %}</tbody>
+  </table></div>{% endif %}
+  {% endif %}
+</div>

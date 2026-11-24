@@ -105,8 +105,7 @@ def test_overdue_loans_are_collected_from_cash_including_later_money():
     db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(), lid))
     assert appmod.has_overdue_loan(db, bob)
     appmod.collect_overdue_loans(db)
-    # 120 owed + 12 late fee, minus the 30 taken
-    assert bal(db, bob) == 0 and loan(db, lid)["owed"] == 102 and bal(db, ann) == 930
+    assert bal(db, bob) == 0 and loan(db, lid)["owed"] == 90 and bal(db, ann) == 930
 
     other = appmod.offer_loan(db, ann, "", 10, 0, 1)
     with pytest.raises(appmod.TradeError, match="overdue"):
@@ -114,7 +113,7 @@ def test_overdue_loans_are_collected_from_cash_including_later_money():
 
     db.execute("UPDATE users SET balance = 200 WHERE id = ?", (bob,))  # e.g. a payout later
     appmod.collect_overdue_loans(db)
-    assert loan(db, lid)["status"] == "repaid" and bal(db, bob) == 98 and bal(db, ann) == 1022  # 1000 - 100 lent - 10 held in an offer + 132
+    assert loan(db, lid)["status"] == "repaid" and bal(db, bob) == 110 and bal(db, ann) == 1010
     assert not appmod.has_overdue_loan(db, bob)
     detail = db.execute("SELECT detail FROM activity WHERE user_id = ? ORDER BY id DESC LIMIT 1", (bob,)).fetchone()[0]
     assert "Overdue loan collected" in detail and "paid off" in detail
@@ -175,152 +174,400 @@ def test_account_with_running_loan_cannot_be_deleted_and_offers_are_refunded():
     assert db.execute("SELECT COUNT(*) FROM loans").fetchone()[0] == 0
 
 
-# ---------------------------------------------------------------- credit scores and defaults
+# ---------------------------------------------------------------- limits, freezing and collecting from bets
 
-def score(db, uid):
-    return db.execute("SELECT credit_score FROM users WHERE id = ?", (uid,)).fetchone()[0]
+from datetime import datetime, timedelta  # noqa: E402
+
+from test_market import _market  # noqa: E402
 
 
-def test_on_time_repayment_raises_credit_by_loan_size():
-    db = _fresh_db()
-    ann, bob = _user(db, "ann"), _user(db, "bob")
-    assert score(db, bob) == appmod.CREDIT_START == 600
-    lid = appmod.offer_loan(db, ann, "", 80, 10, 7)
+def in_default_loan(db, lender, borrower, amount=100, rate=0, hours_overdue=72):
+    """A running loan whose due date was `hours_overdue` ago (the grace period is 48 hours)."""
+    lid = appmod.offer_loan(db, lender, "", amount, rate, 7)
+    appmod.accept_loan(db, lid, borrower)
+    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(hours_overdue), lid))
+    return lid
+
+
+def borrower_with_bet(db, bet, name="bob", market=None, **loan_args):
+    """ann lends bob Ⓜ100; bob bets `bet` on 'o0'; his cash is then gone and the loan is long overdue."""
+    ann, bob = _user(db, "ann"), _user(db, name)
+    mid, (yes, no) = market or _market(db, 2, 300)
+    lid = appmod.offer_loan(db, ann, "", 100, 0, 7)
     appmod.accept_loan(db, lid, bob)
-    appmod.repay_loan(db, lid, bob, 40)
-    assert score(db, bob) == 600                      # nothing until it's paid off
-    appmod.repay_loan(db, lid, bob)
-    assert score(db, bob) == 608                      # +1 per Ⓜ10
-    big = appmod.offer_loan(db, ann, "", 400, 0, 7)
-    appmod.accept_loan(db, big, bob)
-    appmod.repay_loan(db, big, bob)
-    assert score(db, bob) == 623                      # capped at +15
-    tiny = appmod.offer_loan(db, ann, "", 5, 0, 7)
-    appmod.accept_loan(db, tiny, bob)
-    appmod.repay_loan(db, tiny, bob)
-    assert score(db, bob) == 623                      # tiny loans can't farm credit
-    reasons = [r[0] for r in db.execute("SELECT reason FROM credit_events WHERE user_id = ? ORDER BY id", (bob,))]
-    assert len(reasons) == 2 and "on time" in reasons[0]
-
-
-def test_late_then_default_then_paid_off():
-    db = _fresh_db()
-    ann, bob = _user(db, "ann"), _user(db, "bob", balance=0)
-    lid = appmod.offer_loan(db, ann, "bob", 100, 10, 7)
-    appmod.accept_loan(db, lid, bob)
-    db.execute("UPDATE users SET balance = 0 WHERE id = ?", (bob,))    # spent it all
-    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(), lid))
-    appmod.process_loan_deadlines(db)
-    l = loan(db, lid)
-    assert l["late_at"] and l["penalty"] == 11 and l["owed"] == 121 and not l["defaulted_at"]
-    assert score(db, bob) == 560
-    appmod.process_loan_deadlines(db)                                  # only once
-    assert loan(db, lid)["owed"] == 121 and score(db, bob) == 560
-
-    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(24 * 8), lid))
-    appmod.process_loan_deadlines(db)
-    assert loan(db, lid)["defaulted_at"] and score(db, bob) == 460
-    assert appmod.has_defaulted_loan(db, bob)
-    # punishments: can't borrow or lend, shown on the leaderboard
-    other = appmod.offer_loan(db, ann, "", 10, 0, 1)
-    with pytest.raises(appmod.TradeError, match="defaulted"):
-        appmod.accept_loan(db, other, bob)
-    db.execute("UPDATE users SET balance = 50 WHERE id = ?", (bob,))
-    with pytest.raises(appmod.TradeError, match="defaulted"):
-        appmod.offer_loan(db, bob, "", 10, 0, 1)
-    appmod.process_loan_deadlines(db)                                   # the 50 is collected
-    assert bal(db, bob) == 0 and loan(db, lid)["owed"] == 71
-
-    db.execute("UPDATE users SET balance = 100 WHERE id = ?", (bob,))
-    appmod.process_loan_deadlines(db)
-    assert loan(db, lid)["status"] == "repaid" and bal(db, bob) == 29
-    assert score(db, bob) == 480 and not appmod.has_defaulted_loan(db, bob)
-    assert bal(db, ann) == 1000 - 100 - 10 + 121                         # lender got the late fee too
-
-
-def test_late_but_paid_before_default_earns_a_little_back():
-    db = _fresh_db()
-    ann, bob = _user(db, "ann"), _user(db, "bob")
-    lid = appmod.offer_loan(db, ann, "bob", 100, 0, 7)
-    appmod.accept_loan(db, lid, bob)
+    appmod.execute_trade(db, bob, mid, yes, "buy", bet)
     db.execute("UPDATE users SET balance = 0 WHERE id = ?", (bob,))
-    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(), lid))
-    appmod.process_loan_deadlines(db)
-    db.execute("UPDATE users SET balance = 500 WHERE id = ?", (bob,))
-    appmod.process_loan_deadlines(db)
-    assert loan(db, lid)["status"] == "repaid" and score(db, bob) == 600 - 40 + 5
+    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(72), lid))
+    return ann, bob, lid, mid, yes
 
 
-def test_credit_limits_and_minimum_scores():
+def shares(db, uid, outcome):
+    row = db.execute("SELECT shares FROM positions WHERE user_id = ? AND outcome_id = ?", (uid, outcome)).fetchone()
+    return row[0] if row else 0.0
+
+
+def test_borrowing_limit_and_loan_count():
     db = _fresh_db()
-    ann, bob = _user(db, "ann", balance=10000), _user(db, "bob")
-    # Fair (600): can owe up to Ⓜ500 in total, interest included
-    lid = appmod.offer_loan(db, ann, "", 460, 10, 7)
-    with pytest.raises(appmod.TradeError, match="at most Ⓜ500"):
-        appmod.accept_loan(db, lid, bob)                                # 506 owed
-    ok = appmod.offer_loan(db, ann, "", 300, 0, 7)
-    appmod.accept_loan(db, ok, bob)
-    more = appmod.offer_loan(db, ann, "", 250, 0, 7)
-    with pytest.raises(appmod.TradeError, match="already owe"):
-        appmod.accept_loan(db, more, bob)
-    # lender asks for 650+
-    picky = appmod.offer_loan(db, ann, "", 10, 0, 7, min_credit=650)
-    with pytest.raises(appmod.TradeError, match="at least 650"):
-        appmod.accept_loan(db, picky, bob)
-    with pytest.raises(appmod.TradeError, match="between"):
-        appmod.offer_loan(db, ann, "", 10, 0, 7, min_credit=900)
-    # Bad credit: no borrowing at all
-    db.execute("UPDATE users SET credit_score = 400 WHERE id = ?", (bob,))
-    small = appmod.offer_loan(db, ann, "", 5, 0, 7)
-    with pytest.raises(appmod.TradeError, match="too low"):
-        appmod.accept_loan(db, small, bob)
-    # never below 300 or above 850
-    with appmod.app.app_context():
-        appmod.adjust_credit(db, bob, -1000, "test")
-        assert score(db, bob) == 300
-        appmod.adjust_credit(db, bob, 5000, "test")
-        assert score(db, bob) == 850
+    ann, bob, rich = _user(db, "ann", balance=100000), _user(db, "bob"), _user(db, "rich", balance=10000)
+    first = appmod.offer_loan(db, ann, "", 400, 0, 7)
+    appmod.accept_loan(db, first, bob)
+    assert appmod.credit_limit(db, bob) == (500.0, 400.0)           # the floor
+    too_much = appmod.offer_loan(db, ann, "", 200, 0, 7)
+    with pytest.raises(appmod.TradeError, match="at most Ⓜ500.00"):
+        appmod.accept_loan(db, too_much, bob)
+    ok = appmod.offer_loan(db, ann, "", 100, 0, 7)
+    appmod.accept_loan(db, ok, bob)                                  # exactly the limit
+
+    appmod.accept_loan(db, too_much, rich)                           # half of 10,000 is well above the floor
+    mult = appmod.credit_limit_detail(db, rich)["multiplier"]        # the credit score scales the share-of-net-worth part
+    assert appmod.credit_limit(db, rich)[0] == pytest.approx(0.5 * (10200 - 200) * mult)
+
+    carl = _user(db, "carl", balance=100000)
+    for _ in range(appmod.LOAN_MAX_ACTIVE):
+        appmod.accept_loan(db, appmod.offer_loan(db, ann, "", 10, 0, 7), carl)
+    with pytest.raises(appmod.TradeError, match="at most 5 loans"):
+        appmod.accept_loan(db, appmod.offer_loan(db, ann, "", 10, 0, 7), carl)
 
 
-def test_credit_shows_on_loans_page_and_leaderboard():
+def test_the_limit_counts_bets_and_ignores_money_you_are_owed():
     db = _fresh_db()
-    c = appmod.app.test_client()
-    signup(c, "bob")
+    ann, bob = _user(db, "ann"), _user(db, "bob")
+    lid = appmod.offer_loan(db, ann, "", 1000, 100, 7)               # all her cash, at 100% interest
+    assert appmod.credit_limit(db, ann)[0] == 500.0                  # cash 0: the floor
+    appmod.accept_loan(db, lid, _user(db, "rich", balance=10000))
+    assert appmod.credit_limit(db, ann)[0] == 500.0                  # money owed to ann doesn't raise it...
+    assert appmod.net_worths(db)[ann] == pytest.approx(2000)         # ...although her net worth jumped
+    mid, (yes, no) = _market(db, 2, 300)                             # bets count, at their sell-now value
+    appmod.execute_trade(db, bob, mid, yes, "buy", 900)
+    worth_of_bets = sum(appmod.open_book_values(db)[bob].values())
+    assert appmod.credit_limit(db, bob)[0] == pytest.approx(max(500, 0.5 * (100 + worth_of_bets)))
+
+
+def test_cannot_lend_while_borrowing_or_borrow_with_offers_open():
+    db = _fresh_db()
+    ann, bob = _user(db, "ann"), _user(db, "bob")
+    lid = appmod.offer_loan(db, ann, "", 100, 0, 7)
+    appmod.accept_loan(db, lid, bob)
+    with pytest.raises(appmod.TradeError, match="Pay off what you've borrowed"):
+        appmod.offer_loan(db, bob, "ann", 50, 0, 7)                  # can't pass borrowed money to an alt
+    cat = _user(db, "cat")
+    offer = appmod.offer_loan(db, cat, "", 50, 0, 7)
+    other = appmod.offer_loan(db, ann, "cat", 20, 0, 7)
+    with pytest.raises(appmod.TradeError, match="Withdraw your loan offers"):
+        appmod.accept_loan(db, other, cat)
+    appmod.end_loan_offer(db, offer, cat, "cancelled")
+    appmod.accept_loan(db, other, cat)
+    appmod.repay_loan(db, lid, bob)
+    appmod.offer_loan(db, bob, "ann", 50, 0, 7)                      # paid off: allowed again
+
+
+def test_overdue_borrower_is_frozen_but_can_sell_and_repay():
+    db = _fresh_db()
+    ann, bob, lid, mid, yes = borrower_with_bet(db, 50)
+    assert appmod.overdue_block(db, bob)
+    with pytest.raises(appmod.TradeError, match="overdue"):
+        appmod.execute_trade(db, bob, mid, yes, "buy", 10)
+    with pytest.raises(appmod.TradeError, match="Pay off"):
+        appmod.offer_loan(db, bob, "ann", 1, 0, 7)
+    appmod.execute_trade(db, bob, mid, yes, "sell", shares(db, bob, yes))   # selling is fine...
+    appmod.collect_overdue_loans(db)                                         # ...and the money goes to the lender
+    l = loan(db, lid)
+    assert l["repaid"] > 40 and l["owed"] == pytest.approx(100 - l["repaid"])          # the sale's proceeds, all of it
+    assert bal(db, bob) == 0 and bal(db, ann) == pytest.approx(900 + l["repaid"])
+
+
+def test_overdue_borrowers_open_offers_are_withdrawn_and_collected():
+    db = _fresh_db()
+    ann, bob = _user(db, "ann"), _user(db, "bob")
+    offer = appmod.offer_loan(db, bob, "", 80, 0, 7)                 # bob lends first, then (legacy) owes ann
+    db.execute("INSERT INTO loans (lender_id, borrower_id, principal, rate, days, owed, status, due_at, created_at, "
+               "accepted_at) VALUES (?, ?, 100, 0, 7, 100, 'active', ?, ?, ?)",
+               (ann, bob, past(2), appmod.now_str(), appmod.now_str()))
+    appmod.collect_overdue_loans(db)
+    assert loan(db, offer)["status"] == "cancelled"
+    assert bal(db, ann) == 1100 and bal(db, bob) == 900              # the refunded 80 and 20 more of cash went to ann
+
+
+def test_overdue_borrower_cannot_create_or_propose_markets():
+    db = _fresh_db()
+    client = appmod.app.test_client()
+    signup(client, "bob")
     bob = db.execute("SELECT id FROM users WHERE username = 'bob'").fetchone()[0]
     ann = _user(db, "ann")
-    html = c.get("/loans").get_data(as_text=True)
-    assert "Credit score" in html and ">600<" in html and "Fair" in html
-    lid = appmod.offer_loan(db, ann, "bob", 100, 0, 7)
-    appmod.accept_loan(db, lid, bob)
-    db.execute("UPDATE users SET balance = 0 WHERE id = ?", (bob,))
-    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(24 * 8), lid))
-    html = c.get("/loans").get_data(as_text=True)                      # the request runs the deadlines
-    assert "defaulted on a loan" in html and "Defaulted on a loan from ann" in html and "late fee" in html
-    board = c.get("/leaderboard").get_data(as_text=True)
-    assert "defaulted</span>" in board and ">460<" in board
-    page = _post(c, "/loans/offer", amount="10", rate="0", days="3", min_credit="700")
-    assert "defaulted loan" in page.get_data(as_text=True)
+    lid = in_default_loan(db, ann, bob)
+    db.execute("UPDATE loans SET owed = 5000 WHERE id = ?", (lid,))                     # more than bob can ever cover
+    form = dict(question="Will it rain?", category="Other", closes_at="2099-01-01T12:00", kind="yesno", stake="20",
+                stake_pick="0", description="Resolves Yes if the airport records measurable rain on that day.")
+    assert "overdue loan" in _post(client, "/propose", **form).get_data(as_text=True)
+    assert db.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 0
+    db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (bob,))
+    assert "overdue loan" in _post(client, "/admin/markets", **form).get_data(as_text=True)
+    assert db.execute("SELECT COUNT(*) FROM markets").fetchone()[0] == 0
 
 
-def test_everyone_can_see_all_running_loans():
+def test_collection_needs_the_grace_period_and_an_open_market():
     db = _fresh_db()
-    ann, bob, cat, dan = _user(db, "ann"), _user(db, "bob"), _user(db, "cat"), _user(db, "dan")
-    on_time = appmod.offer_loan(db, ann, "bob", 100, 10, 7)
-    appmod.accept_loan(db, on_time, bob)
-    late = appmod.offer_loan(db, cat, "dan", 50, 0, 7)
-    appmod.accept_loan(db, late, dan)
-    db.execute("UPDATE users SET balance = 0 WHERE id = ?", (dan,))
-    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(24 * 8), late))
-    done = appmod.offer_loan(db, ann, "cat", 20, 0, 7)
-    appmod.accept_loan(db, done, cat)
-    appmod.repay_loan(db, done, cat)
-    appmod.offer_loan(db, ann, "", 30, 5, 3)                       # an open offer, not a running loan
+    ann, bob, lid, mid, yes = borrower_with_bet(db, 50)
+    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(24), lid))            # overdue but inside the grace
+    with pytest.raises(appmod.TradeError, match="after"):
+        appmod.seize_position(db, lid, ann, yes, "sell")
+    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(72), lid))
+    with pytest.raises(appmod.TradeError, match="isn't one of your"):
+        appmod.seize_position(db, lid, bob, yes, "sell")                               # only the lender can
+    db.execute("UPDATE markets SET closes_at = ? WHERE id = ?", (past(1), mid))        # betting has closed
+    with pytest.raises(appmod.TradeError, match="still open"):
+        appmod.seize_position(db, lid, ann, yes, "sell")
+    assert shares(db, bob, yes) > 0 and loan(db, lid)["status"] == "active"
 
-    r = appmod.app.test_client().get("/loans/all")                  # logged out
+
+def test_force_sell_takes_only_what_covers_the_debt():
+    db = _fresh_db()
+    ann, bob, lid, mid, yes = borrower_with_bet(db, 300)
+    held = shares(db, bob, yes)
+    price_before = appmod.lmsr.prices([o["shares"] for o in appmod.get_outcomes(db, mid)], 300)[0]
+    msg = appmod.seize_position(db, lid, ann, yes, "sell")
+    left = shares(db, bob, yes)
+    assert 0 < left < held                                                              # bob keeps the rest
+    assert loan(db, lid)["status"] == "repaid" and loan(db, lid)["owed"] == 0
+    assert bal(db, ann) == pytest.approx(1000)                                          # 900 + the 100 owed
+    assert 0 <= bal(db, bob) < 1                                                        # at most rounding is left
+    price_after = appmod.lmsr.prices([o["shares"] for o in appmod.get_outcomes(db, mid)], 300)[0]
+    assert price_after < price_before and "Sold" in msg
+    sold = db.execute("SELECT shares, amount FROM trades WHERE user_id = ? ORDER BY id DESC LIMIT 1", (bob,)).fetchone()
+    assert sold["shares"] == pytest.approx(-(held - left)) and sold["amount"] < 0
+
+
+def test_force_sell_of_a_small_position_sells_everything_and_leaves_the_rest_owed():
+    db = _fresh_db()
+    ann, bob, lid, mid, yes = borrower_with_bet(db, 20)
+    appmod.seize_position(db, lid, ann, yes, "sell")
+    assert shares(db, bob, yes) == 0
+    l = loan(db, lid)
+    assert l["status"] == "active" and 70 < l["owed"] < 100 and l["repaid"] > 0
+    assert bal(db, ann) == pytest.approx(900 + l["repaid"])
+    assert not appmod.collectable_positions(db, l, ann)                                  # nothing left to collect
+
+
+def test_take_over_moves_shares_and_reduces_the_debt():
+    db = _fresh_db()
+    ann, bob, lid, mid, yes = borrower_with_bet(db, 300)
+    held = shares(db, bob, yes)
+    totals = [o["shares"] for o in appmod.get_outcomes(db, mid)]
+    pot = db.execute("SELECT SUM(amount) FROM trades WHERE market_id = ?", (mid,)).fetchone()[0]
+    cash = bal(db, ann)
+    appmod.seize_position(db, lid, ann, yes, "take")
+    taken = shares(db, ann, yes)
+    assert 0 < taken < held and shares(db, bob, yes) == pytest.approx(held - taken)
+    assert [o["shares"] for o in appmod.get_outcomes(db, mid)] == pytest.approx(totals)   # nothing was bought or sold
+    assert loan(db, lid)["status"] == "repaid"
+    assert bal(db, ann) == cash                                                            # no cash moved
+    assert db.execute("SELECT SUM(amount) FROM trades WHERE market_id = ?", (mid,)).fetchone()[0] == pytest.approx(pot)
+    assert [r[0] for r in db.execute("SELECT via FROM trades WHERE via IS NOT NULL")] == ["loan", "loan"]
+    # the market feed names it
+    html = appmod.app.test_client().get(f"/market/{mid}").get_data(as_text=True)
+    assert "took over" in html and "handed over" in html
+
+
+def test_take_over_pays_the_entry_fee_and_survives_a_cancelled_market():
+    db = _fresh_db()
+    creator = _user(db, "maker")
+    closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+    mid = appmod.create_market(db, "Fee?", "", "Other", closes, ["a", "b"], 300, created_by=creator)
+    yes = appmod.get_outcomes(db, mid)[0]["id"]
+    ann, bob, lid, mid, yes = borrower_with_bet(db, 300, market=(mid, [yes, 0]))
+    cash, maker = bal(db, ann), bal(db, creator)
+    appmod.seize_position(db, lid, ann, yes, "take")
+    assert bal(db, ann) == pytest.approx(cash - appmod.ENTRY_FEE) and bal(db, creator) == pytest.approx(maker + appmod.ENTRY_FEE)
+    assert db.execute("SELECT 1 FROM market_entries WHERE market_id = ? AND user_id = ?", (mid, ann)).fetchone()
+    appmod.cancel_market(db, mid)
+    # ann gets back what the shares counted for (the debt she wrote off) and her entry fee; bob gets back the rest
+    assert bal(db, ann) == pytest.approx(cash + 100, abs=0.5)
+    assert bal(db, bob) == pytest.approx(300 - 100 + appmod.ENTRY_FEE, abs=0.5)
+
+
+def test_take_over_is_refused_when_late_blocked_or_unaffordable_but_force_sell_works():
+    db = _fresh_db()
+    ann, bob, lid, mid, yes = borrower_with_bet(db, 300)
+    db.execute("UPDATE markets SET closes_at = ? WHERE id = ?",
+               ((datetime.now() + timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S"), mid))
+    with pytest.raises(appmod.TradeError, match="about to close"):
+        appmod.seize_position(db, lid, ann, yes, "take")             # the late-trading fee would apply
+    db.execute("UPDATE markets SET closes_at = ? WHERE id = ?",
+               ((datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S"), mid))
+    db.execute("INSERT INTO market_blocks (market_id, user_id, created_at) VALUES (?, ?, ?)", (mid, ann, appmod.now_str()))
+    with pytest.raises(appmod.TradeError, match="blocked"):
+        appmod.seize_position(db, lid, ann, yes, "take")
+    assert shares(db, ann, yes) == 0 and loan(db, lid)["status"] == "active"
+    appmod.seize_position(db, lid, ann, yes, "sell")                 # a blocked lender can still force a sale
+    assert loan(db, lid)["status"] == "repaid"
+
+
+def test_cash_is_collected_before_bets_and_a_cleared_loan_takes_nothing():
+    db = _fresh_db()
+    ann, bob, lid, mid, yes = borrower_with_bet(db, 300)
+    db.execute("UPDATE users SET balance = 500 WHERE id = ?", (bob,))
+    held = shares(db, bob, yes)
+    msg = appmod.seize_position(db, lid, ann, yes, "sell")
+    assert "cash already covered" in msg and shares(db, bob, yes) == held
+    assert loan(db, lid)["status"] == "repaid" and bal(db, bob) == 400
+
+
+def test_loans_already_overdue_when_the_rules_shipped_get_a_fresh_grace_period():
+    db = _fresh_db()
+    assert appmod.get_setting(db, "loans_v2_at") == "1970-01-01 00:00:00"             # a new database has none
+    ann, bob, lid, mid, yes = borrower_with_bet(db, 300)
+    db.execute("DELETE FROM site_settings WHERE key = 'loans_v2_at'")
+    appmod.mark_loan_rules_start(db)                                                   # an upgrade with a running loan
+    start = appmod.get_setting(db, "loans_v2_at")
+    assert start > "2000" and start <= appmod.now_str()
+    with pytest.raises(appmod.TradeError, match="after"):
+        appmod.seize_position(db, lid, ann, yes, "sell")
+    assert appmod.loan_grace_end(db, loan(db, lid)) > appmod.now_str()
+    assert not appmod.in_default(db, loan(db, lid))
+
+
+def test_borrower_record_counts_on_time_late_and_default():
+    db = _fresh_db()
+    ann, bob = _user(db, "ann"), _user(db, "bob")
+    a = appmod.offer_loan(db, ann, "", 10, 0, 7)
+    appmod.accept_loan(db, a, bob)
+    appmod.repay_loan(db, a, bob)
+    b = appmod.offer_loan(db, ann, "", 10, 0, 7)
+    appmod.accept_loan(db, b, bob)
+    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(5), b))
+    appmod.repay_loan(db, b, bob)                                                      # repaid after its due date
+    c = appmod.offer_loan(db, ann, "", 10, 0, 7)
+    appmod.accept_loan(db, c, bob)
+    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(72), c))
+    assert appmod.borrower_record(db, bob) == {"ontime": 1, "late": 1, "default": 1}
+
+
+def test_collect_route_and_loans_page():
+    db = _fresh_db()
+    client = appmod.app.test_client()
+    signup(client, "ann")
+    ann = db.execute("SELECT id FROM users WHERE username = 'ann'").fetchone()[0]
+    bob = _user(db, "bob")
+    mid, (yes, no) = _market(db, 2, 300)
+    lid = appmod.offer_loan(db, ann, "", 100, 0, 7)
+    appmod.accept_loan(db, lid, bob)
+    appmod.execute_trade(db, bob, mid, yes, "buy", 300)
+    db.execute("UPDATE users SET balance = 0 WHERE id = ?", (bob,))
+    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(72), lid))
+    html = client.get("/loans").get_data(as_text=True)
+    assert "Collect from bob" in html and "Force sell" in html and "Take over" in html and "0 on time" in html
+    assert "Pick a bet" in _post(client, f"/loans/{lid}/collect", mode="sell").get_data(as_text=True)
+    assert "Choose force sell" in _post(client, f"/loans/{lid}/collect", outcome_id=str(yes), mode="x").get_data(as_text=True)
+    assert "Sold" in _post(client, f"/loans/{lid}/collect", outcome_id=str(yes), mode="sell").get_data(as_text=True)
+    assert loan(db, lid)["status"] == "repaid"
+
+
+def test_admin_loan_tools_forgive_extend_cancel():
+    db = _fresh_db()
+    admin, plain = appmod.app.test_client(), appmod.app.test_client()
+    signup(admin, "mod")
+    signup(plain, "pat")
+    db.execute("UPDATE users SET is_admin = 1 WHERE username = 'mod'")
+    ann, bob = _user(db, "ann"), _user(db, "bob")
+    lid = in_default_loan(db, ann, bob, amount=100)
+    db.execute("UPDATE users SET balance = 0 WHERE id = ?", (bob,))                     # or any request would collect it
+    offer = appmod.offer_loan(db, ann, "", 30, 0, 7)
+    assert "in default" in admin.get("/admin/loans").get_data(as_text=True)
+    assert plain.get("/admin/loans").status_code == 403
+    assert _post(plain, f"/admin/loans/{lid}/forgive").status_code == 403
+
+    _post(admin, f"/admin/loans/{lid}/extend", days="400")
+    assert loan(db, lid)["due_at"] < appmod.now_str()                                   # out of range: unchanged
+    _post(admin, f"/admin/loans/{lid}/extend", days="10")
+    assert loan(db, lid)["due_at"] > appmod.now_str() and not appmod.has_overdue_loan(db, bob)
+
+    assert "Only a running loan" in _post(admin, f"/admin/loans/{offer}/forgive").get_data(as_text=True)
+    _post(admin, f"/admin/loans/{offer}/cancel")
+    assert loan(db, offer)["status"] == "cancelled" and bal(db, ann) == 900
+    _post(admin, f"/admin/loans/{lid}/forgive")
+    assert loan(db, lid)["status"] == "forgiven"
+    assert appmod.net_worths(db)[ann] == pytest.approx(900) and appmod.net_worths(db)[bob] == pytest.approx(0)
+    assert "open any more" in _post(admin, f"/admin/loans/{lid}/forgive").get_data(as_text=True)
+    actions = [r[0] for r in db.execute("SELECT action FROM audit_log ORDER BY id")]
+    assert actions == ["loan.extend", "loan.cancel", "loan.forgive"]
+
+
+def test_borrower_sees_the_overdue_banner_and_the_borrowing_room():
+    db = _fresh_db()
+    client = appmod.app.test_client()
+    signup(client, "bob")
+    bob = db.execute("SELECT id FROM users WHERE username = 'bob'").fetchone()[0]
+    ann = _user(db, "ann")
+    html = client.get("/loans").get_data(as_text=True)
+    assert "You can still borrow" in html and "Ⓜ500.00" in html and "Overdue loan." not in html
+    lid = in_default_loan(db, ann, bob, amount=100)
+    db.execute("UPDATE loans SET owed = 5000 WHERE id = ?", (lid,))                      # keeps the loan open after collection
+    html = client.get("/loans").get_data(as_text=True)
+    assert "Overdue loan." in html and "in default" in html and "can sell or take over your bets" in html
+    quote = appmod.app.test_client()
+    with quote.session_transaction() as s:
+        s["uid"] = bob
+    mid, (yes, no) = _market(db, 2, 300)
+    db.execute("UPDATE users SET balance = 50 WHERE id = ?", (bob,))
+    url = f"/api/quote?market={mid}&outcome={yes}&action=buy&value=10"
+    assert "overdue loan" in quote.get(url).get_json()["error"]                           # the preview agrees with the trade
+
+
+def test_overdue_proposer_gets_the_opening_bet_refunded_not_an_error():
+    db = _fresh_db()
+    admin, sam = appmod.app.test_client(), appmod.app.test_client()
+    signup(admin, "headadmin")
+    signup(sam, "sam")
+    db.execute("UPDATE users SET is_admin = 1 WHERE username = 'headadmin'")
+    closes = (datetime.now() + timedelta(days=5)).strftime("%Y-%m-%dT%H:%M")
+    _post(sam, "/propose", stake="10", stake_pick="0", question="Will there be a band?",
+          description="Resolves YES if a live band plays.", outcomes="Yes\nNo", category="Events", closes_at=closes)
+    pid = db.execute("SELECT id FROM proposals").fetchone()[0]
+    sam_id = db.execute("SELECT id FROM users WHERE username = 'sam'").fetchone()[0]
+    ann = _user(db, "ann")
+    lid = in_default_loan(db, ann, sam_id)                                               # sam falls into default meanwhile
+    db.execute("UPDATE loans SET owed = 5000 WHERE id = ?", (lid,))
+    r = _post(admin, f"/admin/proposals/{pid}", decision="approve", question="Will there be a band?",
+              description="Resolves YES if a live band plays.", outcomes="Yes\nNo", category="Events",
+              closes_at=closes, liquidity="high", review_note="")
     html = r.get_data(as_text=True)
-    assert r.status_code == 200
-    assert "ann" in html and "bob" in html and "Ⓜ110.00" in html
-    assert "defaulted</span>" in html and "Ⓜ55.00" in html and "late fee" in html
-    assert html.index("dan") < html.index("bob")                    # defaulted loans first
-    assert "Ⓜ20.00" not in html                                     # paid-off loans aren't listed
-    assert "Plus 1 offer" in html and "Running loans" in html
+    assert "Approved!" in html and "couldn&#39;t be placed" in html and "overdue loan" in html
+    assert db.execute("SELECT status FROM proposals WHERE id = ?", (pid,)).fetchone()[0] == "approved"
+    assert db.execute("SELECT COUNT(*) FROM positions WHERE user_id = ?", (sam_id,)).fetchone()[0] == 0
+    assert db.execute("SELECT COUNT(*) FROM markets").fetchone()[0] == 1
+
+
+def test_resolving_after_a_take_over_pays_the_same_total_split_by_shares():
+    def scenario(take):
+        db = _fresh_db()
+        ann, bob, lid, mid, yes = borrower_with_bet(db, 300)
+        other = _user(db, "other")
+        appmod.execute_trade(db, other, mid, yes + 1, "buy", 100)                       # someone on the losing side
+        held = shares(db, bob, yes)
+        if take:
+            appmod.seize_position(db, lid, ann, yes, "take")
+        n = shares(db, ann, yes)
+        before = (bal(db, ann), bal(db, bob))
+        appmod.resolve_market(db, mid, yes)
+        paid_ann, paid_bob = bal(db, ann) - before[0], bal(db, bob) - before[1]
+        return held, n, paid_ann, paid_bob
+
+    held, _, _, control = scenario(take=False)
+    held2, n, paid_ann, paid_bob = scenario(take=True)
+    assert held2 == pytest.approx(held) and 0 < n < held
+    assert paid_ann == pytest.approx(n, abs=0.02) and paid_bob == pytest.approx(held - n, abs=0.02)                                       # each is paid for their own shares
+    assert paid_ann + paid_bob == pytest.approx(control, abs=0.03)                        # the pot is split, not changed
+    assert paid_ann / paid_bob == pytest.approx(n / (held - n), rel=0.02)                 # leftover follows the shares
+
+
+def test_take_over_needs_cash_for_the_entry_fee():
+    db = _fresh_db()
+    creator = _user(db, "maker")
+    closes = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+    mid = appmod.create_market(db, "Fee?", "", "Other", closes, ["a", "b"], 300, created_by=creator)
+    yes = appmod.get_outcomes(db, mid)[0]["id"]
+    ann, bob, lid, mid, yes = borrower_with_bet(db, 300, market=(mid, [yes, 0]))
+    db.execute("UPDATE users SET balance = 5 WHERE id = ?", (ann,))
+    with pytest.raises(appmod.TradeError, match="entry fee"):
+        appmod.seize_position(db, lid, ann, yes, "take")
+    assert shares(db, ann, yes) == 0 and loan(db, lid)["status"] == "active" and bal(db, ann) == 5

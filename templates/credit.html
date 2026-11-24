@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% from "_credit.html" import pill, scale %}
+{% block title %}{{ 'Your credit' if mine else target.username ~ "'s credit" }} · MAMS Prediction Market{% endblock %}
+{% block content %}
+<div class="activity-head">
+  <div>
+    <h1>{{ 'Your credit score' if mine else target.username ~ "'s credit score" }}</h1>
+    <p class="muted">A score from 300 to 850 that comes from how loans have been repaid, how much of the limit is in use,
+      how long someone has been borrowing, and how steady their balance is. It sets how much they can borrow and lets
+      lenders decide who to trust.</p>
+  </div>
+  <div class="row-actions">
+    <a class="btn btn-small btn-ghost" href="{{ url_for('loans') }}">← Loans</a>
+    <a class="btn btn-small btn-ghost" href="{{ url_for('loan_borrowers') }}">Browse borrowers</a>
+    {% if not mine %}<a class="btn btn-small" href="{{ url_for('loans', to=target.username) }}#lend">Offer a loan</a>{% endif %}
+  </div>
+</div>
+
+{% if not c %}
+<div class="card"><p class="muted">Admin and owner accounts aren't scored.</p></div>
+{% else %}
+<div class="card">
+  <div class="credit-hero">
+    <div><div class="big">{{ c.score }}</div><span class="credit credit-{{ c.tier|slug }}">{{ c.tier }}</span>
+      {% if c.thin %}<span class="tag" title="No loans judged yet, so the score stays in a middle band until there's a record">New borrower</span>{% endif %}
+      {% if c.frozen %}<span class="status status-rejected">Borrowing paused</span>{% endif %}</div>
+    <div style="flex:1; min-width: 220px">{{ scale(c.score, CREDIT_MIN, CREDIT_MAX) }}</div>
+  </div>
+  <div class="kpis" style="margin: 18px 0 0">
+    {% if full %}
+    <div class="kpi"><span>Borrowing limit</span><strong>Ⓜ{{ detail.limit|money }}</strong>
+      <small class="muted">{% if detail.override is not none %}fixed by an admin{% else %}from your score and what you own: ×{{ '%g'|format(detail.multiplier) }}{% endif %}</small></div>
+    <div class="kpi"><span>Owes now</span><strong class="{{ 'down' if detail.owe }}">Ⓜ{{ detail.owe|money }}</strong>
+      <small class="muted">{{ (c.utilisation * 100)|round|int }}% of the base limit</small></div>
+    {% endif %}
+    <div class="kpi"><span>Loan record</span><strong>{{ c.ontime }} · {{ c.late }} · {{ c.defaulted }}</strong>
+      <small class="muted">on time · late · in default</small></div>
+  </div>
+  {% if c.caps and full %}<ul class="reason-list" style="margin-top: 12px">{% for text in c.caps %}<li><span class="pts down">cap</span><span>{{ text }}</span></li>{% endfor %}</ul>{% endif %}
+  {% if c.redacted and full %}<p class="muted small">Some account checks also apply to this score.</p>{% endif %}
+</div>
+
+{% if points %}
+<div class="card">
+  <h2>Last 90 days</h2>
+  <svg class="credit-line" viewBox="0 0 240 56" preserveAspectRatio="none" role="img" aria-label="Score history"><polyline points="{{ points }}"/></svg>
+  <p class="muted small">{{ spark_n }} change{{ '' if spark_n == 1 else 's' }} recorded.
+    {% if spark_n > 1 %}From {{ spark_first }} to {{ spark_last }}.{% endif %}</p>
+  {% if full and history %}
+  <div class="table-scroll"><table class="table stack-mobile">
+    <thead><tr><th>When</th><th class="num">Score</th><th>Why it was re-scored</th></tr></thead>
+    <tbody>{% for h in history %}<tr>
+      <td data-label="When" class="muted small">{{ h.created_at|ago }}</td>
+      <td class="num" data-label="Score"><span class="credit credit-{{ h.tier|slug }}">{{ h.score }}</span></td>
+      <td data-label="Why">{% if h.reason in ('risk status', 'review decision') and not viewer_admin %}Account review{% else %}{{ h.reason or '—' }}{% endif %}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if full %}
+<div class="card">
+  <h2>What goes into it</h2>
+  {% for f in c.factors %}
+  <div class="factor">
+    <div><strong>{{ f.label }}</strong> <span class="muted small">{{ (f.weight * 100)|round|int }}%</span></div>
+    <div class="factor-bar" role="img" aria-label="{{ f.label }}: {{ (f.value * 100)|round|int }} out of 100"><b style="width: {{ (f.value * 100)|round|int }}%"></b></div>
+    <div class="factor-note muted small">{{ f.detail }}. {{ f.hint }}</div>
+  </div>
+  {% endfor %}
+</div>
+
+{% if c.reasons %}
+<div class="card">
+  <h2>What's moving it most</h2>
+  <ul class="reason-list">
+    {% for pts, text in c.reasons %}<li><span class="pts {{ 'up' if pts > 0 else 'down' }}">{{ '+' if pts > 0 }}{{ pts }}</span><span>{{ text }}</span></li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+{% endif %}
+
+{% if loans and full %}
+<div class="card">
+  <h2>Loans taken</h2>
+  <div class="table-scroll"><table class="table stack-mobile">
+    <thead><tr><th>From</th><th class="num">Amount</th><th>Status</th><th>Due</th></tr></thead>
+    <tbody>{% for l in loans %}
+      <tr><td data-label="From">{{ l.lender }}</td><td class="num" data-label="Amount">Ⓜ{{ l.principal|money }} <span class="muted small">at {{ '%g'|format(l.rate) }}%</span></td>
+        <td data-label="Status">{% if l.status == 'repaid' %}<span class="status status-approved">{{ 'paid on time' if l.closed_at <= l.due_at else 'paid late' }}</span>{% elif l.status == 'forgiven' %}<span class="status status-closed">forgiven</span>{% elif l.due_at <= now %}<span class="status status-rejected">overdue</span>{% else %}<span class="status status-pending">running</span>{% endif %}</td>
+        <td data-label="Due" class="muted small">{{ l.due_at|when }}</td></tr>
+    {% endfor %}</tbody>
+  </table></div>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

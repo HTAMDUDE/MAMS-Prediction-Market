@@ -146,8 +146,9 @@
             <span><strong>{{ t.username }}</strong>
               {% if t.is_admin %}<span class="tag pill" title="Admins can see who is trading and resolve markets">admin</span>{% endif %}
               {% if t.user_id == b.m.created_by %}<span class="tag pill" title="Wrote this market">creator</span>{% endif %}
-              {% if t.shares > 0 %}<span class="buy">bought</span>{% else %}<span class="sell">sold</span>{% endif %}
-              {{ t.shares|abs|money }} × {{ t.label }} <span class="trade-when">· {{ t.created_at|ago }}</span></span>
+              {% if t.via == 'loan' %}{% if t.shares > 0 %}<span class="buy">took over</span>{% else %}<span class="sell">handed over</span>{% endif %}
+              {% elif t.shares > 0 %}<span class="buy">bought</span>{% else %}<span class="sell">sold</span>{% endif %}
+              {{ t.shares|abs|money }} × {{ t.label }} <span class="trade-when">· {% if t.via == 'loan' %}overdue loan · {% endif %}{{ t.created_at|ago }}</span></span>
             <span class="trade-amt">Ⓜ{{ t.amount|abs|money }}</span>
           </li>
         {% endfor %}
