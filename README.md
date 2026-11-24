@@ -97,7 +97,9 @@ Other people on the same network can open `http://<your-computer's-IP>:8000`.
 
 **The owner is the account named `Kaushik`** (`OWNER_USERNAME` in `app.py`; override with `MAMS_OWNER`, or set it
 empty to make the first account the owner). To make specific usernames admins when they sign up, set
-`MAMS_ADMINS=alice,bob`.
+`MAMS_ADMINS=alice,bob`. Recommended: also set `MAMS_OWNER_EMAIL` to the owner's email. The owner's account then only
+gets owner (and admin) powers once it has confirmed that address, so if the database is ever reset, whoever signs up
+first as `Kaushik` doesn't become owner.
 
 ### Accounts and email
 
@@ -353,7 +355,10 @@ Starting balance, daily bonus and the category list are constants at the top of 
   origin to `CSP` in `app.py`; new inline scripts need the nonce.
 - Alt detection and holding suspicious sign-ups: see [Alt detection & risk](#alt-detection--risk). One email, one
   account (normalized, disposable inboxes refused); sign-ups are also limited per device.
-- Log-in, sign-up, email codes, comments and disputes are rate limited. `next=` links only go to pages on this site.
+- Log-in, sign-up, email codes, comments and disputes are rate limited, and so are trades (`TRADE_LIMITS`: 60 a
+  minute, 600 an hour per player) and market proposals (`PROPOSE_LIMIT`). The heavy read-only pages (leaderboard,
+  all loans, credit pages, borrower search) answer 429 past `HEAVY_PAGE_LIMITS` (per account, or per IP when logged
+  out). Net worths are cached until a trade, balance or loan changes (or `NET_WORTH_TTL` passes). `next=` links only go to pages on this site.
 - Form posts over 256 KB are refused. Passwords are 6–128 characters.
 - `instance/` (database, `secret_key`, `people.csv`) and `.env` are never committed; `secret_key` and `people.csv`
   are readable only by the server's account.

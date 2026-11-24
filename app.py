@@ -95,6 +95,9 @@ LOAN_MAX_ACTIVE = 5         # running loans as a borrower
 LOAN_GRACE_DAYS = 2         # after the due date, before lenders may sell or take over the borrower's bets
 LOAN_LATE_FEE = 0.10        # added once to what's still owed when a loan goes past its due date; goes to the lender
 OWNER_USERNAME = os.environ.get("MAMS_OWNER", "Kaushik").strip()
+# Optional. When set, the owner account only gets owner powers once it has confirmed this email address, so if the
+# database is ever reset, whoever signs up first with the owner's username doesn't become owner.
+OWNER_EMAIL = os.environ.get("MAMS_OWNER_EMAIL", "").strip()
 LOGIN_CODE_LIFETIME = 10 * 60
 LOGIN_CODE_RESEND_DELAY = 60  # at most one code a minute per account, and per email address
 EMAIL_CLAIM_HOURS = 24  # an unconfirmed sign-up holds its email this long, so nobody else can sign up with it
@@ -146,6 +149,13 @@ def _prune_hits(now):
         by_age = sorted(_hits, key=lambda k: (len(_hits[k]), _hits[k][-1]))
         for key in by_age[:len(_hits) - int(HITS_MAX_KEYS * 0.8)]:
             del _hits[key]
+
+
+TRADE_LIMITS = ((60, 60), (600, 3600))  # trades per user: 60 a minute, 600 an hour
+PROPOSE_LIMIT = (10, 3600)              # market proposals per user per hour
+# heavy read-only pages (leaderboard, all loans, credit pages): per account when logged in, per IP otherwise. The
+# per-IP figure is higher because a whole school can share one address.
+HEAVY_PAGE_LIMITS = {"user": (60, 60), "ip": (240, 60)}
 
 
 def rate_limited(key, limit, window_seconds):
@@ -767,7 +777,27 @@ def open_book_values(db):
     return result
 
 
+NET_WORTH_TTL = 30  # seconds; the cache is also dropped as soon as any trade, balance or loan changes
+_net_worth_cache = {}
+
+
 def net_worths(db):
+    """Every player's net worth. Valuing every open bet is the slowest thing the site does, so the result is reused
+    until something that affects it changes (checked with a few cheap aggregates) or NET_WORTH_TTL passes."""
+    version = (DB_PATH,) + tuple(db.execute(
+        "SELECT (SELECT MAX(id) FROM trades), (SELECT MAX(id) FROM activity), "
+        "(SELECT COUNT(*) FROM users), (SELECT ROUND(SUM(balance), 2) FROM users), "
+        "(SELECT COUNT(*) FROM loans), (SELECT ROUND(SUM(owed + principal), 2) FROM loans "
+        "WHERE status IN ('offered', 'active')), (SELECT COUNT(*) FROM markets WHERE status = 'open')").fetchone())
+    hit = _net_worth_cache.get("v")
+    if hit and hit[0] == version and time.time() - hit[1] < NET_WORTH_TTL:
+        return dict(hit[2])
+    worth = _compute_net_worths(db)
+    _net_worth_cache["v"] = (version, time.time(), worth)
+    return dict(worth)
+
+
+def _compute_net_worths(db):
     worth = {u["id"]: u["balance"] for u in db.execute("SELECT id, balance FROM users")}
     for uid, per_market in open_book_values(db).items():
         worth[uid] += sum(per_market.values())
@@ -1555,9 +1585,18 @@ def login_required(view):
     return wrapped
 
 
+def owner_email_ok(email, verified):
+    """With MAMS_OWNER_EMAIL set, the owner's account must have confirmed that address (any alias of it)."""
+    if not OWNER_EMAIL:
+        return True
+    return bool(verified and email) and security.normalize_email(email)[1] == security.normalize_email(OWNER_EMAIL)[1]
+
+
 def owner_id(db):
     if OWNER_USERNAME:
-        row = db.execute("SELECT id FROM users WHERE username = ?", (OWNER_USERNAME,)).fetchone()
+        row = db.execute("SELECT id, email, email_verified FROM users WHERE username = ?", (OWNER_USERNAME,)).fetchone()
+        if row is not None and not owner_email_ok(row["email"], row["email_verified"]):
+            return None
     else:
         row = db.execute("SELECT MIN(id) AS id FROM users").fetchone()
     return row["id"] if row else None
@@ -1680,6 +1719,22 @@ def log_audit(action, target_type, target_id, label="", detail="", system=False)
 def market_label(db, mid):
     row = db.execute("SELECT question FROM markets WHERE id = ?", (mid,)).fetchone()
     return row["question"] if row else f"Market #{mid}"
+
+
+def throttled(view):
+    """For expensive pages anyone can load: answer 429 instead of doing the work when one account (or, logged out,
+    one IP) asks too often."""
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if g.user is not None:
+            key, (limit, window) = ("heavy-user", g.user["id"]), HEAVY_PAGE_LIMITS["user"]
+        else:
+            key, (limit, window) = ("heavy-ip", request.remote_addr), HEAVY_PAGE_LIMITS["ip"]
+        if rate_limited(key, limit, window):
+            log_event("page_throttled", detail=f"{request.method} {request.path}")
+            return "Too many requests. Wait a minute and try again.", 429, {"Retry-After": str(window)}
+        return view(*args, **kwargs)
+    return wrapped
 
 
 def admin_required(view):
@@ -1931,7 +1986,9 @@ def register():
         else:
             db = get_db()
             first_user = db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
-            is_admin = int((first_user and not OWNER_USERNAME) or username.lower() == OWNER_USERNAME.lower()
+            # with MAMS_OWNER_EMAIL set, the owner's name only becomes admin once that email is confirmed
+            is_admin = int((first_user and not OWNER_USERNAME)
+                           or (username.lower() == OWNER_USERNAME.lower() and not OWNER_EMAIL)
                            or username.lower() in ADMIN_USERNAMES)
             try:
                 db.execute("BEGIN IMMEDIATE")
@@ -2487,6 +2544,10 @@ def trade(mid):
             min_out = None
     except ValueError:
         min_out = None
+    if any(rate_limited(("trade", g.user["id"], window), limit, window) for limit, window in TRADE_LIMITS):
+        log_event("trade_throttled", detail=f"market {mid}")
+        flash("You're trading too fast. Wait a minute and try again.", "error")
+        return redirect(url_for("market", mid=mid))
     try:
         db = get_db()
         action = request.form.get("action")
@@ -2710,6 +2771,7 @@ def balance_history():
 
 
 @app.route("/leaderboard")
+@throttled
 def leaderboard():
     db = get_db()
     worth = net_worths(db)
@@ -3352,6 +3414,7 @@ def _min_score_from_form(db):
 
 
 @app.route("/loans/all")
+@throttled
 def all_loans():
     """Every loan that's running right now, for anyone to see (logged in or not): who lent to whom, at what rate, what's
     still owed, the borrower's credit score, and whether it's on time, overdue or in default. Most urgent first. It only
@@ -3523,6 +3586,7 @@ def _credit_page(db, target, full):
 
 @app.get("/credit")
 @login_required
+@throttled
 def my_credit():
     db = get_db()
     if g.user["is_admin"] or g.user["id"] == g.owner_id:
@@ -3532,6 +3596,7 @@ def my_credit():
 
 @app.get("/credit/<username>")
 @login_required
+@throttled
 def user_credit(username):
     db = get_db()
     target = db.execute("SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username,)).fetchone()
@@ -3557,6 +3622,7 @@ def _int_arg(name, lo, hi):
 
 @app.get("/loans/borrowers")
 @login_required
+@throttled
 def loan_borrowers():
     """Lenders browse players by credit score: filter by score range or tier, by whether they've repaid before and
     whether they're clear of overdue loans, and sort by score, on-time record or recent borrowing."""
@@ -3823,6 +3889,8 @@ def propose():
         fields, error = read_market_form(request.form)
         if pending >= MAX_PENDING_PROPOSALS:
             error = f"You already have {MAX_PENDING_PROPOSALS} proposals waiting. Wait for an admin to review them."
+        elif rate_limited(("propose", g.user["id"]), *PROPOSE_LIMIT):
+            error = "You've sent a lot of proposals in the last hour. Try again later."
         if not error:
             pick, stake, error = read_stake(request.form, fields["labels"])
         if not error:
