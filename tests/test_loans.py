@@ -105,7 +105,8 @@ def test_overdue_loans_are_collected_from_cash_including_later_money():
     db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(), lid))
     assert appmod.has_overdue_loan(db, bob)
     appmod.collect_overdue_loans(db)
-    assert bal(db, bob) == 0 and loan(db, lid)["owed"] == 90 and bal(db, ann) == 930
+    # 120 owed + 12 late fee, minus the 30 taken
+    assert bal(db, bob) == 0 and loan(db, lid)["owed"] == 102 and bal(db, ann) == 930
 
     other = appmod.offer_loan(db, ann, "", 10, 0, 1)
     with pytest.raises(appmod.TradeError, match="overdue"):
@@ -113,7 +114,7 @@ def test_overdue_loans_are_collected_from_cash_including_later_money():
 
     db.execute("UPDATE users SET balance = 200 WHERE id = ?", (bob,))  # e.g. a payout later
     appmod.collect_overdue_loans(db)
-    assert loan(db, lid)["status"] == "repaid" and bal(db, bob) == 110 and bal(db, ann) == 1010
+    assert loan(db, lid)["status"] == "repaid" and bal(db, bob) == 98 and bal(db, ann) == 1022  # 1000 - 100 lent - 10 held in an offer + 132
     assert not appmod.has_overdue_loan(db, bob)
     detail = db.execute("SELECT detail FROM activity WHERE user_id = ? ORDER BY id DESC LIMIT 1", (bob,)).fetchone()[0]
     assert "Overdue loan collected" in detail and "paid off" in detail
@@ -172,3 +173,130 @@ def test_account_with_running_loan_cannot_be_deleted_and_offers_are_refunded():
     assert bal(db, ann) == 1010 and loan(db, pending) is None
     appmod.delete_account(db, bob)
     assert db.execute("SELECT COUNT(*) FROM loans").fetchone()[0] == 0
+
+
+# ---------------------------------------------------------------- credit scores and defaults
+
+def score(db, uid):
+    return db.execute("SELECT credit_score FROM users WHERE id = ?", (uid,)).fetchone()[0]
+
+
+def test_on_time_repayment_raises_credit_by_loan_size():
+    db = _fresh_db()
+    ann, bob = _user(db, "ann"), _user(db, "bob")
+    assert score(db, bob) == appmod.CREDIT_START == 600
+    lid = appmod.offer_loan(db, ann, "", 80, 10, 7)
+    appmod.accept_loan(db, lid, bob)
+    appmod.repay_loan(db, lid, bob, 40)
+    assert score(db, bob) == 600                      # nothing until it's paid off
+    appmod.repay_loan(db, lid, bob)
+    assert score(db, bob) == 608                      # +1 per Ⓜ10
+    big = appmod.offer_loan(db, ann, "", 400, 0, 7)
+    appmod.accept_loan(db, big, bob)
+    appmod.repay_loan(db, big, bob)
+    assert score(db, bob) == 623                      # capped at +15
+    tiny = appmod.offer_loan(db, ann, "", 5, 0, 7)
+    appmod.accept_loan(db, tiny, bob)
+    appmod.repay_loan(db, tiny, bob)
+    assert score(db, bob) == 623                      # tiny loans can't farm credit
+    reasons = [r[0] for r in db.execute("SELECT reason FROM credit_events WHERE user_id = ? ORDER BY id", (bob,))]
+    assert len(reasons) == 2 and "on time" in reasons[0]
+
+
+def test_late_then_default_then_paid_off():
+    db = _fresh_db()
+    ann, bob = _user(db, "ann"), _user(db, "bob", balance=0)
+    lid = appmod.offer_loan(db, ann, "bob", 100, 10, 7)
+    appmod.accept_loan(db, lid, bob)
+    db.execute("UPDATE users SET balance = 0 WHERE id = ?", (bob,))    # spent it all
+    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(), lid))
+    appmod.process_loan_deadlines(db)
+    l = loan(db, lid)
+    assert l["late_at"] and l["penalty"] == 11 and l["owed"] == 121 and not l["defaulted_at"]
+    assert score(db, bob) == 560
+    appmod.process_loan_deadlines(db)                                  # only once
+    assert loan(db, lid)["owed"] == 121 and score(db, bob) == 560
+
+    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(24 * 8), lid))
+    appmod.process_loan_deadlines(db)
+    assert loan(db, lid)["defaulted_at"] and score(db, bob) == 460
+    assert appmod.has_defaulted_loan(db, bob)
+    # punishments: can't borrow or lend, shown on the leaderboard
+    other = appmod.offer_loan(db, ann, "", 10, 0, 1)
+    with pytest.raises(appmod.TradeError, match="defaulted"):
+        appmod.accept_loan(db, other, bob)
+    db.execute("UPDATE users SET balance = 50 WHERE id = ?", (bob,))
+    with pytest.raises(appmod.TradeError, match="defaulted"):
+        appmod.offer_loan(db, bob, "", 10, 0, 1)
+    appmod.process_loan_deadlines(db)                                   # the 50 is collected
+    assert bal(db, bob) == 0 and loan(db, lid)["owed"] == 71
+
+    db.execute("UPDATE users SET balance = 100 WHERE id = ?", (bob,))
+    appmod.process_loan_deadlines(db)
+    assert loan(db, lid)["status"] == "repaid" and bal(db, bob) == 29
+    assert score(db, bob) == 480 and not appmod.has_defaulted_loan(db, bob)
+    assert bal(db, ann) == 1000 - 100 - 10 + 121                         # lender got the late fee too
+
+
+def test_late_but_paid_before_default_earns_a_little_back():
+    db = _fresh_db()
+    ann, bob = _user(db, "ann"), _user(db, "bob")
+    lid = appmod.offer_loan(db, ann, "bob", 100, 0, 7)
+    appmod.accept_loan(db, lid, bob)
+    db.execute("UPDATE users SET balance = 0 WHERE id = ?", (bob,))
+    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(), lid))
+    appmod.process_loan_deadlines(db)
+    db.execute("UPDATE users SET balance = 500 WHERE id = ?", (bob,))
+    appmod.process_loan_deadlines(db)
+    assert loan(db, lid)["status"] == "repaid" and score(db, bob) == 600 - 40 + 5
+
+
+def test_credit_limits_and_minimum_scores():
+    db = _fresh_db()
+    ann, bob = _user(db, "ann", balance=10000), _user(db, "bob")
+    # Fair (600): can owe up to Ⓜ500 in total, interest included
+    lid = appmod.offer_loan(db, ann, "", 460, 10, 7)
+    with pytest.raises(appmod.TradeError, match="at most Ⓜ500"):
+        appmod.accept_loan(db, lid, bob)                                # 506 owed
+    ok = appmod.offer_loan(db, ann, "", 300, 0, 7)
+    appmod.accept_loan(db, ok, bob)
+    more = appmod.offer_loan(db, ann, "", 250, 0, 7)
+    with pytest.raises(appmod.TradeError, match="already owe"):
+        appmod.accept_loan(db, more, bob)
+    # lender asks for 650+
+    picky = appmod.offer_loan(db, ann, "", 10, 0, 7, min_credit=650)
+    with pytest.raises(appmod.TradeError, match="at least 650"):
+        appmod.accept_loan(db, picky, bob)
+    with pytest.raises(appmod.TradeError, match="between"):
+        appmod.offer_loan(db, ann, "", 10, 0, 7, min_credit=900)
+    # Bad credit: no borrowing at all
+    db.execute("UPDATE users SET credit_score = 400 WHERE id = ?", (bob,))
+    small = appmod.offer_loan(db, ann, "", 5, 0, 7)
+    with pytest.raises(appmod.TradeError, match="too low"):
+        appmod.accept_loan(db, small, bob)
+    # never below 300 or above 850
+    with appmod.app.app_context():
+        appmod.adjust_credit(db, bob, -1000, "test")
+        assert score(db, bob) == 300
+        appmod.adjust_credit(db, bob, 5000, "test")
+        assert score(db, bob) == 850
+
+
+def test_credit_shows_on_loans_page_and_leaderboard():
+    db = _fresh_db()
+    c = appmod.app.test_client()
+    signup(c, "bob")
+    bob = db.execute("SELECT id FROM users WHERE username = 'bob'").fetchone()[0]
+    ann = _user(db, "ann")
+    html = c.get("/loans").get_data(as_text=True)
+    assert "Credit score" in html and ">600<" in html and "Fair" in html
+    lid = appmod.offer_loan(db, ann, "bob", 100, 0, 7)
+    appmod.accept_loan(db, lid, bob)
+    db.execute("UPDATE users SET balance = 0 WHERE id = ?", (bob,))
+    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(24 * 8), lid))
+    html = c.get("/loans").get_data(as_text=True)                      # the request runs the deadlines
+    assert "defaulted on a loan" in html and "Defaulted on a loan from ann" in html and "late fee" in html
+    board = c.get("/leaderboard").get_data(as_text=True)
+    assert "defaulted</span>" in board and ">460<" in board
+    page = _post(c, "/loans/offer", amount="10", rate="0", days="3", min_credit="700")
+    assert "defaulted loan" in page.get_data(as_text=True)

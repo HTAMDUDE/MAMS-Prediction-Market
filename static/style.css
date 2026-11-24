@@ -1171,3 +1171,8 @@ dialog h2 { margin-top: 0; font-size: 1.15rem; }
 .sev-info { background: var(--surface-2); color: var(--muted); }
 .sev-warn { background: var(--gold-tint); color: color-mix(in srgb, var(--gold) 70%, var(--ink)); }
 .sev-alert { background: var(--no-tint); color: var(--no); }
+
+/* credit scores */
+.credit-excellent, .credit-good { color: var(--yes); }
+.credit-poor, .credit-bad { color: var(--no); }
+.tag.down { color: var(--no); }

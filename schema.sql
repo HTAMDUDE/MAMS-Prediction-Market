@@ -219,7 +219,11 @@ CREATE TABLE IF NOT EXISTS loans (
     due_at      TEXT,
     created_at  TEXT NOT NULL,
     accepted_at TEXT,
-    closed_at   TEXT
+    closed_at   TEXT,
+    min_credit  INTEGER NOT NULL DEFAULT 0,  -- lowest credit score the lender accepts (0 = anyone)
+    late_at     TEXT,                       -- when it went past due with money still owed (late fee added)
+    penalty     REAL NOT NULL DEFAULT 0,    -- the late fee added to what's owed
+    defaulted_at TEXT                       -- still unpaid LOAN_DEFAULT_DAYS after the due date
 );
 CREATE INDEX IF NOT EXISTS idx_loans_due ON loans(status, due_at);
 CREATE INDEX IF NOT EXISTS idx_loans_lender ON loans(lender_id);
@@ -306,3 +310,15 @@ CREATE INDEX IF NOT EXISTS idx_sevents_time ON security_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_sevents_kind ON security_events(kind, created_at);
 CREATE INDEX IF NOT EXISTS idx_sevents_user ON security_events(user_id, id);
 CREATE INDEX IF NOT EXISTS idx_sevents_ip ON security_events(ip);
+
+-- Every change to a player's credit score (see adjust_credit), shown on the Loans page.
+CREATE TABLE IF NOT EXISTS credit_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id),
+    loan_id     INTEGER,
+    change      INTEGER NOT NULL,
+    score_after INTEGER NOT NULL,
+    reason      TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_credit_events_user ON credit_events(user_id, id);

@@ -32,6 +32,13 @@ assemblies, and anything else the admins post.
   early or in parts; after the due date whatever is still owed is taken from the borrower's cash automatically
   (including money they get later). Loans count towards net worth. Limits are `LOAN_MIN`, `LOAN_MAX_RATE` and
   `LOAN_MAX_DAYS` in `app.py`.
+- **Credit scores** (300–850, start at 600) track how reliably players pay loans back. Paying off on time: +1 per Ⓜ10
+  borrowed, up to +15. Missing the due date: a 10% late fee is added (paid to the lender) and −40. Still unpaid 7 days
+  later the loan **defaults**: −100, a "defaulted" tag on the leaderboard, and no borrowing or lending until it's paid
+  off (paying it off then earns +20; paying a late loan before default earns +5). The score sets how much a player can
+  owe at once (Excellent 750+: Ⓜ5,000, Good 650+: Ⓜ2,000, Fair 550+: Ⓜ500, Poor 450+: Ⓜ100, Bad: can't borrow),
+  and lenders can require a minimum score on an offer. All the numbers are the `CREDIT_*`, `LOAN_LATE_FEE`,
+  `LOAN_DEFAULT_DAYS` and `CREDIT_BANDS` settings in `app.py`.
 - The **Activity** page lists every trade made on the site (who, what, which market, how much), with filters by
   buys/sells, trader and market. **Your balance history** (linked from it) logs every change to your own balance
   (buys, sells, payouts, losses, refunds, bonuses, admin adjustments) with your balance after each one. Admins can
