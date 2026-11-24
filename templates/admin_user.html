@@ -10,6 +10,7 @@
       · Balance Ⓜ{{ u.balance|money }} · joined {{ u.created_at|when }}
       {% if u.banned %}· <span class="status status-rejected">Trading off</span>{% endif %}
       {% if u.muted %}· <span class="status status-closed">Muted</span>{% endif %}
+      {% if u.held %}· <span class="status status-rejected">Held for review</span>{% endif %}
     </p>
   </div>
   <a class="btn btn-small btn-ghost" href="{{ url_for('admin') }}#users">← All users</a>
@@ -19,6 +20,7 @@
 <div class="card"><p>Only the site owner can manage this account.</p>
   <a href="{{ url_for('balance_history', user=u.username) }}">View their balance history →</a></div>
 {% else %}
+{% include "_identity.html" %}
 <div class="card">
   <h2>Balance</h2>
   <form method="post" action="{{ url_for('admin_grant', uid=u.id) }}" class="inline">

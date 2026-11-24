@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Alerts & security · MAMS Prediction Market{% endblock %}
+{% block content %}
+<div class="activity-head">
+  <div>
+    <h1>Alerts &amp; security</h1>
+    <p class="muted">Accounts that look like alts, scored automatically from IP, device, browser fingerprint, email, username and behaviour.
+      New accounts (under {{ thresholds.days }} days old) scoring {{ thresholds.hold }}+ with evidence beyond IP and browser are <strong>held</strong>; anyone at {{ thresholds.flag }}+ is <strong>flagged</strong>.
+      Values shared by {{ thresholds.common }}+ accounts (the school network) count for nothing.</p>
+  </div>
+  <div class="row-actions">
+    <form method="post" action="{{ url_for('admin_security_rescan') }}" data-confirm="Re-check every account against the latest data and lists?" data-confirm-title="Re-scan all accounts?" data-confirm-label="Re-scan">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-small">Re-scan all</button></form>
+    <a class="btn btn-small btn-ghost" href="{{ url_for('admin') }}#users">← Admin</a>
+  </div>
+</div>
+
+<div class="card" id="queue">
+  <h2>Needs review {% if queue %}<span class="badge">{{ queue|length }}</span>{% endif %}</h2>
+  {% if queue %}
+  <form method="post" action="{{ url_for('admin_users_bulk') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="next" value="{{ url_for('admin_security') }}">
+    <div class="bulk-bar" role="group" aria-label="Actions for ticked accounts">
+      <span class="muted small"><span data-bulk-count>0</span> ticked</span>
+      <button class="btn btn-small" name="action" value="approve">Approve</button>
+      <button class="btn btn-small btn-ghost" name="action" value="hold">Hold</button>
+      <button class="btn btn-small btn-ghost" name="action" value="ban" data-confirm="Turn off trading for the ticked accounts? Their open bets are refunded and removed." data-confirm-title="Ban from trading?" data-confirm-label="Ban from trading">Ban trading</button>
+      <button class="btn btn-small btn-danger" name="action" value="delete" data-confirm="Delete the ticked accounts for good? Open bets are reversed and refunded, and their emails stay blocked." data-confirm-title="Delete accounts?" data-confirm-label="Delete accounts">Delete</button>
+    </div>
+    <div class="table-scroll"><table class="table">
+      <thead><tr><th class="tick"><input type="checkbox" data-bulk-all aria-label="Tick everyone"></th><th>User</th><th>Risk</th><th>Why</th><th>Linked to</th></tr></thead>
+      <tbody>
+      {% for r in queue %}<tr>
+        <td class="tick"><input type="checkbox" name="uids" value="{{ r.user_id }}" data-bulk-row aria-label="Tick {{ r.username }}"></td>
+        <td><a href="{{ url_for('admin_user', uid=r.user_id) }}"><strong>{{ r.username }}</strong></a><br>
+          <span class="status {{ 'status-rejected' if r.status == 'held' else 'status-closed' }}">{{ r.status|capitalize }}</span>
+          <span class="muted small">joined {{ r.created_at|ago }}</span></td>
+        <td><span class="risk risk-{{ r.level }}">{{ r.score }}</span></td>
+        <td class="small"><ul class="reasons compact">{% for pts, kind, text in r.reasons[:4] %}<li><span class="pts {{ 'neg' if pts < 0 }}">{{ '%+d'|format(pts) }}</span> {{ text }}</li>{% endfor %}</ul></td>
+        <td class="small">{% for oid, o in r.links.items() %}{% if o.deleted %}<span class="muted">{{ o.username }} (deleted)</span>{% else %}<a href="{{ url_for('admin_user', uid=oid) }}">{{ o.username }}</a>{% endif %}{% if not loop.last %}, {% endif %}{% else %}<span class="muted">—</span>{% endfor %}</td>
+      </tr>{% endfor %}
+      </tbody>
+    </table></div>
+  </form>
+  {% else %}<p class="muted">Nothing needs review right now.</p>{% endif %}
+</div>
+
+{% if clusters %}
+<div class="card" id="clusters">
+  <h2>Suspicious groups</h2>
+  <p class="muted small">Accounts tied together by a shared device, IP, email or loans.</p>
+  {% for c in clusters %}<p>{% for a in c.accounts %}<a href="{{ url_for('admin_user', uid=a.id) }}"><strong>{{ a.username }}</strong></a>
+    <span class="risk risk-{{ 'high' if a.score >= 60 else 'medium' if a.score >= 30 else 'low' }}">{{ a.score }}</span>{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endfor %}
+</div>
+{% endif %}
+
+<div class="card" id="emails">
+  <h2>Blocked emails</h2>
+  <p class="muted small">Every email can be used for one account only. The email of a deleted account stays blocked so the same inbox can't make a fresh one. Release it to allow a new sign-up.</p>
+  {% if blocked_emails %}
+  <div class="table-scroll"><table class="table">
+    <thead><tr><th>Email</th><th>Last used by</th><th></th></tr></thead>
+    <tbody>{% for e in blocked_emails %}<tr>
+      <td class="small">{{ e.canonical }}</td><td class="small">{{ e.first_username }}</td>
+      <td class="num"><form method="post" action="{{ url_for('admin_release_email') }}" class="inline"
+        data-confirm="Let {{ e.canonical }} be used to sign up again?" data-confirm-title="Release email?" data-confirm-label="Release">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="canonical" value="{{ e.canonical }}">
+        <button class="btn btn-small btn-ghost">Release</button></form></td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+  {% else %}<p class="muted">No blocked emails.</p>{% endif %}
+</div>
+
+<div class="card" id="lists">
+  <h2>Email providers and networks</h2>
+  <p class="muted small">Disposable inboxes ({{ bundled_blocked }} built in) are refused outright. Forwarding and anonymous services ({{ bundled_shady }} built in) add risk points.
+    Add your own below, one per line (subdomains match too). {% if school %}School domains ({{ school|join(', ') }}) lower risk; they're set with <code>MAMS_SCHOOL_DOMAINS</code>.{% endif %}</p>
+  <form method="post" action="{{ url_for('admin_security_lists') }}" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label class="field"><span>Also block these email domains</span><textarea name="blocked" rows="4" placeholder="example-temp-mail.com">{{ blocked_text }}</textarea></label>
+    <label class="field"><span>Also treat these as shady (adds risk)</span><textarea name="shady" rows="4" placeholder="example-relay.com">{{ shady_text }}</textarea></label>
+    <label class="field"><span>Common networks (the school's public IPs; never counted as a link)</span>
+      <textarea name="networks" rows="3" placeholder="203.0.113.7&#10;198.51.100.0/24">{{ networks_text }}</textarea>
+      <span class="muted small">One IP or range (CIDR) per line. Add the school's network so students on it aren't linked to each other.</span></label>
+    <div><button class="btn btn-small">Save lists</button></div>
+  </form>
+</div>
+{% endblock %}

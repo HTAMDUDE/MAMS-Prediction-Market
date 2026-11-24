@@ -7,6 +7,7 @@
   <p class="muted">Log in to trade on what happens next at Mass Academy.</p>
   <form method="post" class="stack">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="fp" value="" data-fp>
     <label class="field"><span>Username</span><input name="username" required autofocus autocomplete="username"></label>
     <label class="field"><span>Password</span><input type="password" name="password" required autocomplete="current-password"></label>
     <button class="btn btn-block">Log in</button>
@@ -14,3 +15,4 @@
   <p class="auth-foot">New here? <a href="{{ url_for('register') }}">Create an account</a></p>
 </div>
 {% endblock %}
+{% block scripts %}<script src="{{ asset('fp.js') }}" defer></script>{% endblock %}

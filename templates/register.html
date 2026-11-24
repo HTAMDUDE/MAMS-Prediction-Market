@@ -7,18 +7,21 @@
   <p class="muted">You'll start with Ⓜ1,000 {{ CURRENCY }} — play money, no real value.</p>
   <form method="post" class="stack">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="fp" value="" data-fp>
     <label class="field"><span>Username</span>
       <input name="username" required autofocus minlength="3" maxlength="20" pattern="[A-Za-z0-9_.\-]+" autocomplete="username"
              value="{{ request.form.username }}">
     </label>
     <label class="field"><span>Email</span>
       <input type="email" name="email" required autocomplete="email" value="{{ request.form.email }}">
-      <span class="muted small">We'll send a code to confirm it. It's only used to confirm your account.</span>
+      <span class="muted small">We'll send a code to confirm it. Use a real inbox of your own: one email, one account, and temporary-mail addresses aren't accepted.</span>
     </label>
     <label class="field"><span>Password</span><input type="password" name="password" required minlength="6" autocomplete="new-password"></label>
     <label class="field"><span>Confirm password</span><input type="password" name="confirm" required minlength="6" autocomplete="new-password"></label>
     <button class="btn btn-block">Sign up</button>
   </form>
+  <p class="muted small">To keep the game fair, signing up and logging in records your IP address, browser and device details so we can spot duplicate accounts. Only admins can see them.</p>
   <p class="auth-foot">Already have an account? <a href="{{ url_for('login') }}">Log in</a></p>
 </div>
 {% endblock %}
+{% block scripts %}<script src="{{ asset('fp.js') }}" defer></script>{% endblock %}

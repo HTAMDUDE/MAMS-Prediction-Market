@@ -77,7 +77,15 @@ Anyone can sign up with a username, email and password. Every account needs a **
 (or, for accounts made before emails existed, after logging in) people are sent to **Confirm your email**, where they
 type a 6-digit code we email them. Until then they can't use the rest of the site. When emails were introduced,
 everyone was logged out once so they'd be asked for one. Each email can belong to one account, and people can change
-theirs from Portfolio. An email someone has signed up with but not yet confirmed is held for them for 24 hours
+theirs from Portfolio. **Each email works for one account, ever:** addresses are normalized first, so
+`j.o.e+x@googlemail.com` and `joe@gmail.com` are the same mailbox (`+tags` are ignored everywhere, dots only at Gmail,
+and true aliases like `googlemail.com`, `me.com`/`mac.com`→`icloud.com` and `pm.me`/`protonmail.com`→`proton.me` are
+folded together; `hotmail.com`, `outlook.com` and `live.com` are separate mailboxes and are not). Temporary-inbox services
+(mailinator, guerrillamail, yopmail… about 90 built in, in `security_data/disposable_domains.txt`) are **refused**;
+forwarding, relay and anonymous services (duck.com, SimpleLogin, cock.li, mail.ru, gmx… in
+`security_data/shady_domains.txt`) are allowed but **add risk points** (see [Alt detection](#alt-detection--risk)).
+When an account is deleted its email stays blocked until an admin releases it (Admin → Alerts & security → Blocked
+emails). An email someone has signed up with but not yet confirmed is held for them for 24 hours
 (`EMAIL_CLAIM_HOURS`), so nobody else can sign up with it in the meantime. Codes are sent at most once a minute per
 account and once a minute per email address (`LOGIN_CODE_RESEND_DELAY`), plus 5 an hour per account.
 
@@ -89,6 +97,56 @@ Configure `MAMS_SMTP_HOST`, `MAMS_SMTP_PORT` (defaults to `587`), `MAMS_SMTP_USE
 `https://myaccount.google.com/apppasswords`, which needs 2-Step Verification). Automated tests never send email.
 To try it locally without sending anything, start the app with `MAMS_EMAIL_BACKEND=console`; codes are printed in the
 server terminal instead. On Windows, `.\scripts\setup-gmail-smtp.ps1` sets up real Gmail delivery for a local server.
+
+### Alt detection & risk
+
+The game gives every account Ⓜ1,000 and a daily bonus, so alts are worth catching. Each account gets a **risk score
+from 0 to 100** (`security.py`), recalculated at sign-up, log-in, email confirmation, every 30 minutes while someone is
+browsing, after a loan or an entry fee, and when an admin clicks **Re-scan all**.
+
+What's recorded: IP address and network (/24 or /64), a random **device cookie** (`mams_did`, 2 years), a browser
+**fingerprint** collected by `static/fp.js` on the sign-up and log-in pages (canvas, graphics card, audio, installed
+fonts, screen, timezone, languages, platform, plus a token in localStorage that mirrors the cookie), and the user agent.
+Wrong-password attempts are shown in an account's log-in history but never count as a sighting (so nobody can
+frame an account by typing its name). Loopback and private IPs are ignored. Data older than 180 days is deleted. **Only admins can see it.**
+
+| Signal | Points |
+|---|---|
+| Same device cookie / stored token as another account | 45, +10 per extra account (max 60) |
+| Identical browser fingerprint; same canvas+graphics+fonts | up to 30; up to 15 |
+| Same IP; same network; signed up within 30 min of another account from the same IP; many sign-ups from one IP in a day | up to 15; 5; 10; 20 |
+| 3+ sign-ups from one device in a day | 20 |
+| Username equals / is very similar to a linked account's | 15 / 10 (5 / 3 if not otherwise linked) |
+| Same email name on another provider, or only digits differ | 20 / 10 |
+| Two accounts that are the same mailbox (existing accounts) | 60 |
+| Shady email provider (relay / anonymous) | 10–25 |
+| School email domain (`MAMS_SCHOOL_DOMAINS`) | −15 |
+| Automated browser (HeadlessChrome, Selenium, webdriver flag, scripts) | 35 |
+| No fingerprint at sign-up; user agent contradicts the browser's platform; timezone far from school's | 10; 15; 5 |
+| Loans with a linked account (0% or unpaid); entry fees going mostly to a linked account's markets; only claims bonuses and lends to a linked account | 25; 15; 10 |
+
+A whole school shares one IP and many students have identical laptops, so shared values are **weighted by rarity**
+(worth nothing once 8+ accounts share them), and **IP and network evidence together can never add up to more than 25
+points**, so a shared IP alone never flags anyone. A shared fingerprint can flag an account but, like IP evidence, can
+never get it *held* without stronger evidence (a shared device, a related email or username, a bot, suspicious
+behaviour). Add the school's public IP or range under **Common networks** to ignore that IP completely *and* to stop
+identical laptops on that network from matching each other; do this before opening sign-ups.
+
+What happens: **under 30** nothing. **30 or more**: the account is *flagged* in the review queue. A **new account
+(under 7 days old) scoring 60 or more with evidence beyond IP/fingerprint is held**: it can log in and look around, but
+every POST except logging out, confirming its email and changing its password is refused (bets, bonus, loans,
+comments, proposals…, enforced for all routes at once in `hold_check`), and it's hidden from the leaderboard.
+Established accounts are only ever flagged, never held automatically. Admins and the owner are never scored.
+An admin **approves** an account (or keeps it held, bans or deletes it) from the queue or its user page; an approved
+account is only flagged again if a *new kind* of signal appears.
+
+Tunables are the constants at the top of `security.py` (`HOLD_THRESHOLD`, `FLAG_THRESHOLD`, `NEW_ACCOUNT_DAYS`,
+`COMMON_THRESHOLD`, `IP_BUDGET`, `SIGNAL_RETENTION_DAYS`).
+
+**Not done yet: CAPTCHA.** Cloudflare Turnstile is deferred because PythonAnywhere's free plan blocks calls to
+`challenges.cloudflare.com`. When the site can reach it, use **Managed** mode on sign-up, log-in and "send code": it
+only shows a checkbox when a visitor looks risky, which suits a school where everyone shares one IP. Email still goes
+out over SMTP for the same reason (Resend's API is also blocked on the free plan).
 
 ### Roles
 
@@ -121,6 +179,9 @@ Admins see an **Admin** link in the top bar.
 | **Find and manage users** | Admin page → Users | Search by username, filter (everyone / admins / banned / muted), 25 per page. **Manage** opens a page for one user: adjust balance (adds or removes; never below Ⓜ0), ban or allow trading, mute or allow commenting, **reset password**, make or remove admin (owner only) and **delete account**. Admins can manage regular users; only the owner can manage admins or the owner. |
 | **Reset a password** | Manage user → Reset password, or `python reset_password.py <username>` on the server | Shows a temporary 12-character password once and signs that user out everywhere. The CLI works even if the owner is locked out. Users can change their own password on the Portfolio page (that also signs out their other devices). |
 | **Delete an account** | Manage user → Delete account | Their bets in unresolved markets are reversed and refunded first (prices go back as if they never bet); payouts from settled markets stay. Refused for yourself, the owner, admins (demote them first), people with an open dispute, and people who created a market that is still running (resolve or cancel it first). |
+| **Review alts** | Admin page → Alerts & security (`/admin/security`; the badge counts held + flagged accounts) | The queue lists held and flagged accounts, worst first, with the reasons and linked accounts. Tick accounts and **Approve**, **Hold**, **Ban trading** or **Delete** them in bulk, or open one. Also shows suspicious groups of linked accounts, the blocked-email list (**Release** frees an email), extra blocked/shady email domains, common networks and **Re-scan all**. |
+| **See who someone is** | Manage user → Identity & risk | Email (and whether the provider is shady), sign-up IP and browser, every IP, device and fingerprint with how many other accounts share it (click through to them), the last 50 log-ins, the score breakdown and linked accounts. Regular users only; the owner can see admins too. |
+| **Bulk actions** | Admin page → Users | Tick users (or the box in the header for the whole page), then **Approve, Hold, Re-scan, Ban trading, Allow trading, Mute, Unmute or Delete**. Each account goes through the same checks as its own page (you, the owner and, for non-owner admins, other admins are skipped and listed), is done on its own, and gets its own Admin log entry. Search finds users by username, **email** or **IP**; filters include Held, Flagged, High risk and Approved. |
 | **Moderate comments** | Under each comment on a market page | **Hide** (others see "This comment was hidden by an admin"; admins still see it), **Unhide**, or **Delete**. Admins can moderate regular users' comments and their own; the owner can moderate anyone's. Muted users can't post. |
 | **Close early / Reopen / Feature** | Market page → Admin → Market controls | **Close betting now** stops betting so you can propose a result. **Reopen** a closed market with a new closing time (not while a result is proposed). **Feature** pins a market first on the Open tab with a ★ badge. |
 | **Announcement** | Admin page → Site announcement | Up to 300 characters, shown under the top bar on every page until cleared. |
@@ -207,6 +268,7 @@ accounts or bets.
 | `SECRET_KEY`  | auto-generated       | Session signing key (saved to `instance/secret_key`)|
 | `MAMS_PRODUCTION` | (off)            | Set to `1` when hosted on HTTPS: secure cookies, trust proxy IPs |
 | `MAMS_TZ`     | `America/New_York`   | Time zone for closing times and the daily bonus     |
+| `MAMS_SCHOOL_DOMAINS` | (empty)      | Comma-separated school email domains (e.g. `wpi.edu`); addresses on them lower the risk score |
 
 Starting balance, daily bonus and the category list are constants at the top of `app.py`.
 
@@ -218,6 +280,8 @@ Starting balance, daily bonus and the category list are constants at the top of 
   carry `nonce="{{ csp_nonce() }}"`; fonts only from Google Fonts), can't be shown inside another site's frame, and
   personal pages aren't kept in the browser cache. If you add a new outside script, font or stylesheet, add its
   origin to `CSP` in `app.py`; new inline scripts need the nonce.
+- Alt detection and holding suspicious sign-ups: see [Alt detection & risk](#alt-detection--risk). One email, one
+  account (normalized, disposable inboxes refused); sign-ups are also limited per device.
 - Log-in, sign-up, email codes, comments and disputes are rate limited. `next=` links only go to pages on this site.
 - Form posts over 256 KB are refused. Passwords are 6–128 characters.
 - `instance/` (database, `secret_key`, `people.csv`) and `.env` are never committed; `secret_key` and `people.csv`
@@ -234,6 +298,9 @@ Starting balance, daily bonus and the category list are constants at the top of 
 ```
 app.py          Flask routes, trading, resolution, admin tools, auth
 lmsr.py         Market-maker math (prices, cost to buy, value when selling)
+security.py     Alt detection: email normalization and provider lists, user-agent/fingerprint parsing, risk scoring
+security_data/  disposable_domains.txt (refused) and shady_domains.txt (adds risk points)
+static/fp.js    Browser fingerprint collected on the sign-up and log-in pages
 schema.sql      Database tables
 seed.py         Example markets
 reset_password.py  Give a user a temporary password (python reset_password.py <username>)

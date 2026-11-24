@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import json
+import logging
 import math
 import os
 import re
@@ -22,6 +23,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
 import lmsr
+import security
 
 # All times (closing times, daily bonus reset) use school time, even on servers that run in UTC.
 os.environ["TZ"] = os.environ.get("MAMS_TZ", "America/New_York")
@@ -170,7 +172,10 @@ def close_db(_exc):
 NEW_COLUMNS = {
     # session_gen: bumping it signs a user out everywhere (password change/reset).
     "users": [("session_gen", "INTEGER NOT NULL DEFAULT 0"),
-              ("email", "TEXT"), ("email_verified", "INTEGER NOT NULL DEFAULT 0")],
+              ("email", "TEXT"), ("email_verified", "INTEGER NOT NULL DEFAULT 0"),
+              # email_canonical: the email with dots/+tags/aliases removed (security.normalize_email), so one
+              # mailbox is one account. held: read-only until an admin approves (see user_risk).
+              ("email_canonical", "TEXT"), ("held", "INTEGER NOT NULL DEFAULT 0")],
     "comments": [("hidden", "INTEGER NOT NULL DEFAULT 0")],
     "login_challenges": [("email", "TEXT")],  # the address being confirmed
     "markets": [("rules_source", "TEXT NOT NULL DEFAULT ''"), ("rules_otherwise", "TEXT NOT NULL DEFAULT ''"),
@@ -214,6 +219,34 @@ def migrate(db):
     # one account per confirmed email
     db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email COLLATE NOCASE) "
                "WHERE email_verified = 1")
+
+
+def backfill_security(db):
+    """Fill in the canonical email and the email ledger for accounts that existed before alt detection, and flag
+    accounts whose emails turn out to be the same mailbox. It never adds a unique index (two old accounts that
+    collapse to one address would make start-up fail); uniqueness is enforced in code for new emails instead.
+    A problem here is logged and skipped: it must never stop the site from starting."""
+    try:
+        rows = db.execute("SELECT id, username, email, created_at FROM users WHERE email_verified = 1 "
+                          "AND email IS NOT NULL AND email_canonical IS NULL ORDER BY id").fetchall()
+        for r in rows:
+            _, canon = security.normalize_email(r["email"])
+            if canon:
+                db.execute("UPDATE users SET email_canonical = ? WHERE id = ?", (canon, r["id"]))
+                db.execute("INSERT OR IGNORE INTO email_ledger (canonical, first_username, status, created_at) "
+                           "VALUES (?, ?, 'active', ?)", (canon, r["username"], time.time()))
+        for dup in db.execute("SELECT email_canonical FROM users WHERE email_canonical IS NOT NULL "
+                              "GROUP BY email_canonical HAVING COUNT(*) > 1").fetchall():
+            ids = db.execute("SELECT id, username FROM users WHERE email_canonical = ?", (dup["email_canonical"],)).fetchall()
+            for u in ids:
+                others = ", ".join(o["username"] for o in ids if o["id"] != u["id"])
+                db.execute(
+                    "INSERT OR IGNORE INTO user_risk (user_id, score, level, reasons, links, status, updated_at) "
+                    "VALUES (?, 60, 'high', ?, '{}', 'flagged', ?)",
+                    (u["id"], json.dumps([[60, "email", f"Shares an email with {others}"]]), time.time()))
+        security.prune(db)
+    except Exception:  # any failure at all: this runs at import time and must never stop the site starting
+        logging.getLogger("mams").exception("Security backfill failed; continuing without it.")
 
 
 def require_emails_once(db):
@@ -282,6 +315,7 @@ def init_db():
     with open(os.path.join(BASE_DIR, "schema.sql")) as f:
         db.executescript(f.read())
     migrate(db)
+    backfill_security(db)
     require_emails_once(db)
     deepen_liquidity(db)
     backfill_activity(db)
@@ -1099,6 +1133,186 @@ def require_confirmed_email():
         return redirect(url_for("account_email"))
 
 
+# ---------------------------------------------------------------- alt detection (see security.py)
+
+DEVICE_COOKIE = "mams_did"
+SIGHTING_EVERY = 1800  # seconds between re-checks of a logged-in visitor (sessions last 30 days)
+HOLD_ALLOWED = {"logout", "account_email", "change_password"}  # the only POSTs a held account may make
+
+
+@app.before_request
+def device_cookie():
+    """Give every browser a random ID cookie. Clearing cookies resets it, so it's only one clue among several."""
+    if request.endpoint in PWA_ENDPOINTS:
+        return
+    did = request.cookies.get(DEVICE_COOKIE, "")
+    g.device_id = did if re.fullmatch(r"[0-9a-f]{32}", did) else ""
+    if not g.device_id:
+        g.device_id = secrets.token_hex(16)
+        g.new_device = True
+
+
+@app.after_request
+def set_device_cookie(resp):
+    if g.get("new_device"):
+        resp.set_cookie(DEVICE_COOKIE, g.device_id, max_age=2 * 365 * 86400, httponly=True,
+                        secure=PRODUCTION, samesite="Lax")
+    return resp
+
+
+@app.before_request
+def hold_check():
+    """Held accounts (flagged as a likely alt, waiting for an admin) can read everything but change nothing.
+    Default-deny: any POST outside HOLD_ALLOWED is refused, so a new route is covered without remembering."""
+    if (g.get("user") is not None and g.user["held"] and not g.user["is_admin"] and request.method == "POST"
+            and request.endpoint not in HOLD_ALLOWED):
+        flash("Your account is waiting for an admin to review it. You can look around, but you can't bet, claim, "
+              "lend or post until it's approved.", "error")
+        return redirect(referrer_or(url_for("index")))
+
+
+@app.before_request
+def periodic_sighting():
+    u = g.get("user")
+    if u is None or request.method != "GET" or request.endpoint in PWA_ENDPOINTS:
+        return
+    if time.time() - session.get("_seen", 0) < SIGHTING_EVERY:
+        return
+    session["_seen"] = time.time()
+    db = get_db()
+    try:
+        if record_sighting(db, u["id"], u["username"]):
+            apply_risk(db, u["id"])
+    except Exception:
+        app.logger.exception("alt detection failed on a page view")
+
+
+def record_sighting(db, uid, username, event=None, fp_raw=None):
+    """Remember this visitor's IP, device and browser fingerprint against the account, and (for sign-up, log-in and
+    email confirmation) add a row to the login history. Loopback and private IPs are ignored as clues. Returns how
+    many values were new for this account."""
+    t = time.time()
+    ip = (request.remote_addr or "")[:64]
+    ua = request.headers.get("User-Agent", "")[:400]
+    did = g.get("device_id", "")
+    digest = security.fp_digest(fp_raw) if fp_raw else None
+    fresh = 0
+    values = []
+    if security.usable_ip(ip):
+        values += [("ip", ip), ("net", security.net_of(ip))]
+    if did:
+        values.append(("device", did))
+    if digest:
+        if digest["token"] and digest["token"] != did:
+            values.append(("device", digest["token"]))
+        values += list(digest["parts"].items())
+    for kind, value in values:
+        fresh += bool(security.record(db, uid, username, kind, value, t))
+    if event:
+        db.execute("INSERT INTO login_events (user_id, username, event, ip, ua, device_id, fp_hash, fp_json, created_at) "
+                   "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                   (uid, username, event, ip, ua, did, digest["parts"].get("fp", "") if digest else "",
+                    json.dumps(digest["meta"]) if digest else "", t))
+    return fresh
+
+
+def risk_config(db):
+    return {"common_nets": security.parse_network_list(get_setting(db, "common_networks")),
+            "extra_blocked": security.parse_domain_list(get_setting(db, "email_blocked")),
+            "extra_shady": security.parse_domain_list(get_setting(db, "email_shady")),
+            "tz_name": os.environ.get("TZ", "America/New_York")}
+
+
+def risk_pool(db):
+    return security.email_pool(db)
+
+
+def apply_risk(db, uid, pool=None, cfg=None):
+    """Score an account and act on it. A new account (younger than NEW_ACCOUNT_DAYS) scoring at least HOLD_THRESHOLD,
+    with evidence beyond IP/fingerprint, is held for admin approval. Anyone else over FLAG_THRESHOLD is only flagged.
+    Held stays held until an admin decides; approved accounts are only re-flagged by a new kind of signal.
+    Admins and the owner are never scored. Returns the new status (None if not scored)."""
+    u = db.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+    if u is None:
+        return None
+    if u["is_admin"] or uid == owner_id(db):
+        db.execute("DELETE FROM user_risk WHERE user_id = ?", (uid,))
+        db.execute("UPDATE users SET held = 0 WHERE id = ? AND held = 1", (uid,))
+        return None
+    r = security.compute_risk(db, uid, pool, **(cfg or risk_config(db)))
+    cur = db.execute("SELECT * FROM user_risk WHERE user_id = ?", (uid,)).fetchone()
+    status = cur["status"] if cur else "clear"
+    ack = set(json.loads(cur["ack"])) if cur else set()
+    reviewed = bool(cur and cur["reviewed_at"])  # an admin has already decided on this account: never auto-hold it
+    try:
+        age_days = (datetime.now() - parse_dt(u["created_at"])).days
+    except ValueError:
+        age_days = 9999
+    if status == "held":
+        new = "held"
+    elif status == "approved":
+        new = "flagged" if (r["kinds"] - ack) and r["score"] >= security.FLAG_THRESHOLD else "approved"
+    elif (age_days < security.NEW_ACCOUNT_DAYS and r["score"] >= security.HOLD_THRESHOLD and r["qualifies"]
+          and not reviewed):
+        new = "held"
+    elif r["score"] >= security.FLAG_THRESHOLD:
+        new = "flagged"
+    else:
+        new = "clear"
+    links = {str(k): v for k, v in r["links"].items()}
+    db.execute(
+        "INSERT INTO user_risk (user_id, score, level, reasons, links, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET score = excluded.score, level = excluded.level, reasons = excluded.reasons, "
+        "links = excluded.links, status = excluded.status, updated_at = excluded.updated_at",
+        (uid, r["score"], r["level"], json.dumps(r["reasons"]), json.dumps(links), new, time.time()))
+    if new == "held" and not u["held"]:
+        db.execute("UPDATE users SET held = 1 WHERE id = ?", (uid,))
+        top = "; ".join(t for _, _, t in r["reasons"][:3])
+        log_audit("user.auto_hold", "user", uid, u["username"], f"Risk {r['score']}/100: {top}", system=True)
+    return new
+
+
+def track(db, uid, username, event, fp_raw=""):
+    """Record a sign-up / log-in / email confirmation against the account and re-score it. If anything in the alt
+    detection fails it's logged and ignored: it must never stop someone signing up or logging in."""
+    try:
+        record_sighting(db, uid, username, event, fp_raw)
+        return apply_risk(db, uid)
+    except Exception:
+        app.logger.exception("alt detection failed for %s", event)
+        return None
+
+
+def rescore(db, *uids):
+    """Re-score accounts after something that can reveal an alt (a loan, an entry fee). A problem in the risk engine
+    is logged and ignored: it must never get in the way of a trade or a loan."""
+    try:
+        for uid in {u for u in uids if u}:
+            apply_risk(db, uid)
+    except Exception:
+        app.logger.exception("risk re-score failed")
+
+
+def set_risk_status(db, uid, status):
+    """An admin's decision on an account: 'approved' (clears any hold, remembers which signals they accepted) or
+    'held'. Returns False if there's nothing to do."""
+    row = db.execute("SELECT * FROM user_risk WHERE user_id = ?", (uid,)).fetchone()
+    if status == "approved":
+        kinds = sorted({k for p, k, _ in json.loads(row["reasons"]) if p > 0}) if row else []
+        db.execute("INSERT INTO user_risk (user_id, status, ack, reviewed_by, reviewed_at, updated_at) "
+                   "VALUES (?, 'approved', ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET status = 'approved', "
+                   "ack = excluded.ack, reviewed_by = excluded.reviewed_by, reviewed_at = excluded.reviewed_at",
+                   (uid, json.dumps(kinds), g.user["username"], time.time(), time.time()))
+        db.execute("UPDATE users SET held = 0 WHERE id = ?", (uid,))
+    else:
+        db.execute("INSERT INTO user_risk (user_id, status, reviewed_by, reviewed_at, updated_at) "
+                   "VALUES (?, 'held', ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET status = 'held', "
+                   "reviewed_by = excluded.reviewed_by, reviewed_at = excluded.reviewed_at",
+                   (uid, g.user["username"], time.time(), time.time()))
+        db.execute("UPDATE users SET held = 1 WHERE id = ?", (uid,))
+    return True
+
+
 def login_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
@@ -1189,19 +1403,27 @@ AUDIT_ACTIONS = {
     "user.password_reset": "Reset a password",
     "user.delete": "Deleted an account",
     "site.announcement": "Changed the site announcement",
+    "user.auto_hold": "Automatically held a new account for review",
+    "user.hold": "Held an account for review",
+    "user.approve": "Approved an account",
+    "user.bulk": "Bulk action on accounts",
+    "security.rescan": "Re-scanned every account for alts",
+    "security.lists": "Changed the email or network lists",
+    "email.release": "Released a blocked email address",
 }
 
 
-def log_audit(action, target_type, target_id, label="", detail=""):
+def log_audit(action, target_type, target_id, label="", detail="", system=False):
     """Record an admin action. Call it after the action succeeded (failed or forbidden attempts aren't logged).
     Names are copied in, with no foreign keys, so the log survives deleted accounts and markets. A logging
-    failure never undoes the action."""
+    failure never undoes the action. `system=True` records an automatic action (actor "system")."""
     assert action in AUDIT_ACTIONS, action
     try:
+        actor_id, actor_name = (None, "system") if system or g.get("user") is None else (g.user["id"], g.user["username"])
         get_db().execute(
             "INSERT INTO audit_log (actor_id, actor_name, action, target_type, target_id, target_label, detail, "
             "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (g.user["id"], g.user["username"], action, target_type, str(target_id), str(label)[:200],
+            (actor_id, actor_name, action, target_type, str(target_id), str(label)[:200],
              str(detail)[:500], now_str()))
     except sqlite3.Error:
         app.logger.exception("could not write audit log entry %s", action)
@@ -1243,6 +1465,15 @@ def inject_globals():
             "DISPUTE_HOURS": DISPUTE_HOURS, "CREATION_FEE": CREATION_FEE, "ENTRY_FEE": ENTRY_FEE,
             "CREATOR_MIN_BET": CREATOR_MIN_BET, "LATE_FEE_RATE": LATE_FEE_RATE,
             "LATE_SNIPE_RATE": LATE_SNIPE_RATE}
+
+
+@app.template_filter("ts")
+def ts_filter(t):
+    """Epoch seconds (the security tables) as the site's usual date text, which `when` and `ago` then format."""
+    try:
+        return datetime.fromtimestamp(float(t)).strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError, OSError, OverflowError):
+        return ""
 
 
 @app.template_filter("money")
@@ -1416,15 +1647,16 @@ def register():
         password = request.form.get("password", "")
         if not USERNAME_RE.match(username):
             flash("Username must be 3–20 characters: letters, numbers, _ . -", "error")
-        elif not EMAIL_RE.match(email):
+        elif not EMAIL_RE.match(email) or security.normalize_email(email)[1] is None:
             flash("Enter a valid email address.", "error")
-        elif email_taken(get_db(), email):
-            flash(EMAIL_TAKEN_MSG, "error")
+        elif problem := email_problem(get_db(), email, username=username):
+            flash(problem, "error")
         elif not PASSWORD_MIN <= len(password) <= PASSWORD_MAX:
             flash(f"Password must be {PASSWORD_MIN}–{PASSWORD_MAX} characters.", "error")
         elif password != request.form.get("confirm", ""):
             flash("Passwords don't match.", "error")
-        elif rate_limited(("register", request.remote_addr), 40, 3600):
+        elif rate_limited(("register", request.remote_addr), 40, 3600) \
+                or rate_limited(("register-device", g.device_id), 8, 3600):
             flash("Too many new accounts from this network. Try again in a while.", "error")
         else:
             db = get_db()
@@ -1446,6 +1678,7 @@ def register():
                 session.permanent = True
                 session["uid"] = cur.lastrowid
                 session["gen"] = 0
+                email = security.normalize_email(email)[0]  # tidied (lowercase domain); the code goes here
                 flash(f"Welcome! You start with {STARTING_BALANCE:,.0f} {CURRENCY}."
                       + (" You're an admin, so you can create and resolve markets." if is_admin else "")
                       + " Confirm your email to start betting.", "success")
@@ -1457,6 +1690,7 @@ def register():
                     flash(f"A code was just sent to {email}. Wait {wait} seconds, then ask for one below.", "error")
                 else:
                     send_email_code(db, cur.lastrowid, username, email)
+                track(db, cur.lastrowid, username, "signup", request.form.get("fp", ""))
                 return redirect(url_for("account_email"))
     return render_template("register.html")
 
@@ -1482,8 +1716,15 @@ def login():
             session.permanent = True
             session["uid"] = u["id"]
             session["gen"] = u["session_gen"]
+            db = get_db()
+            track(db, u["id"], u["username"], "login", request.form.get("fp", ""))
             return redirect(safe_path(request.args.get("next", ""), url_for("index")))
         rate_limited(fail_key, 10, 300)  # record the failure
+        if u:  # logged for admins, but never counted as a sighting: anyone can type someone else's username
+            get_db().execute("INSERT INTO login_events (user_id, username, event, ip, ua, device_id, created_at) "
+                             "VALUES (?, ?, 'login_fail', ?, ?, ?, ?)",
+                             (u["id"], u["username"], (request.remote_addr or "")[:64],
+                              request.headers.get("User-Agent", "")[:400], g.device_id, time.time()))
         flash("Wrong username or password.", "error")
     return render_template("login.html")
 
@@ -1495,22 +1736,65 @@ PASSWORD_MIN, PASSWORD_MAX = 6, 128
 EMAIL_TAKEN_MSG = "That email is already used by another account. If it's yours, log in to that account instead."
 
 
-def email_taken(db, email, except_id=None):
-    """True if another account has confirmed this email, or signed up with it (asked for a code to it) in the last
-    EMAIL_CLAIM_HOURS and hasn't confirmed yet. Unconfirmed claims lapse so a typo can't lock someone out for good."""
+EMAIL_BLOCKED_MSG = ("That kind of email address isn't accepted (temporary or disposable inboxes aren't allowed). "
+                     "Use your regular email address.")
+EMAIL_USED_MSG = "That email has been used before and can't be used again. Ask an admin if you think that's a mistake."
+
+
+def domain_lists(db):
+    """The admin-edited extra blocked and shady email domains (merged with the bundled lists in security_data/)."""
+    return (security.parse_domain_list(get_setting(db, "email_blocked")),
+            security.parse_domain_list(get_setting(db, "email_shady")))
+
+
+def email_problem(db, email, except_id=None, username=None):
+    """Why this email can't be used by this account, or None if it can. The one place every rule about emails lives
+    (sign-up, asking for a code, and confirming it all call it). The address is normalized first, so dots, +tags and
+    alias domains (googlemail.com) can't be used to make a second account from one mailbox. It's refused if:
+      - it's invalid, or from a disposable-inbox service;
+      - another account confirmed it (or the same mailbox);
+      - another sign-up asked for a code to it in the last EMAIL_CLAIM_HOURS and hasn't confirmed yet;
+      - it was used by an account that has since been deleted (until an admin releases it), or by someone else."""
+    display, canon = security.normalize_email(email)
+    if not canon:
+        return "Enter a valid email address."
+    blocked, shady = domain_lists(db)
+    if security.email_provider_class(canon, blocked, shady)[0] == "blocked":
+        return EMAIL_BLOCKED_MSG
     except_id = -1 if except_id is None else except_id
+    if db.execute("SELECT 1 FROM users WHERE id != ? AND email_verified = 1 "
+                  "AND (email_canonical = ? OR email = ? COLLATE NOCASE) LIMIT 1", (except_id, canon, email)).fetchone():
+        return EMAIL_TAKEN_MSG
+    for r in db.execute("SELECT email FROM users WHERE id != ? AND email_verified = 1 AND email_canonical IS NULL "
+                        "AND email IS NOT NULL", (except_id,)):  # confirmed before canonical emails were stored
+        if security.normalize_email(r["email"])[1] == canon:
+            return EMAIL_TAKEN_MSG
     since = time.time() - EMAIL_CLAIM_HOURS * 3600
-    return db.execute(
-        "SELECT 1 FROM users WHERE email = ? COLLATE NOCASE AND email_verified = 1 AND id != ? "
-        "UNION ALL SELECT 1 FROM login_challenges c JOIN users u ON u.username = c.username "
-        "WHERE c.email = ? COLLATE NOCASE AND u.id != ? AND c.requested_at >= ? LIMIT 1",
-        (email, except_id, email, except_id, since)).fetchone() is not None
+    for c in db.execute("SELECT c.email FROM login_challenges c JOIN users u ON u.username = c.username "
+                        "WHERE u.id != ? AND c.requested_at >= ? AND c.email IS NOT NULL", (except_id, since)):
+        if security.normalize_email(c["email"])[1] == canon:
+            return EMAIL_TAKEN_MSG
+    row = db.execute("SELECT status, first_username FROM email_ledger WHERE canonical = ?", (canon,)).fetchone()
+    if row and row["status"] == "deleted":
+        return EMAIL_USED_MSG
+    if row and row["status"] == "active" and (username or "").casefold() != row["first_username"].casefold():
+        return EMAIL_TAKEN_MSG
+    return None
+
+
+def claim_email(db, canon, username):
+    """Record that `username` now owns this (canonical) email. Call inside the transaction that confirms it."""
+    db.execute(
+        "INSERT INTO email_ledger (canonical, first_username, status, created_at) VALUES (?, ?, 'active', ?) "
+        "ON CONFLICT(canonical) DO UPDATE SET status = 'active', first_username = "
+        "CASE WHEN email_ledger.status = 'released' THEN excluded.first_username ELSE email_ledger.first_username END",
+        (canon, username, time.time()))
 
 
 def code_wait(user_id, email):
     """Seconds until this account may get another code, and until this address may be sent one (whichever is
     later). 0 means go ahead, and starts the next wait."""
-    keys = [("email-code-minute", user_id), ("email-code-to", email.casefold())]
+    keys = [("email-code-minute", user_id), ("email-code-to", security.normalize_email(email)[1] or email.casefold())]
     now = time.time()
     last = max((t for k in keys for t in _hits.get(k, [])), default=0.0)
     left = LOGIN_CODE_RESEND_DELAY - (now - last)
@@ -1549,16 +1833,16 @@ def account_email():
         action = request.form.get("action", "")
         if action in ("send", "resend"):
             email = request.form.get("email", "").strip() if action == "send" else (challenge["email"] if challenge else "")
-            if not EMAIL_RE.match(email or ""):
+            if not EMAIL_RE.match(email or "") or security.normalize_email(email)[1] is None:
                 flash("Enter a valid email address.", "error")
-            elif email_taken(db, email, except_id=u["id"]):
-                flash(EMAIL_TAKEN_MSG, "error")
+            elif problem := email_problem(db, email, except_id=u["id"], username=u["username"]):
+                flash(problem, "error")
             elif wait := code_wait(u["id"], email):
                 flash(f"We just sent a code. Wait {wait} seconds before asking for another.", "error")
             elif rate_limited(("email-code", u["id"]), 5, 3600) or rate_limited(("email-code-ip", request.remote_addr), 30, 3600):
                 flash("Too many codes requested. Try again later.", "error")
             else:
-                send_email_code(db, u["id"], u["username"], email)
+                send_email_code(db, u["id"], u["username"], security.normalize_email(email)[0])
             return redirect(url_for("account_email"))
         if action == "change":
             db.execute("DELETE FROM login_challenges WHERE username = ?", (u["username"],))
@@ -1572,16 +1856,30 @@ def account_email():
             elif not hmac.compare_digest(challenge["code_hash"], login_code_hash(u["username"], code)):
                 db.execute("UPDATE login_challenges SET attempts = attempts + 1 WHERE username = ?", (u["username"],))
                 flash("That code isn't right. Check the email and try again.", "error")
-            elif email_taken(db, challenge["email"], except_id=u["id"]):
-                db.execute("DELETE FROM login_challenges WHERE username = ?", (u["username"],))
-                flash(EMAIL_TAKEN_MSG, "error")
             else:
-                db.execute("UPDATE users SET email = ?, email_verified = 1 WHERE id = ?", (challenge["email"], u["id"]))
-                db.execute("DELETE FROM login_challenges WHERE username = ?", (u["username"],))
+                # Re-check and claim the address in one transaction, so two people can't both confirm one mailbox.
+                db.execute("BEGIN IMMEDIATE")
+                try:
+                    problem = email_problem(db, challenge["email"], except_id=u["id"], username=u["username"])
+                    if problem:
+                        db.execute("DELETE FROM login_challenges WHERE username = ?", (u["username"],))
+                        db.execute("COMMIT")
+                        flash(problem, "error")
+                        return redirect(url_for("account_email"))
+                    canon = security.normalize_email(challenge["email"])[1]
+                    db.execute("UPDATE users SET email = ?, email_canonical = ?, email_verified = 1 WHERE id = ?",
+                               (challenge["email"], canon, u["id"]))
+                    claim_email(db, canon, u["username"])
+                    db.execute("DELETE FROM login_challenges WHERE username = ?", (u["username"],))
+                    db.execute("COMMIT")
+                except Exception:
+                    db.execute("ROLLBACK")
+                    raise
                 try:
                     write_email_csv(db)
                 except OSError:
                     current_app.logger.exception("Couldn't update people.csv.")
+                track(db, u["id"], u["username"], "verify")
                 flash("Email confirmed. You're all set!", "success")
                 return redirect(url_for("index"))
             return redirect(url_for("account_email"))
@@ -1854,7 +2152,11 @@ def trade(mid):
     try:
         db = get_db()
         action = request.form.get("action")
+        mkt = db.execute("SELECT * FROM markets WHERE id = ?", (mid,)).fetchone()
+        fee_due = bool(mkt) and entry_fee_due(db, mkt, g.user["id"]) > 0
         flash(execute_trade(db, g.user["id"], mid, outcome_id, action, value, min_out), "success")
+        if fee_due:  # paid an entry fee to the market's creator: money moving between linked accounts is a signal
+            rescore(db, g.user["id"], mkt["created_by"])
         # the next page plays a short animation: confetti in the outcome's colour, the balance ticking over
         m = db.execute("SELECT ou_line FROM markets WHERE id = ?", (mid,)).fetchone()
         labels = [o["label"] for o in get_outcomes(db, mid)]
@@ -2075,7 +2377,7 @@ def leaderboard():
     worth = net_worths(db)
     counts = {r["user_id"]: r["n"] for r in db.execute("SELECT user_id, COUNT(*) AS n FROM trades GROUP BY user_id")}
     # accounts that never confirmed an email and never traded (abandoned sign-ups) aren't listed
-    users = db.execute("SELECT id, username, balance, email_verified FROM users").fetchall()
+    users = db.execute("SELECT id, username, balance, email_verified FROM users WHERE held = 0").fetchall()
     board_by_name = {u["username"].casefold(): {"username": u["username"], "worth": worth[u["id"]],
                                                 "balance": u["balance"], "trades": counts.get(u["id"], 0),
                                                 "is_me": g.user is not None and g.user["id"] == u["id"]}
@@ -2291,6 +2593,7 @@ def loan_offer():
         lid = offer_loan(get_db(), g.user["id"], borrower, _loan_number("amount"), _loan_number("rate"),
                          _loan_number("days", int), request.form.get("note", "").strip())
         loan = get_db().execute("SELECT * FROM loans WHERE id = ?", (lid,)).fetchone()
+        rescore(get_db(), g.user["id"], loan["borrower_id"])
         flash(f"Offer posted: Ⓜ{loan['principal']:,.2f} to {borrower or 'anyone'} at {loan['rate']:g}%. "
               "The money is held until someone takes it; withdraw the offer any time before then.", "success")
     except TradeError as e:
@@ -2303,6 +2606,8 @@ def loan_offer():
 def loan_accept(lid):
     try:
         owed = accept_loan(get_db(), lid, g.user["id"])
+        lender = get_db().execute("SELECT lender_id FROM loans WHERE id = ?", (lid,)).fetchone()
+        rescore(get_db(), g.user["id"], lender["lender_id"] if lender else None)
         flash(f"Loan taken. You owe Ⓜ{owed:,.2f}. Anything still owed after the due date is taken from your cash "
               "automatically.", "success")
     except TradeError as e:
@@ -2349,11 +2654,14 @@ def loan_decline(lid):
 
 USER_PAGE = 25
 USER_FILTERS = {"": "Everyone", "admins": "Admins", "banned": "Banned from trading",
-                "muted": "Muted from commenting"}
+                "muted": "Muted from commenting", "held": "Held for review", "flagged": "Flagged as suspicious",
+                "high": "High risk", "approved": "Approved after review"}
 
 
 def list_users(db):
-    """The Admin → Users table: search by name, one filter, 25 per page. Returns (rows, view-state)."""
+    """The Admin → Users table: search by name, email or IP, one filter, 25 per page. Returns (rows, view-state).
+    Each row has `peek`: whether this admin may see that person's email and IP (everyone except admins, who only the
+    owner may look into)."""
     q = request.args.get("q", "").strip()
     flt = request.args.get("filter", "")
     flt = flt if flt in USER_FILTERS else ""
@@ -2363,8 +2671,18 @@ def list_users(db):
         page = 1
     where, args = [], []
     if q:
-        where.append("LOWER(u.username) LIKE ?")
-        args.append(f"%{q.lower()}%")
+        like = f"%{q.lower()}%"
+        clauses, cargs = ["LOWER(u.username) LIKE ?"], [like]
+        peek_sql, peek_args = ("1", []) if is_owner() else ("(u.is_admin = 0 AND u.id != ?)", [g.owner_id])
+        clauses.append(f"({peek_sql} AND (LOWER(COALESCE(u.email, '')) LIKE ? "
+                       "OR LOWER(COALESCE(u.email_canonical, '')) LIKE ? "
+                       "OR u.id IN (SELECT user_id FROM login_events WHERE ip LIKE ?) "
+                       "OR u.id IN (SELECT user_id FROM sightings WHERE kind = 'ip' AND value LIKE ?) "
+                       "OR LOWER(COALESCE((SELECT email FROM login_challenges c WHERE c.username = u.username "
+                       "COLLATE NOCASE), '')) LIKE ?))")
+        cargs += peek_args + [like, like, f"{q}%", f"{q}%", like]
+        where.append("(" + " OR ".join(clauses) + ")")
+        args += cargs
     if flt == "admins":
         where.append("(u.is_admin = 1 OR u.id = ?)")
         args.append(g.owner_id)
@@ -2372,13 +2690,26 @@ def list_users(db):
         where.append("tb.user_id IS NOT NULL")
     elif flt == "muted":
         where.append("cm.user_id IS NOT NULL")
+    elif flt in ("held", "flagged", "approved"):
+        where.append("r.status = ?")
+        args.append(flt)
+    elif flt == "high":
+        where.append("r.score >= ?")
+        args.append(security.HOLD_THRESHOLD)
     frm = ("FROM users u LEFT JOIN trade_bans tb ON tb.user_id = u.id "
-           "LEFT JOIN comment_mutes cm ON cm.user_id = u.id " + ("WHERE " + " AND ".join(where) if where else ""))
+           "LEFT JOIN comment_mutes cm ON cm.user_id = u.id LEFT JOIN user_risk r ON r.user_id = u.id "
+           + ("WHERE " + " AND ".join(where) if where else ""))
     total = db.execute(f"SELECT COUNT(*) {frm}", args).fetchone()[0]
     pages = max(1, -(-total // USER_PAGE))
     page = min(page, pages)
-    rows = db.execute(f"SELECT u.*, (tb.user_id IS NOT NULL) AS banned, (cm.user_id IS NOT NULL) AS muted {frm} "
-                      "ORDER BY u.username LIMIT ? OFFSET ?", args + [USER_PAGE, (page - 1) * USER_PAGE]).fetchall()
+    order = "r.score DESC, u.username" if flt in ("held", "flagged", "high") else "u.username"
+    rows = db.execute(
+        "SELECT u.*, (tb.user_id IS NOT NULL) AS banned, (cm.user_id IS NOT NULL) AS muted, "
+        "r.score AS risk_score, r.status AS risk_status, "
+        "(SELECT e.ip FROM login_events e WHERE e.user_id = u.id AND e.ip != '' ORDER BY e.id DESC LIMIT 1) AS last_ip, "
+        "(SELECT c.email FROM login_challenges c WHERE c.username = u.username COLLATE NOCASE) AS pending_email "
+        f"{frm} ORDER BY {order} LIMIT ? OFFSET ?", args + [USER_PAGE, (page - 1) * USER_PAGE]).fetchall()
+    rows = [dict(r, peek=is_owner() or (not r["is_admin"] and r["id"] != g.owner_id)) for r in rows]
     return rows, {"q": q, "filter": flt, "page": page, "pages": pages, "total": total, "filters": USER_FILTERS}
 
 
@@ -2399,8 +2730,10 @@ def admin():
         "SELECT p.*, u.username FROM proposals p JOIN users u ON u.id = p.user_id "
         "WHERE p.status = 'pending' ORDER BY p.id")]
     default_close = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M")
+    review_counts = {r["status"]: r["n"] for r in db.execute(
+        "SELECT status, COUNT(*) AS n FROM user_risk WHERE status IN ('held', 'flagged') GROUP BY status")}
     return render_template("admin.html", markets=markets, settled=settled, users=users, uv=user_view,
-                           proposals=proposals, default_close=default_close,
+                           proposals=proposals, default_close=default_close, review_counts=review_counts,
                            announcement=get_setting(db, "announcement"))
 
 
@@ -3076,6 +3409,12 @@ def delete_account(db, user_id):
         db.execute("UPDATE markets SET proposed_by = NULL WHERE proposed_by = ?", (user_id,))
         db.execute("UPDATE markets SET resolved_by = NULL WHERE resolved_by = ?", (user_id,))
         db.execute("UPDATE clarifications SET admin_id = NULL WHERE admin_id = ?", (user_id,))
+        # their emails stay blocked (so the same inbox can't make a fresh account) until an admin releases them
+        gone = db.execute("SELECT username, email_canonical FROM users WHERE id = ?", (user_id,)).fetchone()
+        db.execute("UPDATE email_ledger SET status = 'deleted' WHERE status = 'active' "
+                   "AND (first_username = ? COLLATE NOCASE OR canonical = ?)", (gone["username"], gone["email_canonical"]))
+        db.execute("DELETE FROM user_risk WHERE user_id = ?", (user_id,))
+        db.execute("DELETE FROM login_challenges WHERE username = ? COLLATE NOCASE", (gone["username"],))
         db.execute("DELETE FROM users WHERE id = ?", (user_id,))
         db.execute("COMMIT")
         return cents(reversed_total)
@@ -3093,25 +3432,40 @@ def admin_user(uid):
                    "LEFT JOIN comment_mutes cm ON cm.user_id = u.id WHERE u.id = ?", (uid,)).fetchone()
     if u is None:
         abort(404)
-    return render_template("admin_user.html", u=u, manageable=can_manage(uid), me=u["id"] == g.user["id"],
-                           is_target_owner=u["id"] == g.owner_id)
+    manageable = can_manage(uid)
+    return render_template("admin_user.html", u=u, manageable=manageable, me=u["id"] == g.user["id"],
+                           is_target_owner=u["id"] == g.owner_id,
+                           ident=user_identity(db, u) if manageable else None)
+
+
+def user_action_error(db, uid, action):
+    """The one set of rules for who an admin may act on. Returns (user row or None, reason it's refused or None).
+    Used by the single-user pages and by bulk actions, so a bulk action can never do what the page wouldn't."""
+    u = db.execute("SELECT id, username, is_admin FROM users WHERE id = ?", (uid,)).fetchone()
+    if u is None:
+        return None, "no such account"
+    if uid == g.user["id"]:
+        return u, "You can't delete your own account." if action == "delete" else "You can't do that to your own account."
+    if uid == g.owner_id:
+        return u, "The owner's account can't be deleted." if action == "delete" else "Nobody can do that to the owner."
+    if not can_manage(uid):
+        return u, NOT_ALLOWED
+    if u["is_admin"] and action == "delete":
+        return u, "Remove their admin role before deleting the account."
+    if u["is_admin"] and action in ("hold", "approve", "rescan"):
+        return u, "Admins aren't scored or held."
+    return u, None
 
 
 @app.post("/admin/users/<int:uid>/delete")
 @admin_required
 def admin_delete_user(uid):
     db = get_db()
-    u = db.execute("SELECT id, username, is_admin FROM users WHERE id = ?", (uid,)).fetchone()
-    if uid == g.user["id"]:
-        flash("You can't delete your own account.", "error")
-    elif u is None:
+    u, error = user_action_error(db, uid, "delete")
+    if u is None:
         abort(404)
-    elif uid == g.owner_id:
-        flash("The owner's account can't be deleted.", "error")
-    elif not can_manage(uid):
-        flash(NOT_ALLOWED, "error")
-    elif u["is_admin"]:
-        flash("Remove their admin role before deleting the account.", "error")
+    if error:
+        flash(error, "error")
     else:
         try:
             amount = delete_account(db, uid)
@@ -3122,7 +3476,7 @@ def admin_delete_user(uid):
         flash(f"Deleted {u['username']}'s account." + (f" Reversed Ⓜ{amount:,.2f} of open bets." if amount else ""),
               "success")
         return redirect(url_for("admin") + "#users")
-    return redirect(url_for("admin_user", uid=uid) if u else url_for("admin") + "#users")
+    return redirect(url_for("admin_user", uid=uid))
 
 
 def _moderated_comment(cid):
@@ -3321,6 +3675,255 @@ def admin_reset_password(uid):
         flash(f"Temporary password for {u['username']}: {pw}. Share it privately; they can change it on their "
               "Portfolio page.", "notice")
     return back(url_for("admin") + "#users")
+
+
+# ---------------------------------------------------------------- admin: alts, risk, bulk actions
+
+def set_setting(db, key, value):
+    if value:
+        db.execute("INSERT INTO site_settings (key, value, updated_at) VALUES (?, ?, ?) "
+                   "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                   (key, value, now_str()))
+    else:
+        db.execute("DELETE FROM site_settings WHERE key = ?", (key,))
+
+
+def decode_risk(row):
+    """A user_risk row with its JSON columns opened up (reasons as (points, kind, text), links as {id: info})."""
+    if row is None:
+        return None
+    d = dict(row)
+    d["reasons"] = [tuple(x) for x in json.loads(row["reasons"] or "[]")]
+    d["links"] = {int(k): v for k, v in json.loads(row["links"] or "{}").items()}
+    return d
+
+
+def user_identity(db, u):
+    """Everything an admin sees on a user's page under 'Identity & risk': email, devices, IPs, history, risk."""
+    uid = u["id"]
+    pending = db.execute("SELECT email FROM login_challenges WHERE username = ? COLLATE NOCASE", (u["username"],)).fetchone()
+    email = u["email"] if u["email_verified"] else (pending["email"] if pending else u["email"])
+    cls = security.email_provider_class(security.normalize_email(email)[1], *domain_lists(db)) if email and \
+        security.normalize_email(email)[1] else ("normal", 0, "")
+    events = []
+    for e in db.execute("SELECT * FROM login_events WHERE user_id = ? ORDER BY id DESC LIMIT 50", (uid,)):
+        events.append(dict(e, agent=security.parse_ua(e["ua"])))
+
+    def shared(kind, value):
+        return db.execute("SELECT DISTINCT user_id, username FROM sightings WHERE kind = ? AND value = ? AND user_id != ?",
+                          (kind, value, uid)).fetchall()
+    sightings = {}
+    for kind in ("ip", "net", "device", "fp", "fp_parts"):
+        rows = []
+        for r in db.execute("SELECT * FROM sightings WHERE user_id = ? AND kind = ? ORDER BY last_seen DESC LIMIT 30",
+                            (uid, kind)):
+            others = shared(kind, r["value"])
+            live = {x["id"] for x in db.execute(f"SELECT id FROM users WHERE id IN ({','.join('?' * len(others)) or 'NULL'})",
+                                                [o["user_id"] for o in others])}
+            rows.append(dict(r, others=[(o["username"], o["user_id"] in live, o["user_id"]) for o in others]))
+        sightings[kind] = rows
+    signup = next((e for e in reversed(events) if e["event"] == "signup"), None)
+    return {"email": email, "email_verified": bool(u["email_verified"]), "provider": cls, "events": events,
+            "sightings": sightings, "signup": signup, "risk": decode_risk(
+                db.execute("SELECT * FROM user_risk WHERE user_id = ?", (uid,)).fetchone())}
+
+
+@app.post("/admin/users/<int:uid>/risk")
+@admin_required
+def admin_risk(uid):
+    db = get_db()
+    action = request.form.get("action", "")
+    if action not in ("approve", "hold", "rescan"):
+        abort(400)
+    u, error = user_action_error(db, uid, action)
+    if u is None:
+        abort(404)
+    if error:
+        flash(error, "error")
+    elif action == "rescan":
+        apply_risk(db, uid)
+        flash(f"Re-scanned {u['username']}.", "success")
+    elif action == "approve":
+        set_risk_status(db, uid, "approved")
+        log_audit("user.approve", "user", uid, u["username"])
+        flash(f"Approved {u['username']}. They can use the site normally.", "success")
+    else:
+        set_risk_status(db, uid, "held")
+        log_audit("user.hold", "user", uid, u["username"])
+        flash(f"{u['username']} is on hold: they can look around but not bet, lend, comment or propose.", "success")
+    return back(url_for("admin_user", uid=uid))
+
+
+BULK_ACTIONS = {"delete": "Delete", "ban": "Ban from trading", "allow": "Allow trading", "mute": "Mute",
+                "unmute": "Unmute", "hold": "Hold for review", "approve": "Approve", "rescan": "Re-scan"}
+BULK_MAX = 200
+
+
+@app.post("/admin/users/bulk")
+@admin_required
+def admin_users_bulk():
+    """Apply one action to many accounts. Each account goes through the same checks as its own page
+    (user_action_error), is handled on its own, and gets its own Admin log entry; refused ones are listed."""
+    db = get_db()
+    action = request.form.get("action", "")
+    ids = []
+    for raw in request.form.getlist("uids"):
+        if raw.isdigit() and int(raw) not in ids:
+            ids.append(int(raw))
+    if action not in BULK_ACTIONS:
+        flash("Pick an action.", "error")
+    elif not ids:
+        flash("Tick at least one account first.", "error")
+    elif len(ids) > BULK_MAX:
+        flash(f"Pick at most {BULK_MAX} accounts at a time.", "error")
+    else:
+        done, skipped = [], []
+        pool = risk_pool(db) if action == "rescan" else None
+        for uid in ids:
+            u, error = user_action_error(db, uid, action)
+            if error:
+                skipped.append(f"{u['username'] if u else uid}: {error}")
+                continue
+            name = u["username"]
+            try:
+                if action == "delete":
+                    amount = delete_account(db, uid)
+                    log_audit("user.delete", "user", uid, name, f"Open bets reversed (Ⓜ{amount:,.2f}). (bulk)")
+                elif action == "ban":
+                    if db.execute("SELECT 1 FROM trade_bans WHERE user_id = ?", (uid,)).fetchone():
+                        raise TradeError("already banned from trading")
+                    refund = ban_user_from_trading(db, uid)
+                    log_audit("user.ban", "user", uid, name, f"Refunded Ⓜ{refund:,.2f} from open bets. (bulk)")
+                elif action == "allow":
+                    if not db.execute("DELETE FROM trade_bans WHERE user_id = ?", (uid,)).rowcount:
+                        raise TradeError("wasn't banned")
+                    log_audit("user.unban", "user", uid, name, "(bulk)")
+                elif action == "mute":
+                    if db.execute("SELECT 1 FROM comment_mutes WHERE user_id = ?", (uid,)).fetchone():
+                        raise TradeError("already muted")
+                    db.execute("INSERT INTO comment_mutes (user_id, created_at) VALUES (?, ?)", (uid, now_str()))
+                    log_audit("user.comment_mute", "user", uid, name, "(bulk)")
+                elif action == "unmute":
+                    if not db.execute("DELETE FROM comment_mutes WHERE user_id = ?", (uid,)).rowcount:
+                        raise TradeError("wasn't muted")
+                    log_audit("user.comment_unmute", "user", uid, name, "(bulk)")
+                elif action == "hold":
+                    set_risk_status(db, uid, "held")
+                    log_audit("user.hold", "user", uid, name, "(bulk)")
+                elif action == "approve":
+                    set_risk_status(db, uid, "approved")
+                    log_audit("user.approve", "user", uid, name, "(bulk)")
+                else:
+                    apply_risk(db, uid, pool)
+            except TradeError as e:
+                skipped.append(f"{name}: {e}")
+                continue
+            done.append(name)
+        if done:
+            log_audit("user.bulk", "user", "", f"{len(done)} account(s)",
+                      f"{BULK_ACTIONS[action]}: {', '.join(done)[:380]}")
+        msg = f"{BULK_ACTIONS[action]}: {len(done)} done" + (f", {len(skipped)} skipped" if skipped else "") + "."
+        if skipped:
+            msg += " Skipped: " + "; ".join(skipped)[:300]
+        flash(msg, "success" if done else "error")
+    return back(url_for("admin") + "#users")
+
+
+def risk_clusters(db):
+    """Groups of accounts tied together by shared devices, IPs, emails or loans (union-find over the saved links)."""
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    rows = {r["user_id"]: r for r in db.execute(
+        "SELECT r.*, u.username FROM user_risk r JOIN users u ON u.id = r.user_id WHERE u.is_admin = 0")}
+    for uid, r in rows.items():
+        for other in json.loads(r["links"] or "{}"):
+            find(uid)
+            parent[find(int(other))] = find(uid)
+    groups = {}
+    for uid in rows:
+        if uid in parent:
+            groups.setdefault(find(uid), []).append(uid)
+    out = []
+    for members in groups.values():
+        members = [m for m in members if m in rows]
+        if len(members) >= 2 and any(rows[m]["status"] in ("held", "flagged") for m in members):
+            out.append({"accounts": [{"id": m, "username": rows[m]["username"], "status": rows[m]["status"],
+                                      "score": rows[m]["score"]} for m in sorted(members, key=lambda m: -rows[m]["score"])],
+                        "top": max(rows[m]["score"] for m in members)})
+    return sorted(out, key=lambda c: -c["top"])[:30]
+
+
+@app.get("/admin/security")
+@admin_required
+def admin_security():
+    db = get_db()
+    queue = []
+    for r in db.execute("SELECT r.*, u.username, u.created_at, u.email, u.email_verified, u.balance FROM user_risk r "
+                        "JOIN users u ON u.id = r.user_id WHERE r.status IN ('held', 'flagged') AND u.is_admin = 0 "
+                        "AND u.id != ? ORDER BY (r.status = 'held') DESC, r.score DESC LIMIT 200", (g.owner_id or -1,)):
+        d = decode_risk(r)
+        d.update(username=r["username"], created_at=r["created_at"], balance=r["balance"])
+        queue.append(d)
+    blocked_emails = db.execute("SELECT * FROM email_ledger WHERE status = 'deleted' ORDER BY created_at DESC LIMIT 200").fetchall()
+    return render_template(
+        "admin_security.html", queue=queue, clusters=risk_clusters(db), blocked_emails=blocked_emails,
+        blocked_text="\n".join(security.parse_domain_list(get_setting(db, "email_blocked"))),
+        shady_text="\n".join(security.parse_domain_list(get_setting(db, "email_shady"))),
+        networks_text="\n".join(security.parse_network_list(get_setting(db, "common_networks"))),
+        bundled_blocked=len(security.bundled_lists()[0]), bundled_shady=len(security.bundled_lists()[1]),
+        school=sorted(security.school_domains()), thresholds={"hold": security.HOLD_THRESHOLD,
+                                                              "flag": security.FLAG_THRESHOLD,
+                                                              "days": security.NEW_ACCOUNT_DAYS,
+                                                              "common": security.COMMON_THRESHOLD},
+        bulk_actions=BULK_ACTIONS)
+
+
+@app.post("/admin/security/lists")
+@admin_required
+def admin_security_lists():
+    db = get_db()
+    set_setting(db, "email_blocked", "\n".join(security.parse_domain_list(request.form.get("blocked", ""))))
+    set_setting(db, "email_shady", "\n".join(security.parse_domain_list(request.form.get("shady", ""))))
+    set_setting(db, "common_networks", "\n".join(security.parse_network_list(request.form.get("networks", ""))))
+    log_audit("security.lists", "site", "security", "Security lists")
+    flash("Saved. Re-scan to apply the new lists to existing accounts.", "success")
+    return redirect(url_for("admin_security") + "#lists")
+
+
+@app.post("/admin/security/rescan")
+@admin_required
+def admin_security_rescan():
+    db = get_db()
+    pool, cfg = risk_pool(db), risk_config(db)
+    ids = [r["id"] for r in db.execute("SELECT id FROM users WHERE is_admin = 0 AND id != ?", (g.owner_id or -1,))]
+    held = flagged = 0
+    for uid in ids:
+        status = apply_risk(db, uid, pool, cfg)
+        held += status == "held"
+        flagged += status == "flagged"
+    log_audit("security.rescan", "site", "security", "All accounts", f"{len(ids)} scanned: {held} held, {flagged} flagged")
+    flash(f"Scanned {len(ids)} accounts: {held} held, {flagged} flagged.", "success")
+    return redirect(url_for("admin_security"))
+
+
+@app.post("/admin/security/release-email")
+@admin_required
+def admin_release_email():
+    db = get_db()
+    canon = request.form.get("canonical", "")
+    if db.execute("UPDATE email_ledger SET status = 'released', released_by = ?, released_at = ? "
+                  "WHERE canonical = ? AND status = 'deleted'", (g.user["username"], time.time(), canon)).rowcount:
+        log_audit("email.release", "site", "email", canon)
+        flash(f"{canon} can be used to sign up again.", "success")
+    else:
+        flash("That email isn't blocked.", "error")
+    return redirect(url_for("admin_security") + "#emails")
 
 
 @app.errorhandler(400)
