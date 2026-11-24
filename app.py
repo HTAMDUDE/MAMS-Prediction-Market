@@ -2968,6 +2968,23 @@ def loans():
                            held=sum(l["principal"] for l in lending if l["status"] == "offered"))
 
 
+@app.route("/loans/all")
+def all_loans():
+    """Every loan that's running right now, for anyone to see (logged in or not): who lent to whom, at what rate,
+    what's still owed, and whether it's on time, overdue or defaulted. Most urgent first."""
+    db = get_db()
+    rows = db.execute(
+        "SELECT l.*, lu.username AS lender, bu.username AS borrower, bu.credit_score AS borrower_credit "
+        "FROM loans l JOIN users lu ON lu.id = l.lender_id JOIN users bu ON bu.id = l.borrower_id "
+        "WHERE l.status = 'active' ORDER BY l.defaulted_at IS NULL, l.late_at IS NULL, l.due_at").fetchall()
+    open_offers = db.execute("SELECT COUNT(*) AS n, COALESCE(SUM(principal), 0) AS total FROM loans "
+                             "WHERE status = 'offered'").fetchone()
+    return render_template("all_loans.html", rows=rows, now=now_str(), open_offers=open_offers,
+                           total_owed=sum(r["owed"] for r in rows),
+                           overdue=sum(1 for r in rows if r["late_at"] and not r["defaulted_at"]),
+                           defaulted=sum(1 for r in rows if r["defaulted_at"]), credit_band=credit_band)
+
+
 def _loan_number(name, kind=float):
     try:
         return kind(request.form.get(name, "").strip())

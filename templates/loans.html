@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Loans · MAMS Prediction Market{% endblock %}
 {% block content %}
-<h1>Loans</h1>
+<div class="activity-head"><h1>Loans</h1><a class="btn btn-small btn-ghost" href="{{ url_for('all_loans') }}">See all running loans →</a></div>
 <p class="muted">Lend your {{ CURRENCY }} to other players at an interest rate you choose, or borrow from them.
   Interest is a flat percentage of the amount: borrow Ⓜ100 at 10% and you pay back Ⓜ110, whenever you like before
   the due date. Miss it and a <b>{{ (LOAN_LATE_FEE * 100)|int }}% late fee</b> is added and your credit score drops;

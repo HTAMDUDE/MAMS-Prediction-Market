@@ -300,3 +300,27 @@ def test_credit_shows_on_loans_page_and_leaderboard():
     assert "defaulted</span>" in board and ">460<" in board
     page = _post(c, "/loans/offer", amount="10", rate="0", days="3", min_credit="700")
     assert "defaulted loan" in page.get_data(as_text=True)
+
+
+def test_everyone_can_see_all_running_loans():
+    db = _fresh_db()
+    ann, bob, cat, dan = _user(db, "ann"), _user(db, "bob"), _user(db, "cat"), _user(db, "dan")
+    on_time = appmod.offer_loan(db, ann, "bob", 100, 10, 7)
+    appmod.accept_loan(db, on_time, bob)
+    late = appmod.offer_loan(db, cat, "dan", 50, 0, 7)
+    appmod.accept_loan(db, late, dan)
+    db.execute("UPDATE users SET balance = 0 WHERE id = ?", (dan,))
+    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(24 * 8), late))
+    done = appmod.offer_loan(db, ann, "cat", 20, 0, 7)
+    appmod.accept_loan(db, done, cat)
+    appmod.repay_loan(db, done, cat)
+    appmod.offer_loan(db, ann, "", 30, 5, 3)                       # an open offer, not a running loan
+
+    r = appmod.app.test_client().get("/loans/all")                  # logged out
+    html = r.get_data(as_text=True)
+    assert r.status_code == 200
+    assert "ann" in html and "bob" in html and "Ⓜ110.00" in html
+    assert "defaulted</span>" in html and "Ⓜ55.00" in html and "late fee" in html
+    assert html.index("dan") < html.index("bob")                    # defaulted loans first
+    assert "Ⓜ20.00" not in html                                     # paid-off loans aren't listed
+    assert "Plus 1 offer" in html and "Running loans" in html
