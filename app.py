@@ -1860,9 +1860,14 @@ def register():
             log_event("signup_rate_limited", username=username, detail="per IP or per device limit")
             flash("Too many new accounts from this network. Try again in a while.", "error")
         elif (captcha := turnstile_check(request.form.get("cf-turnstile-response", ""), request.remote_addr)) \
-                in ("missing", "failed"):
-            log_event("signup_captcha_failed", username=username, detail=captcha)
-            flash("Please complete the “verify you're human” check and try again.", "error")
+                not in ("off", "ok"):
+            if captcha == "unreachable":
+                log_event("captcha_unreachable", username=username,
+                          detail="Cloudflare Turnstile couldn't be reached; sign-up rejected")
+                flash("We couldn't run the “verify you're human” check just now. Try again in a minute.", "error")
+            else:
+                log_event("signup_captcha_failed", username=username, detail=captcha)
+                flash("Please complete the “verify you're human” check and try again.", "error")
         else:
             db = get_db()
             first_user = db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
@@ -1895,9 +1900,6 @@ def register():
                     flash(f"A code was just sent to {email}. Wait {wait} seconds, then ask for one below.", "error")
                 else:
                     send_email_code(db, cur.lastrowid, username, email)
-                if captcha == "unreachable":
-                    log_event("captcha_unreachable", user_id=cur.lastrowid, username=username,
-                              detail="Cloudflare Turnstile couldn't be reached; sign-up let through")
                 log_event("signup_ok", user_id=cur.lastrowid, username=username,
                           detail=f"email {security.normalize_email(email)[1]}, human check: {captcha}")
                 track(db, cur.lastrowid, username, "signup", request.form.get("fp", ""), extra={"captcha": captcha})
@@ -1963,9 +1965,9 @@ def turnstile_enabled():
 
 def turnstile_check(token, remote_ip):
     """Ask Cloudflare whether this sign-up's Turnstile token is genuine (each token works once). Returns
-    'off' (not configured), 'missing' (no token sent), 'failed' (Cloudflare says no), 'ok', or 'unreachable'. When
-    Cloudflare can't be reached sign-up is allowed (so an outage doesn't lock everyone out); that is logged and the
-    account scores a few risk points for it."""
+    'off' (not configured), 'missing' (no token sent), 'failed' (Cloudflare says no), 'unreachable' (Cloudflare
+    couldn't be reached) or 'ok'. Anything but 'off' and 'ok' rejects the sign-up: if Cloudflare can't be reached the
+    sign-up is rejected (and the problem logged), so bots can't slip through during an outage."""
     if not turnstile_enabled():
         return "off"
     if not token:
@@ -1978,13 +1980,13 @@ def turnstile_check(token, remote_ip):
             current_app.logger.info("turnstile rejected a token: %s", ",".join(body.get("error-codes", [])) or "no reason")
         return "ok" if body.get("success") else "failed"
     except (OSError, ValueError, urllib.error.URLError):
-        current_app.logger.exception("Couldn't reach Cloudflare Turnstile; letting this sign-up through.")
+        current_app.logger.exception("Couldn't reach Cloudflare Turnstile; rejecting this sign-up.")
         return "unreachable"
 
 
 def turnstile_passed(token, remote_ip):
-    """True unless the check positively failed (kept for callers that only need yes/no)."""
-    return turnstile_check(token, remote_ip) not in ("missing", "failed")
+    """True only if the sign-up may go ahead: the check is off, or Cloudflare confirmed it."""
+    return turnstile_check(token, remote_ip) in ("off", "ok")
 
 
 EMAIL_TAKEN_MSG = "That email is already used by another account. If it's yours, log in to that account instead."

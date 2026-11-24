@@ -483,7 +483,10 @@ def test_turnstile_check_outcomes(monkeypatch):
         assert appmod.turnstile_check("good", "1.2.3.4") == "ok"
         _turnstile(monkeypatch, "down")
         assert appmod.turnstile_check("good", "1.2.3.4") == "unreachable"
+        assert not appmod.turnstile_passed("good", "1.2.3.4")                   # an outage rejects, as on main
+        _turnstile(monkeypatch, "up")
         assert appmod.turnstile_passed("good", "1.2.3.4") and not appmod.turnstile_passed("", "1.2.3.4")
+        assert not appmod.turnstile_passed("bad", "1.2.3.4")
 
 
 def test_failed_human_check_is_logged_and_makes_no_account(monkeypatch, sent):
@@ -509,27 +512,16 @@ def test_passing_the_human_check_is_recorded_and_costs_no_risk(monkeypatch, sent
     assert not events(db, "captcha_unreachable")
 
 
-def test_cloudflare_outage_lets_signup_through_but_logs_it_and_adds_risk(monkeypatch, sent):
-    db = _fresh_db()
-    owner = client_at("34.120.1.1")
-    signup(owner, "boss")
-    _turnstile(monkeypatch, "down")
-    _signup_with_captcha(db, "unverified", "tok", ip="34.120.1.2")
-    assert db.execute("SELECT COUNT(*) FROM users WHERE username = 'unverified'").fetchone()[0] == 1
-    assert events(db, "captcha_unreachable")[0]["severity"] == "warn"
-    r = risk(db, "unverified")
-    assert any(k == "captcha" and p == 10 for p, k, _ in r["reasons"])
-    page = owner.get(f"/admin/users/{uid(db, 'unverified')}").get_data(as_text=True)
-    assert "human check couldn't run" in page
-    assert "Human check (Cloudflare Turnstile)" in page
-
-
-def test_captcha_alone_never_holds_an_account(monkeypatch, sent):
+def test_cloudflare_outage_rejects_the_signup_and_logs_it(monkeypatch, sent):
     db = _fresh_db()
     seed_owner(db)
     _turnstile(monkeypatch, "down")
-    _signup_with_captcha(db, "justoutage", "tok")
-    assert risk(db, "justoutage")["status"] == "clear"
+    _, page = _signup_with_captcha(db, "unverified", "tok", ip="34.120.1.2")
+    assert "couldn&#39;t run the" in page.get_data(as_text=True)
+    assert db.execute("SELECT COUNT(*) FROM users WHERE username = 'unverified'").fetchone()[0] == 0
+    e = events(db, "captcha_unreachable")[0]
+    assert e["severity"] == "warn" and e["username"] == "unverified" and "rejected" in e["detail"]
+    assert not sent                                              # no code was emailed either
 
 
 def test_register_page_still_loads_both_scripts_when_turnstile_is_on(monkeypatch):

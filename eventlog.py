@@ -19,7 +19,7 @@ EVENTS = {
     "signup_refused_email": ("warn", "Sign-up refused: email not allowed"),
     "signup_rate_limited": ("warn", "Sign-up rate limited"),
     "signup_captcha_failed": ("warn", "Sign-up failed the human check"),
-    "captcha_unreachable": ("warn", "Human check unreachable (let through)"),
+    "captcha_unreachable": ("warn", "Human check unreachable (sign-up rejected)"),
     "login_ok": ("info", "Logged in"),
     "login_failed": ("warn", "Wrong password"),
     "login_unknown_user": ("warn", "Log-in for an unknown username"),

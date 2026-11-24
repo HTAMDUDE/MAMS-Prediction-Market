@@ -861,11 +861,11 @@ def test_turnstile_on_signup(monkeypatch):
     c.post("/register", data=form("human", **{"cf-turnstile-response": "good"}))
     assert _q(db, "SELECT COUNT(*) FROM users WHERE username = 'human'") == 1
 
-    # Cloudflare unreachable: let people sign up rather than lock everyone out
+    # Cloudflare unreachable: reject the sign-up rather than let bots through
     def down(req, timeout):
         raise OSError("network unreachable")
     monkeypatch.setattr(appmod.urllib.request, "urlopen", down)
     c2 = appmod.app.test_client()
     c2.post("/register", data={"csrf_token": csrf(c2.get("/register")), "username": "later", "email": "later@example.com",
                                "password": "secret1", "confirm": "secret1", "cf-turnstile-response": "x"})
-    assert _q(db, "SELECT COUNT(*) FROM users WHERE username = 'later'") == 1
+    assert _q(db, "SELECT COUNT(*) FROM users WHERE username = 'later'") == 0

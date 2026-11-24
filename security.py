@@ -521,8 +521,6 @@ def compute_risk(db, user_id, users=None, common_nets=(), extra_blocked=(), extr
     if signup is not None:
         if ua["bot"] or fp_meta.get("webdriver"):
             add(35, "bot", "Automated browser (" + ("webdriver flag" if fp_meta.get("webdriver") else ua["text"]) + ")")
-        if fp_meta.get("captcha") == "unreachable":
-            add(10, "captcha", "Human check (Cloudflare Turnstile) couldn't run at sign-up, so the sign-up wasn't verified")
         if not signup["fp_hash"]:
             add(10, "nofp", "No browser fingerprint at sign-up (JavaScript off or scripted)")
         elif fp_meta:

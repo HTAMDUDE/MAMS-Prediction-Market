@@ -16,7 +16,7 @@
     {% if ident.signup %}
     <dt>Signed up</dt>
     <dd>{{ ident.signup.created_at|ts|when }} from <strong>{{ ident.signup.ip or 'unknown' }}</strong> · {{ ident.signup.agent.text }}{% if ident.signup.agent.bot %} <span class="status status-rejected">looks automated</span>{% endif %}
-      {% set cap = ident.signup.meta.get('captcha') %}{% if cap == 'ok' %} · <span class="muted small">human check passed</span>{% elif cap == 'unreachable' %} · <span class="status status-closed">human check couldn't run</span>{% endif %}</dd>
+      {% set cap = ident.signup.meta.get('captcha') %}{% if cap == 'ok' %} · <span class="muted small">human check passed</span>{% endif %}</dd>
     {% endif %}
   </dl>
 
