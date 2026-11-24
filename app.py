@@ -1511,7 +1511,7 @@ def turnstile_enabled():
 
 def turnstile_passed(token, remote_ip):
     """Ask Cloudflare whether this sign-up's Turnstile token is genuine (each token works once). If Cloudflare
-    can't be reached, sign-up is allowed and the problem is logged, so an outage doesn't lock everyone out."""
+    can't be reached, the sign-up is rejected (and the problem logged), so bots can't slip through during an outage."""
     if not turnstile_enabled():
         return True
     if not token:
@@ -1521,8 +1521,8 @@ def turnstile_passed(token, remote_ip):
         with urllib.request.urlopen(urllib.request.Request(TURNSTILE_VERIFY_URL, data=data), timeout=10) as resp:
             return bool(json.loads(resp.read().decode()).get("success"))
     except (OSError, ValueError, urllib.error.URLError):
-        current_app.logger.exception("Couldn't reach Cloudflare Turnstile; letting this sign-up through.")
-        return True
+        current_app.logger.exception("Couldn't reach Cloudflare Turnstile; rejecting this sign-up.")
+        return False
 
 
 EMAIL_TAKEN_MSG = "That email is already used by another account. If it's yours, log in to that account instead."
