@@ -17,8 +17,10 @@
     </label>
     <label class="field"><span>Password</span><input type="password" name="password" required minlength="6" autocomplete="new-password"></label>
     <label class="field"><span>Confirm password</span><input type="password" name="confirm" required minlength="6" autocomplete="new-password"></label>
+    {% if turnstile_key %}<div class="cf-turnstile" data-sitekey="{{ turnstile_key }}" data-theme="auto" data-size="flexible"></div>{% endif %}
     <button class="btn btn-block">Sign up</button>
   </form>
   <p class="auth-foot">Already have an account? <a href="{{ url_for('login') }}">Log in</a></p>
 </div>
 {% endblock %}
+{% block scripts %}{% if turnstile_key %}<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>{% endif %}{% endblock %}

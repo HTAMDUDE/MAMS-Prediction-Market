@@ -14,7 +14,9 @@ import time
 from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 from functools import wraps
-from urllib.parse import urlsplit
+import urllib.error
+import urllib.request
+from urllib.parse import urlencode, urlsplit
 
 from flask import (Flask, abort, flash, g, jsonify, make_response, redirect, render_template,
                    request, session, url_for, current_app)
@@ -1310,7 +1312,9 @@ def csp_nonce():
 
 # Google Fonts is the only outside origin the pages use. Styles allow 'unsafe-inline' because templates and
 # app.js use style="" attributes; scripts don't.
-CSP = ("default-src 'self'; script-src 'self' 'nonce-{nonce}'; "
+# Cloudflare Turnstile (the "verify you're human" box on sign-up) loads its script and frame from this origin.
+TURNSTILE_ORIGIN = "https://challenges.cloudflare.com"
+CSP = ("default-src 'self'; script-src 'self' 'nonce-{nonce}' " + TURNSTILE_ORIGIN + "; frame-src " + TURNSTILE_ORIGIN + "; "
        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; "
        "img-src 'self' data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; object-src 'none'; "
        "base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
@@ -1426,6 +1430,8 @@ def register():
             flash("Passwords don't match.", "error")
         elif rate_limited(("register", request.remote_addr), 40, 3600):
             flash("Too many new accounts from this network. Try again in a while.", "error")
+        elif not turnstile_passed(request.form.get("cf-turnstile-response", ""), request.remote_addr):
+            flash("Please complete the “verify you're human” check and try again.", "error")
         else:
             db = get_db()
             first_user = db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
@@ -1458,7 +1464,7 @@ def register():
                 else:
                     send_email_code(db, cur.lastrowid, username, email)
                 return redirect(url_for("account_email"))
-    return render_template("register.html")
+    return render_template("register.html", turnstile_key=TURNSTILE_SITE_KEY if turnstile_enabled() else "")
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -1490,6 +1496,33 @@ def login():
 
 DUMMY_PASSWORD_HASH = generate_password_hash(secrets.token_hex(16))
 PASSWORD_MIN, PASSWORD_MAX = 6, 128
+
+
+# Cloudflare Turnstile on the sign-up form, to stop bots making accounts. Off unless both keys are set (get them
+# free at dash.cloudflare.com -> Turnstile -> Add widget, with your site's domain).
+TURNSTILE_SITE_KEY = os.environ.get("MAMS_TURNSTILE_SITE_KEY", "").strip()
+TURNSTILE_SECRET = os.environ.get("MAMS_TURNSTILE_SECRET", "").strip()
+TURNSTILE_VERIFY_URL = TURNSTILE_ORIGIN + "/turnstile/v0/siteverify"
+
+
+def turnstile_enabled():
+    return bool(TURNSTILE_SITE_KEY and TURNSTILE_SECRET)
+
+
+def turnstile_passed(token, remote_ip):
+    """Ask Cloudflare whether this sign-up's Turnstile token is genuine (each token works once). If Cloudflare
+    can't be reached, sign-up is allowed and the problem is logged, so an outage doesn't lock everyone out."""
+    if not turnstile_enabled():
+        return True
+    if not token:
+        return False
+    data = urlencode({"secret": TURNSTILE_SECRET, "response": token, "remoteip": remote_ip or ""}).encode()
+    try:
+        with urllib.request.urlopen(urllib.request.Request(TURNSTILE_VERIFY_URL, data=data), timeout=10) as resp:
+            return bool(json.loads(resp.read().decode()).get("success"))
+    except (OSError, ValueError, urllib.error.URLError):
+        current_app.logger.exception("Couldn't reach Cloudflare Turnstile; letting this sign-up through.")
+        return True
 
 
 EMAIL_TAKEN_MSG = "That email is already used by another account. If it's yours, log in to that account instead."

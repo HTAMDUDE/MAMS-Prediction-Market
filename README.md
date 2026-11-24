@@ -81,6 +81,11 @@ theirs from Portfolio. An email someone has signed up with but not yet confirmed
 (`EMAIL_CLAIM_HOURS`), so nobody else can sign up with it in the meantime. Codes are sent at most once a minute per
 account and once a minute per email address (`LOGIN_CODE_RESEND_DELAY`), plus 5 an hour per account.
 
+**Bot protection (optional):** set `MAMS_TURNSTILE_SITE_KEY` and `MAMS_TURNSTILE_SECRET` to add Cloudflare Turnstile's
+"verify you're human" check to the sign-up form. Get both keys free at dash.cloudflare.com → Turnstile → Add widget,
+with your site's domain (e.g. `yourname.pythonanywhere.com`). It's off when either is missing. If the server can't
+reach Cloudflare, sign-ups are let through and the error is logged.
+
 Every confirmed email is saved in the database and written to **`instance/people.csv`** (`name,email` for every
 account, blank until confirmed). `instance/` is ignored by Git, so names and emails never reach GitHub.
 
