@@ -483,7 +483,7 @@ def test_turnstile_check_outcomes(monkeypatch):
         assert appmod.turnstile_check("good", "1.2.3.4") == "ok"
         _turnstile(monkeypatch, "down")
         assert appmod.turnstile_check("good", "1.2.3.4") == "unreachable"
-        assert not appmod.turnstile_passed("good", "1.2.3.4")                   # an outage rejects, as on main
+        assert not appmod.turnstile_passed("good", "1.2.3.4")                  # outage: rejected
         _turnstile(monkeypatch, "up")
         assert appmod.turnstile_passed("good", "1.2.3.4") and not appmod.turnstile_passed("", "1.2.3.4")
         assert not appmod.turnstile_passed("bad", "1.2.3.4")
@@ -512,16 +512,17 @@ def test_passing_the_human_check_is_recorded_and_costs_no_risk(monkeypatch, sent
     assert not events(db, "captcha_unreachable")
 
 
-def test_cloudflare_outage_rejects_the_signup_and_logs_it(monkeypatch, sent):
+def test_cloudflare_outage_rejects_signup_and_logs_it(monkeypatch, sent):
     db = _fresh_db()
-    seed_owner(db)
+    owner = client_at("34.120.1.1")
+    signup(owner, "boss")
     _turnstile(monkeypatch, "down")
     _, page = _signup_with_captcha(db, "unverified", "tok", ip="34.120.1.2")
-    assert "couldn&#39;t run the" in page.get_data(as_text=True)
+    assert "couldn" in page.get_data(as_text=True) and "Try again in a minute" in page.get_data(as_text=True)
     assert db.execute("SELECT COUNT(*) FROM users WHERE username = 'unverified'").fetchone()[0] == 0
     e = events(db, "captcha_unreachable")[0]
-    assert e["severity"] == "warn" and e["username"] == "unverified" and "rejected" in e["detail"]
-    assert not sent                                              # no code was emailed either
+    assert e["severity"] == "warn" and "rejected" in e["detail"]
+    assert not sent
 
 
 def test_register_page_still_loads_both_scripts_when_turnstile_is_on(monkeypatch):

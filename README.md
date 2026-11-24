@@ -92,9 +92,10 @@ account and once a minute per email address (`LOGIN_CODE_RESEND_DELAY`), plus 5 
 **Bot protection (optional):** set `MAMS_TURNSTILE_SITE_KEY` and `MAMS_TURNSTILE_SECRET` to add Cloudflare Turnstile's
 "verify you're human" check to the sign-up form. Get both keys free at dash.cloudflare.com → Turnstile → Add widget,
 with your site's domain (e.g. `yourname.pythonanywhere.com`). It's off when either is missing. If the server can't
-reach Cloudflare, sign-ups are rejected (people see "try again in a minute") and a *Human check unreachable* event is
-logged. Passed, failed and missing checks are all in the event log, and an account's Identity card says whether its
-sign-up was verified. Use **Managed** mode for the widget: it only shows a checkbox when a visitor looks risky.
+reach Cloudflare, sign-ups are rejected (the person is asked to try again in a minute) and a *Human check unreachable*
+event is logged. Passed, failed and missing checks are all in the event log, and an account's Identity card says
+whether its sign-up was verified. Use **Managed** mode for the widget: it only shows a checkbox when a visitor looks
+risky.
 
 Every confirmed email is saved in the database and written to **`instance/people.csv`** (`name,email` for every
 account, blank until confirmed). `instance/` is ignored by Git, so names and emails never reach GitHub.

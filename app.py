@@ -1860,7 +1860,7 @@ def register():
             log_event("signup_rate_limited", username=username, detail="per IP or per device limit")
             flash("Too many new accounts from this network. Try again in a while.", "error")
         elif (captcha := turnstile_check(request.form.get("cf-turnstile-response", ""), request.remote_addr)) \
-                not in ("off", "ok"):
+                in ("missing", "failed", "unreachable"):
             if captcha == "unreachable":
                 log_event("captcha_unreachable", username=username,
                           detail="Cloudflare Turnstile couldn't be reached; sign-up rejected")
@@ -1965,9 +1965,9 @@ def turnstile_enabled():
 
 def turnstile_check(token, remote_ip):
     """Ask Cloudflare whether this sign-up's Turnstile token is genuine (each token works once). Returns
-    'off' (not configured), 'missing' (no token sent), 'failed' (Cloudflare says no), 'unreachable' (Cloudflare
-    couldn't be reached) or 'ok'. Anything but 'off' and 'ok' rejects the sign-up: if Cloudflare can't be reached the
-    sign-up is rejected (and the problem logged), so bots can't slip through during an outage."""
+    'off' (not configured), 'missing' (no token sent), 'failed' (Cloudflare says no), 'ok', or 'unreachable'.
+    Sign-up only goes ahead on 'off' or 'ok': when Cloudflare can't be reached the sign-up is rejected (and logged),
+    so bots can't slip through during an outage."""
     if not turnstile_enabled():
         return "off"
     if not token:
@@ -1985,7 +1985,7 @@ def turnstile_check(token, remote_ip):
 
 
 def turnstile_passed(token, remote_ip):
-    """True only if the sign-up may go ahead: the check is off, or Cloudflare confirmed it."""
+    """True only if the check passed or Turnstile is off."""
     return turnstile_check(token, remote_ip) in ("off", "ok")
 
 
