@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Loans · Admin · MAMS Prediction Market{% endblock %}
+{% block content %}
+<div class="activity-head">
+  <div>
+    <h1>Loans</h1>
+    <p class="muted">Every open offer and running loan, with the ones in default first. Forgiving a loan writes off what's
+      still owed; extending moves the due date. Each action is recorded in the <a href="{{ url_for('admin_log') }}">admin log</a>.</p>
+  </div>
+  <a class="btn btn-small btn-ghost" href="{{ url_for('admin') }}">← Admin</a>
+</div>
+
+<div class="card">
+  {% if loans %}
+  <div class="table-scroll">
+  <table class="table stack-mobile">
+    <thead><tr><th>Lender</th><th>Borrower</th><th class="num">Principal</th><th class="num">Owed</th><th>Status</th><th>Actions</th></tr></thead>
+    <tbody>
+    {% for x in loans|sort(attribute='default', reverse=True) %}{% set l = x.l %}
+      <tr>
+        <td data-label="Lender">{{ l.lender }}</td>
+        <td data-label="Borrower">{{ l.borrower or 'Anyone' }}</td>
+        <td class="num" data-label="Principal">Ⓜ{{ l.principal|money }} <span class="muted small">at {{ '%g'|format(l.rate) }}%</span></td>
+        <td class="num" data-label="Owed">{% if l.status == 'active' %}Ⓜ{{ l.owed|money }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td data-label="Status">
+          {% if l.status == 'offered' %}<span class="status status-pending">offer</span>
+          {% elif x.default %}<span class="status status-rejected">in default</span>
+          {% elif x.overdue %}<span class="status status-rejected">overdue</span> <span class="muted small">collectable from {{ x.grace_end|when }}</span>
+          {% else %}<span class="status status-approved">due {{ l.due_at|until }}</span>{% endif %}
+        </td>
+        <td data-label="Actions"><div class="row-actions">
+          {% if l.status == 'active' %}
+          <form method="post" action="{{ url_for('admin_loan_extend', lid=l.id) }}" class="inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="number" name="days" min="1" max="{{ LOAN_MAX_DAYS }}" value="7" aria-label="Days to extend" style="width:4.5rem">
+            <button class="btn btn-small btn-ghost">Extend</button>
+          </form>
+          <form method="post" action="{{ url_for('admin_loan_forgive', lid=l.id) }}" data-confirm="Forgive Ⓜ{{ l.owed|money }} that {{ l.borrower }} owes {{ l.lender }}? The lender loses that claim.">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="btn btn-small btn-ghost">Forgive</button>
+          </form>
+          {% else %}
+          <form method="post" action="{{ url_for('admin_loan_cancel', lid=l.id) }}" data-confirm="Cancel this offer and return Ⓜ{{ l.principal|money }} to {{ l.lender }}?">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="btn btn-small btn-ghost">Cancel offer</button>
+          </form>
+          {% endif %}
+        </div></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}<p class="muted">No open offers or running loans.</p>{% endif %}
+</div>
+{% endblock %}

@@ -4,7 +4,7 @@
 <div class="page-head">
   <div>
     <h1>Leaderboard</h1>
-    <p class="muted">Net worth = cash + what your open bets would sell for right now.</p>
+    <p class="muted">Net worth = cash + what your open bets would sell for right now + money you're owed − money you owe.</p>
   </div>
   {% if board|selectattr('is_me')|list %}<a class="btn btn-small btn-ghost" href="#me">Jump to me ↓</a>{% endif %}
 </div>

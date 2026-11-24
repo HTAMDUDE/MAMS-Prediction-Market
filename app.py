@@ -87,6 +87,11 @@ EPS = 1e-9
 LOAN_MIN = 1.0
 LOAN_MAX_RATE = 100.0
 LOAN_MAX_DAYS = 30
+# Borrowing limits and what happens when a loan isn't paid back (see the loans section below).
+LOAN_CREDIT_FLOOR = 500.0   # anyone can owe at least this much in total...
+LOAN_CREDIT_RATIO = 0.5     # ...or this share of cash + bets - debts, whichever is more
+LOAN_MAX_ACTIVE = 5         # running loans as a borrower
+LOAN_GRACE_DAYS = 2         # after the due date, before lenders may sell or take over the borrower's bets
 OWNER_USERNAME = os.environ.get("MAMS_OWNER", "Kaushik").strip()
 LOGIN_CODE_LIFETIME = 10 * 60
 LOGIN_CODE_RESEND_DELAY = 60  # at most one code a minute per account, and per email address
@@ -282,6 +287,8 @@ NEW_COLUMNS = {
                   # the proposer's opening bet, held until approval (refunded if rejected or withdrawn)
                   ("stake", "REAL NOT NULL DEFAULT 0"), ("stake_pick", "INTEGER"),
                   ("stake_label", "TEXT NOT NULL DEFAULT ''")],
+    # via: 'loan' marks shares handed from a borrower to their lender to pay off an overdue loan
+    "trades": [("via", "TEXT")],
 }
 
 
@@ -400,11 +407,23 @@ def shorten_dispute_windows(db):
         raise
 
 
+def mark_loan_rules_start(db):
+    """Record when lenders were first allowed to collect from a borrower's bets. A loan that was already running then
+    gets its grace period counted from that moment, so nobody is seized on terms they never saw. A new database has
+    no such loans, so its start is the beginning of time."""
+    if db.execute("SELECT 1 FROM site_settings WHERE key = 'loans_v2_at'").fetchone():
+        return
+    running = db.execute("SELECT 1 FROM loans WHERE status = 'active' LIMIT 1").fetchone()
+    db.execute("INSERT INTO site_settings (key, value, updated_at) VALUES ('loans_v2_at', ?, datetime('now'))",
+               (now_str() if running else "1970-01-01 00:00:00",))
+
+
 def init_db():
     db = connect()
     with open(os.path.join(BASE_DIR, "schema.sql")) as f:
         db.executescript(f.read())
     migrate(db)
+    mark_loan_rules_start(db)
     backfill_security(db)
     require_emails_once(db)
     deepen_liquidity(db)
@@ -579,6 +598,11 @@ def parse_dt(s):
 
 def cents(x):
     return round(x + 0.0, 2)
+
+
+def floor_cents(x):
+    """Round down to a whole cent, the way a sale is paid out (check_trade)."""
+    return math.floor(x * 100 + 1e-9) / 100
 
 
 def market_state(m):
@@ -975,6 +999,16 @@ def check_trade(m, outs, idx, action, value, balance=None, held=None, fee=0.0):
     raise TradeError("Unknown action.")
 
 
+def set_position(db, user_id, outcome_id, shares, cost):
+    """Store a user's holding of one outcome (removing it when nothing is left). Call inside a transaction."""
+    if shares <= 1e-9:
+        db.execute("DELETE FROM positions WHERE user_id = ? AND outcome_id = ?", (user_id, outcome_id))
+    else:
+        db.execute("INSERT INTO positions (user_id, outcome_id, shares, cost) VALUES (?, ?, ?, ?) "
+                   "ON CONFLICT(user_id, outcome_id) DO UPDATE SET shares = excluded.shares, cost = excluded.cost",
+                   (user_id, outcome_id, shares, cost))
+
+
 def execute_trade(db, user_id, market_id, outcome_id, action, value, min_out=None):
     """Buy (value = coins to spend) or sell (value = shares to sell). Returns a status message.
     min_out (optional) is the least the trader will accept: shares for a buy, coins for a sell. It guards
@@ -987,6 +1021,9 @@ def execute_trade(db, user_id, market_id, outcome_id, action, value, min_out=Non
         if market_state(m) != "open":
             raise TradeError("This market is no longer accepting bets.")
         block = trade_block_reason(db, user_id, market_id)
+        if block:
+            raise TradeError(block)
+        block = overdue_block(db, user_id) if action == "buy" else None
         if block:
             raise TradeError(block)
         outs = get_outcomes(db, market_id)
@@ -1048,13 +1085,7 @@ def execute_trade(db, user_id, market_id, outcome_id, action, value, min_out=Non
                 log_activity(db, payee, "earning", late, m, f"Late trading fee from {user['username']}")
             msg += f" Late trading fee: Ⓜ{late:,.2f}" + (f" (paid to {payee_name})." if payee else ".")
         msg += f" Balance: Ⓜ{db.execute('SELECT balance FROM users WHERE id = ?', (user_id,)).fetchone()[0]:,.2f}."
-        if new_shares <= 1e-9:
-            db.execute("DELETE FROM positions WHERE user_id = ? AND outcome_id = ?", (user_id, outcome_id))
-        else:
-            db.execute(
-                "INSERT INTO positions (user_id, outcome_id, shares, cost) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(user_id, outcome_id) DO UPDATE SET shares = excluded.shares, cost = excluded.cost",
-                (user_id, outcome_id, new_shares, new_cost))
+        set_position(db, user_id, outcome_id, new_shares, new_cost)
         db.execute("INSERT INTO trades (user_id, market_id, outcome_id, shares, amount, created_at) "
                    "VALUES (?, ?, ?, ?, ?, ?)", (user_id, market_id, outcome_id, d_shares, -d_cash, now_str()))
         snapshot_prices(db, market_id, m["b"])
@@ -1599,6 +1630,9 @@ AUDIT_ACTIONS = {
     "security.rescan": "Re-scanned every account for alts",
     "security.lists": "Changed the email or network lists",
     "email.release": "Released a blocked email address",
+    "loan.forgive": "Forgave a loan",
+    "loan.extend": "Extended a loan's due date",
+    "loan.cancel": "Cancelled a loan offer",
 }
 
 
@@ -1647,11 +1681,13 @@ def inject_globals():
     if g.user and g.user["is_admin"]:
         pending = get_db().execute("SELECT COUNT(*) FROM proposals WHERE status = 'pending'").fetchone()[0]
     loan_alerts = 0
-    if g.user:  # offers made to you, plus loans of yours that are overdue
+    if g.user:  # offers made to you, loans of yours that are overdue, and loans you made that are in default
+        grace_cutoff = (datetime.now() - timedelta(days=LOAN_GRACE_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
         loan_alerts = get_db().execute(
             "SELECT COUNT(*) FROM loans WHERE (status = 'offered' AND borrower_id = ?) "
-            "OR (status = 'active' AND borrower_id = ? AND due_at <= ?)",
-            (g.user["id"], g.user["id"], now_str())).fetchone()[0]
+            "OR (status = 'active' AND borrower_id = ? AND due_at <= ?) "
+            "OR (status = 'active' AND lender_id = ? AND due_at <= ?)",
+            (g.user["id"], g.user["id"], now_str(), g.user["id"], grace_cutoff)).fetchone()[0]
     return {"csrf_token": csrf_token, "user": g.user, "can_bonus": can_bonus, "pending_proposals": pending,
             "loan_alerts": loan_alerts,
             "SCHOOL_TZ": os.environ.get("TZ", "America/New_York"),
@@ -2402,6 +2438,7 @@ def late_fee_table():
 def how_it_works():
     top = LATE_FEE_TIERS[0][1]
     return render_template("how_it_works.html", window_hours=DISPUTE_HOURS, late_rows=late_fee_table(),
+                           LOAN_MAX_ACTIVE=LOAN_MAX_ACTIVE, LOAN_GRACE_DAYS=LOAN_GRACE_DAYS,
                            late_top=top, late_example=cents(LATE_FEE_RATE * 100 * 0.25 * top),
                            late_first_limit=late_fee_table()[-1][0].replace("Less than ", ""),
                            snipe_example=cents(LATE_SNIPE_RATE * 100 * 0.95 * 0.95 * top),
@@ -2492,7 +2529,7 @@ def quote():
     balance = held = None  # logged-out visitors still get a price preview
     try:
         if g.user:
-            block = trade_block_reason(db, g.user["id"], mid)
+            block = trade_block_reason(db, g.user["id"], mid) or (overdue_block(db, g.user["id"]) if action == "buy" else None)
             if block:
                 raise TradeError(block)
             pos = db.execute("SELECT shares FROM positions WHERE user_id = ? AND outcome_id = ?",
@@ -2701,19 +2738,52 @@ def pay_loan(db, loan, amount, automatic=False):
     return amount
 
 
+def credit_loan(db, loan, amount, detail_borrower, detail_lender, market=None):
+    """Knock `amount` off a loan without any cash moving (the lender took something else in payment). Call inside a
+    transaction, with amount <= what's owed. Marks the loan repaid once nothing is left."""
+    amount = cents(amount)
+    if amount <= 0:
+        return 0.0
+    left = cents(loan["owed"] - amount)
+    done = left < 0.005
+    db.execute("UPDATE loans SET owed = ?, repaid = ROUND(repaid + ?, 2), status = ?, closed_at = ? WHERE id = ?",
+               (0.0 if done else left, amount, "repaid" if done else "active", now_str() if done else None,
+                loan["id"]))
+    suffix = " (paid off)" if done else ""
+    log_activity(db, loan["borrower_id"], "loan", 0, market, detail_borrower + suffix)
+    log_activity(db, loan["lender_id"], "loan", 0, market, detail_lender + suffix)
+    return amount
+
+
+def collect_for_borrower(db, borrower_id):
+    """Take what's owed on this borrower's overdue loans out of their cash, oldest first, as much as they have.
+    Call inside a transaction."""
+    for loan in db.execute("SELECT * FROM loans WHERE status = 'active' AND borrower_id = ? AND due_at <= ? "
+                           "ORDER BY due_at, id", (borrower_id, now_str())).fetchall():
+        cash = db.execute("SELECT balance FROM users WHERE id = ?", (borrower_id,)).fetchone()["balance"]
+        pay_loan(db, loan, min(cash, loan["owed"]), automatic=True)
+
+
 def collect_overdue_loans(db):
     """Take what's owed on overdue loans out of the borrower's cash, as much as they have. Runs on every request,
     so money a borrower gets later (sales, payouts, bonuses) goes to their lenders until the debt is cleared.
-    Oldest loans are paid first."""
+    Oldest loans are paid first. Loan offers an overdue borrower still has open are withdrawn first, so the money
+    they hold goes to their lenders as well."""
     if not db.execute("SELECT 1 FROM loans l JOIN users u ON u.id = l.borrower_id WHERE l.status = 'active' "
-                      "AND l.due_at <= ? AND u.balance >= 0.01 LIMIT 1", (now_str(),)).fetchone():
+                      "AND l.due_at <= ? AND u.balance >= 0.01 LIMIT 1", (now_str(),)).fetchone() \
+            and not db.execute("SELECT 1 FROM loans o WHERE o.status = 'offered' AND EXISTS (SELECT 1 FROM loans a "
+                               "WHERE a.status = 'active' AND a.borrower_id = o.lender_id AND a.due_at <= ?) LIMIT 1",
+                               (now_str(),)).fetchone():
         return
     db.execute("BEGIN IMMEDIATE")
     try:
-        for loan in db.execute("SELECT * FROM loans WHERE status = 'active' AND due_at <= ? ORDER BY due_at, id",
-                               (now_str(),)).fetchall():
-            cash = db.execute("SELECT balance FROM users WHERE id = ?", (loan["borrower_id"],)).fetchone()["balance"]
-            pay_loan(db, loan, min(cash, loan["owed"]), automatic=True)
+        for offer in db.execute("SELECT * FROM loans o WHERE o.status = 'offered' AND EXISTS (SELECT 1 FROM loans a "
+                                "WHERE a.status = 'active' AND a.borrower_id = o.lender_id AND a.due_at <= ?)",
+                                (now_str(),)).fetchall():
+            close_loan_offer(db, offer, "cancelled", "Loan offer withdrawn: you have an overdue loan")
+        for row in db.execute("SELECT DISTINCT borrower_id FROM loans WHERE status = 'active' AND due_at <= ?",
+                              (now_str(),)).fetchall():
+            collect_for_borrower(db, row["borrower_id"])
         db.execute("COMMIT")
     except Exception:
         db.execute("ROLLBACK")
@@ -2723,6 +2793,51 @@ def collect_overdue_loans(db):
 def has_overdue_loan(db, user_id):
     return db.execute("SELECT 1 FROM loans WHERE status = 'active' AND borrower_id = ? AND due_at <= ?",
                       (user_id, now_str())).fetchone() is not None
+
+
+def overdue_block(db, user_id):
+    """Why this user can't bet, create markets or lend right now (they have an overdue loan), or None."""
+    if has_overdue_loan(db, user_id):
+        return ("You have an overdue loan. Buying, lending and creating markets are paused until it's paid back; "
+                "selling and repaying still work.")
+    return None
+
+
+def loan_grace_end(db, loan):
+    """When the lender may start collecting from the borrower's bets: LOAN_GRACE_DAYS after the due date, or after
+    the day these rules began if the loan was already overdue then."""
+    start = get_setting(db, "loans_v2_at") or "1970-01-01 00:00:00"
+    base = max(loan["due_at"], start)
+    return (parse_dt(base) + timedelta(days=LOAN_GRACE_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def in_default(db, loan):
+    return loan["status"] == "active" and loan_grace_end(db, loan) <= now_str()
+
+
+def borrower_record(db, user_id):
+    """How a player has handled loans so far: {'ontime', 'late', 'default'} counts."""
+    rec = {"ontime": 0, "late": 0, "default": 0}
+    for l in db.execute("SELECT * FROM loans WHERE borrower_id = ? AND accepted_at IS NOT NULL "
+                        "AND status IN ('repaid', 'active')", (user_id,)).fetchall():
+        if l["status"] == "repaid":
+            rec["ontime" if l["closed_at"] <= l["due_at"] else "late"] += 1
+        elif in_default(db, l):
+            rec["default"] += 1
+        elif l["due_at"] <= now_str():
+            rec["late"] += 1
+    return rec
+
+
+def credit_limit(db, user_id):
+    """(limit, owed): how much this player may owe in total, and what they owe now. The limit is the floor or half of
+    cash + the sell-now value of their bets - their debts, whichever is more. Money they're owed doesn't count, so
+    lending to an alt can't raise it."""
+    cash = db.execute("SELECT balance FROM users WHERE id = ?", (user_id,)).fetchone()["balance"]
+    bets = sum(open_book_values(db).get(user_id, {}).values())
+    owe = db.execute("SELECT COALESCE(SUM(owed), 0) FROM loans WHERE status = 'active' AND borrower_id = ?",
+                     (user_id,)).fetchone()[0]
+    return max(LOAN_CREDIT_FLOOR, LOAN_CREDIT_RATIO * max(0.0, cash + bets - owe)), owe
 
 
 def offer_loan(db, lender_id, borrower_name, principal, rate, days, note=""):
@@ -2739,6 +2854,10 @@ def offer_loan(db, lender_id, borrower_name, principal, rate, days, note=""):
         raise TradeError("Keep the note under 120 characters.")
     db.execute("BEGIN IMMEDIATE")
     try:
+        if db.execute("SELECT 1 FROM loans WHERE status = 'active' AND borrower_id = ? LIMIT 1",
+                      (lender_id,)).fetchone():
+            # otherwise borrowed money could be passed on to another account, out of reach of the lender
+            raise TradeError("Pay off what you've borrowed before lending.")
         borrower_id = None
         if borrower_name:
             row = db.execute("SELECT id FROM users WHERE username = ?", (borrower_name,)).fetchone()
@@ -2774,7 +2893,16 @@ def accept_loan(db, loan_id, user_id):
             raise TradeError("That offer was made to someone else.")
         if has_overdue_loan(db, user_id):
             raise TradeError("Pay back your overdue loan before borrowing more.")
+        if db.execute("SELECT 1 FROM loans WHERE status = 'offered' AND lender_id = ? LIMIT 1", (user_id,)).fetchone():
+            raise TradeError("Withdraw your loan offers before borrowing.")
+        if db.execute("SELECT COUNT(*) FROM loans WHERE status = 'active' AND borrower_id = ?",
+                      (user_id,)).fetchone()[0] >= LOAN_MAX_ACTIVE:
+            raise TradeError(f"You can have at most {LOAN_MAX_ACTIVE} loans running at once. Pay one back first.")
         owed = loan_owed_total(loan["principal"], loan["rate"])
+        limit, owe = credit_limit(db, user_id)
+        if owe + owed > limit + EPS:
+            raise TradeError(f"You can owe at most Ⓜ{limit:,.2f} in total and you already owe Ⓜ{owe:,.2f}. "
+                             f"This loan would make it Ⓜ{owe + owed:,.2f}.")
         now = datetime.now()
         due = (now + timedelta(days=loan["days"])).strftime("%Y-%m-%d %H:%M:%S")
         db.execute("UPDATE loans SET status = 'active', borrower_id = ?, owed = ?, accepted_at = ?, due_at = ? "
@@ -2811,6 +2939,136 @@ def repay_loan(db, loan_id, user_id, amount=None):
         raise
 
 
+def shares_to_cover(q, b, idx, held, owed):
+    """The fewest shares (of `held`) whose sale pays at least `owed`, or all of them if even that isn't enough.
+    Searches on the value rounded down to cents, the way a sale pays out. Returns (shares, coins)."""
+    def worth(n):
+        return floor_cents(lmsr.sell_value(q, b, idx, n))
+    if worth(held) <= owed:
+        return held, worth(held)
+    lo, hi = 0.0, held
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if worth(mid) < owed else (lo, mid)
+    return hi, worth(hi)
+
+
+def collectable_positions(db, loan, lender_id):
+    """What a lender could collect on a loan in default: the borrower's bets in markets that are still open, with the
+    shares it would take to cover what's owed and what those are worth now."""
+    rows = db.execute("SELECT p.outcome_id, p.shares, o.label, o.market_id FROM positions p "
+                      "JOIN outcomes o ON o.id = p.outcome_id JOIN markets m ON m.id = o.market_id "
+                      "WHERE p.user_id = ? AND p.shares > 0 AND m.status = 'open'", (loan["borrower_id"],)).fetchall()
+    out = []
+    for r in rows:
+        m = db.execute("SELECT * FROM markets WHERE id = ?", (r["market_id"],)).fetchone()
+        if market_state(m) != "open":
+            continue
+        outs = get_outcomes(db, m["id"])
+        idx = [o["id"] for o in outs].index(r["outcome_id"])
+        n, coins = shares_to_cover(
+            [o["shares"] for o in outs], m["b"], idx, r["shares"], loan["owed"])
+        if coins < 0.01:
+            continue
+        can_take = (trade_block_reason(db, lender_id, m["id"]) is None and late_multiplier(m) == 0
+                    and overdue_block(db, lender_id) is None)
+        out.append({"outcome_id": r["outcome_id"], "market_id": m["id"], "question": m["question"],
+                    "label": r["label"], "held": r["shares"], "shares": n, "value": coins, "can_take": can_take})
+    return out
+
+
+def seize_position(db, loan_id, lender_id, outcome_id, mode):
+    """A lender collects on a loan in default from one of the borrower's bets in an open market, only up to what is
+    owed. mode 'sell' sells the shares on the borrower's behalf and pays the lender the proceeds; mode 'take' hands
+    the shares to the lender at their sell-now value, which comes off the debt. Returns a message for the lender."""
+    if mode not in ("sell", "take"):
+        raise TradeError("Choose force sell or take over.")
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        loan = db.execute("SELECT * FROM loans WHERE id = ?", (loan_id,)).fetchone()
+        if loan is None or loan["lender_id"] != lender_id or loan["status"] != "active":
+            raise TradeError("That isn't one of your running loans.")
+        if loan_grace_end(db, loan) > now_str():
+            raise TradeError(f"You can collect from their bets after {loan_grace_end(db, loan)}.")
+        borrower_id = loan["borrower_id"]
+        collect_for_borrower(db, borrower_id)  # cash first, the oldest loans first
+        loan = db.execute("SELECT * FROM loans WHERE id = ?", (loan_id,)).fetchone()
+        if loan["status"] != "active":
+            db.execute("COMMIT")
+            return "Their cash already covered the loan, so nothing was taken from their bets."
+        o = db.execute("SELECT * FROM outcomes WHERE id = ?", (outcome_id,)).fetchone()
+        m = db.execute("SELECT * FROM markets WHERE id = ?", (o["market_id"],)).fetchone() if o else None
+        if m is None or market_state(m) != "open":
+            raise TradeError("You can only collect from bets in markets that are still open. "
+                             "Anything in a closed market is paid to lenders when it resolves.")
+        pos = db.execute("SELECT * FROM positions WHERE user_id = ? AND outcome_id = ?",
+                         (borrower_id, outcome_id)).fetchone()
+        if pos is None or pos["shares"] <= EPS:
+            raise TradeError("They don't hold that bet any more.")
+        outs = get_outcomes(db, m["id"])
+        idx = [x["id"] for x in outs].index(outcome_id)
+        q = [x["shares"] for x in outs]
+        n, coins = shares_to_cover(q, m["b"], idx, pos["shares"], loan["owed"])
+        if coins < 0.01:
+            raise TradeError("That bet is worth less than Ⓜ0.01.")
+        names = {r["id"]: r["username"] for r in db.execute(
+            "SELECT id, username FROM users WHERE id IN (?, ?)", (borrower_id, lender_id))}
+        label = o["label"]
+        new_shares = pos["shares"] - n
+        new_cost = pos["cost"] * (new_shares / pos["shares"])
+        if mode == "sell":
+            db.execute("UPDATE outcomes SET shares = shares - ? WHERE id = ?", (n, outcome_id))
+            set_position(db, borrower_id, outcome_id, new_shares, new_cost)
+            db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (coins, borrower_id))
+            log_activity(db, borrower_id, "sell", coins, m,
+                         f"Forced sale of {n:,.2f} shares of “{label}” to repay {names[lender_id]}")
+            db.execute("INSERT INTO trades (user_id, market_id, outcome_id, shares, amount, created_at) "
+                       "VALUES (?, ?, ?, ?, ?, ?)", (borrower_id, m["id"], outcome_id, -n, -coins, now_str()))
+            snapshot_prices(db, m["id"], m["b"])
+            paid = pay_loan(db, loan, min(coins, loan["owed"]), automatic=True)
+            msg = f"Sold {n:,.2f} shares of “{label}” for Ⓜ{coins:,.2f}. Ⓜ{paid:,.2f} went to your loan."
+        else:
+            block = trade_block_reason(db, lender_id, m["id"]) or overdue_block(db, lender_id)
+            if block:
+                raise TradeError(block)
+            if late_multiplier(m) > 0:
+                raise TradeError("Betting in this market is about to close, so you can only force a sale here.")
+            fee = entry_fee_due(db, m, lender_id)
+            if fee:
+                cash = db.execute("SELECT balance FROM users WHERE id = ?", (lender_id,)).fetchone()["balance"]
+                if cash + EPS < fee:
+                    raise TradeError(f"Taking over a first bet in this market costs the Ⓜ{fee:,.0f} entry fee "
+                                     f"and you have Ⓜ{cash:,.2f}.")
+                creator = creator_name(db, m)
+                db.execute("UPDATE users SET balance = ROUND(balance - ?, 2) WHERE id = ?", (fee, lender_id))
+                log_activity(db, lender_id, "fee", -fee, m, f"Entry fee (first bet), paid to {creator}")
+                db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (fee, m["created_by"]))
+                log_activity(db, m["created_by"], "earning", fee, m, f"Entry fee from {names[lender_id]}")
+                db.execute("INSERT INTO market_entries (market_id, user_id, creator_id, fee, created_at) "
+                           "VALUES (?, ?, ?, ?, ?)", (m["id"], lender_id, m["created_by"], fee, now_str()))
+            mine = db.execute("SELECT * FROM positions WHERE user_id = ? AND outcome_id = ?",
+                              (lender_id, outcome_id)).fetchone()
+            set_position(db, borrower_id, outcome_id, new_shares, new_cost)
+            set_position(db, lender_id, outcome_id, (mine["shares"] if mine else 0.0) + n,
+                         (mine["cost"] if mine else 0.0) + coins)
+            now = now_str()
+            db.execute("INSERT INTO trades (user_id, market_id, outcome_id, shares, amount, created_at, via) "
+                       "VALUES (?, ?, ?, ?, ?, ?, 'loan')", (borrower_id, m["id"], outcome_id, -n, -coins, now))
+            db.execute("INSERT INTO trades (user_id, market_id, outcome_id, shares, amount, created_at, via) "
+                       "VALUES (?, ?, ?, ?, ?, ?, 'loan')", (lender_id, m["id"], outcome_id, n, coins, now))
+            credited = credit_loan(
+                db, loan, min(coins, loan["owed"]),
+                f"{names[lender_id]} took over {n:,.2f} shares of “{label}” (worth Ⓜ{coins:,.2f}) for your overdue loan",
+                f"Took over {n:,.2f} shares of “{label}” from {names[borrower_id]} (worth Ⓜ{coins:,.2f}) "
+                f"for their overdue loan", m)
+            msg = f"Took over {n:,.2f} shares of “{label}” worth Ⓜ{coins:,.2f}. Ⓜ{credited:,.2f} came off the loan."
+        db.execute("COMMIT")
+        return msg
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+
+
 def end_loan_offer(db, loan_id, user_id, status):
     """status 'cancelled' (the lender withdraws) or 'declined' (the named borrower turns it down)."""
     db.execute("BEGIN IMMEDIATE")
@@ -2842,12 +3100,24 @@ def loans():
     borrowing = db.execute(q + "WHERE l.status = 'active' AND l.borrower_id = ? ORDER BY l.due_at", (uid,)).fetchall()
     lending = db.execute(q + "WHERE l.status IN ('offered', 'active') AND l.lender_id = ? "
                          "ORDER BY l.status = 'offered', l.due_at, l.id DESC", (uid,)).fetchall()
-    history = db.execute(q + "WHERE l.status IN ('repaid', 'declined', 'cancelled') AND (l.lender_id = ? OR l.borrower_id = ?) "
+    history = db.execute(q + "WHERE l.status IN ('repaid', 'declined', 'cancelled', 'forgiven') "
+                         "AND (l.lender_id = ? OR l.borrower_id = ?) "
                          "ORDER BY l.closed_at DESC LIMIT 30", (uid, uid)).fetchall()
+    grace_end = {l["id"]: loan_grace_end(db, l) for l in borrowing + lending if l["status"] == "active"}
+    now = now_str()
+    # loans in default where this player is the lender: what they could collect from the borrower's bets
+    collect = {l["id"]: collectable_positions(db, l, uid) for l in lending
+               if l["status"] == "active" and grace_end[l["id"]] <= now}
+    # how each of your borrowers has handled loans before, shown beside their name
+    records = {bid: borrower_record(db, bid) for bid in {l["borrower_id"] for l in lending if l["borrower_id"]}}
+    limit, owe_now = credit_limit(db, uid)
     return render_template("loans.html", for_me=for_me, borrowing=borrowing, lending=lending, history=history,
+                           grace_end=grace_end, collect=collect, records=records, credit_limit=limit,
+                           overdue_message=overdue_block(db, uid), LOAN_GRACE_DAYS=LOAN_GRACE_DAYS,
+                           LOAN_MAX_ACTIVE=LOAN_MAX_ACTIVE,
                            now=now_str(), owed_total=loan_owed_total, LOAN_MAX_RATE=LOAN_MAX_RATE,
                            LOAN_MAX_DAYS=LOAN_MAX_DAYS, LOAN_MIN=LOAN_MIN,
-                           owe=sum(l["owed"] for l in borrowing),
+                           owe=sum(l["owed"] for l in borrowing), borrow_room=max(0.0, limit - owe_now),
                            owed_to_me=sum(l["owed"] for l in lending if l["status"] == "active"),
                            held=sum(l["principal"] for l in lending if l["status"] == "offered"))
 
@@ -2885,8 +3155,10 @@ def loan_accept(lid):
         owed = accept_loan(get_db(), lid, g.user["id"])
         lender = get_db().execute("SELECT lender_id FROM loans WHERE id = ?", (lid,)).fetchone()
         rescore(get_db(), g.user["id"], lender["lender_id"] if lender else None)
-        flash(f"Loan taken. You owe Ⓜ{owed:,.2f}. Anything still owed after the due date is taken from your cash "
-              "automatically.", "success")
+        flash(f"Loan taken. You owe Ⓜ{owed:,.2f}. Once it's overdue, buying, lending and creating markets are "
+              "paused and anything you receive goes to the lender. If it's still unpaid "
+              f"{LOAN_GRACE_DAYS} days after the due date, the lender can sell or take over your bets to cover it.",
+              "success")
     except TradeError as e:
         flash(str(e), "error")
     return redirect(url_for("loans"))
@@ -2900,6 +3172,26 @@ def loan_repay(lid):
         amount = None if raw in ("", "all") else _loan_number("amount")
         paid = repay_loan(get_db(), lid, g.user["id"], amount)
         flash(f"Paid back Ⓜ{paid:,.2f}.", "success")
+    except TradeError as e:
+        flash(str(e), "error")
+    return redirect(url_for("loans"))
+
+
+@app.post("/loans/<int:lid>/collect")
+@login_required
+def loan_collect(lid):
+    if rate_limited(f"collect:{g.user['id']}", 30, 3600):
+        flash("You've done that a lot. Try again later.", "error")
+        return redirect(url_for("loans"))
+    try:
+        try:
+            outcome_id = int(request.form.get("outcome_id", ""))
+        except ValueError:
+            raise TradeError("Pick a bet to collect from.")
+        msg = seize_position(get_db(), lid, g.user["id"], outcome_id, request.form.get("mode", ""))
+        loan = get_db().execute("SELECT borrower_id FROM loans WHERE id = ?", (lid,)).fetchone()
+        rescore(get_db(), g.user["id"], loan["borrower_id"] if loan else None)
+        flash(msg, "success")
     except TradeError as e:
         flash(str(e), "error")
     return redirect(url_for("loans"))
@@ -3087,6 +3379,8 @@ def admin_create():
     fields, error = read_market_form(request.form)
     if not error:
         pick, stake, error = read_stake(request.form, fields["labels"])
+    if not error:
+        error = overdue_block(get_db(), g.user["id"])
     if not error and g.user["balance"] + EPS < CREATION_FEE + stake:
         error = (f"You need Ⓜ{CREATION_FEE + stake:,.2f} (Ⓜ{CREATION_FEE:,.0f} fee + Ⓜ{stake:,.2f} opening bet) "
                  f"but have Ⓜ{g.user['balance']:,.2f}.")
@@ -3131,6 +3425,8 @@ def propose():
             error = f"You already have {MAX_PENDING_PROPOSALS} proposals waiting. Wait for an admin to review them."
         if not error:
             pick, stake, error = read_stake(request.form, fields["labels"])
+        if not error:
+            error = overdue_block(db, g.user["id"])
         if not error and g.user["balance"] + EPS < CREATION_FEE + stake:
             error = (f"Proposing costs Ⓜ{CREATION_FEE:,.0f} plus your Ⓜ{stake:,.2f} opening bet "
                      f"(Ⓜ{CREATION_FEE + stake:,.2f} total). You have Ⓜ{g.user['balance']:,.2f}.")
@@ -3905,6 +4201,92 @@ def admin_comment_mute(uid):
 
 
 AUDIT_PAGE = 50
+
+
+@app.get("/admin/loans")
+@admin_required
+def admin_loans():
+    db = get_db()
+    rows = db.execute("SELECT l.*, lu.username AS lender, bu.username AS borrower FROM loans l "
+                      "JOIN users lu ON lu.id = l.lender_id LEFT JOIN users bu ON bu.id = l.borrower_id "
+                      "WHERE l.status IN ('offered', 'active') ORDER BY l.status = 'offered', l.due_at, l.id").fetchall()
+    loans_ = [{"l": l, "default": in_default(db, l), "overdue": l["status"] == "active" and l["due_at"] <= now_str(),
+               "grace_end": loan_grace_end(db, l) if l["status"] == "active" else None} for l in rows]
+    return render_template("admin_loans.html", loans=loans_, now=now_str(), LOAN_MAX_DAYS=LOAN_MAX_DAYS)
+
+
+def _admin_loan_action(lid, action):
+    """Run `action(db, loan)` inside a transaction on a loan that's offered or running; it returns (audit key, detail)."""
+    db = get_db()
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        loan = db.execute("SELECT l.*, lu.username AS lender, bu.username AS borrower FROM loans l "
+                          "JOIN users lu ON lu.id = l.lender_id LEFT JOIN users bu ON bu.id = l.borrower_id "
+                          "WHERE l.id = ?", (lid,)).fetchone()
+        if loan is None or loan["status"] not in ("offered", "active"):
+            raise TradeError("That loan isn't open any more.")
+        result = action(db, loan)
+        db.execute("COMMIT")
+    except TradeError as e:
+        db.execute("ROLLBACK")
+        flash(str(e), "error")
+        return back(url_for("admin_loans"))
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+    key, detail, message = result
+    log_audit(key, "loan", lid, f"{loan['lender']} → {loan['borrower'] or 'anyone'}", detail)
+    flash(message, "success")
+    return back(url_for("admin_loans"))
+
+
+@app.post("/admin/loans/<int:lid>/forgive")
+@admin_required
+def admin_loan_forgive(lid):
+    def do(db, loan):
+        if loan["status"] != "active":
+            raise TradeError("Only a running loan can be forgiven. Cancel the offer instead.")
+        db.execute("UPDATE loans SET status = 'forgiven', closed_at = ? WHERE id = ?", (now_str(), lid))
+        by = g.user["username"]
+        log_activity(db, loan["borrower_id"], "loan", 0, None,
+                     f"Loan from {loan['lender']} forgiven by an admin ({by}): Ⓜ{loan['owed']:,.2f} written off")
+        log_activity(db, loan["lender_id"], "loan", 0, None,
+                     f"Loan to {loan['borrower']} forgiven by an admin ({by}): Ⓜ{loan['owed']:,.2f} written off")
+        return "loan.forgive", f"Ⓜ{loan['owed']:,.2f} written off", "Loan forgiven."
+    return _admin_loan_action(lid, do)
+
+
+@app.post("/admin/loans/<int:lid>/extend")
+@admin_required
+def admin_loan_extend(lid):
+    try:
+        days = int(request.form.get("days", ""))
+        if not 1 <= days <= LOAN_MAX_DAYS:
+            raise ValueError
+    except ValueError:
+        flash(f"Enter a number of days from 1 to {LOAN_MAX_DAYS}.", "error")
+        return back(url_for("admin_loans"))
+
+    def do(db, loan):
+        if loan["status"] != "active":
+            raise TradeError("Only a running loan can be extended.")
+        # from the later of now and the old date, so an extension on an overdue loan gives the borrower real time
+        start = max(parse_dt(loan["due_at"]), datetime.now())
+        due = (start + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (due, lid))
+        return "loan.extend", f"{days} more days, now due {due}", f"Due date moved to {due}."
+    return _admin_loan_action(lid, do)
+
+
+@app.post("/admin/loans/<int:lid>/cancel")
+@admin_required
+def admin_loan_cancel(lid):
+    def do(db, loan):
+        if loan["status"] != "offered":
+            raise TradeError("Only an offer nobody has taken can be cancelled.")
+        close_loan_offer(db, loan, "cancelled", f"Loan offer cancelled by an admin ({g.user['username']})")
+        return "loan.cancel", f"Ⓜ{loan['principal']:,.2f} returned to {loan['lender']}", "Offer cancelled and refunded."
+    return _admin_loan_action(lid, do)
 
 
 @app.get("/admin/log")

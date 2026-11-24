@@ -32,6 +32,19 @@ assemblies, and anything else the admins post.
   early or in parts; after the due date whatever is still owed is taken from the borrower's cash automatically
   (including money they get later). Loans count towards net worth. Limits are `LOAN_MIN`, `LOAN_MAX_RATE` and
   `LOAN_MAX_DAYS` in `app.py`.
+  - **Borrowing limit**: total owed can't exceed the larger of `LOAN_CREDIT_FLOOR` or `LOAN_CREDIT_RATIO` × (cash +
+    sell-now value of bets − debts), across at most `LOAN_MAX_ACTIVE` loans. Money you're owed doesn't count, and
+    you can't lend while you have a running loan (or borrow while you have open offers), so borrowed money can't be
+    passed to another account.
+  - **Overdue**: the borrower can't buy, lend or create/propose markets (selling and repaying still work), their
+    open offers are withdrawn, and anything they receive goes to their lenders.
+  - **Default**: `LOAN_GRACE_DAYS` after the due date the lender can, on the Loans page, **force sell** or **take
+    over** the borrower's bets in markets that are still open, only as many shares as cover what's owed
+    (`seize_position`). Taking over is at the sell-now value, comes off the debt, charges the lender the entry fee
+    if it's their first bet there, and isn't offered while the late-trading fee applies. Loans already overdue when
+    this shipped count the grace period from `loans_v2_at` in `site_settings`. Bets in closed markets are paid to
+    lenders when the market resolves. Debts never expire.
+  - **Admins** can forgive, extend or cancel loans at **Admin → Loans**; each is written to the admin log.
 - The **Activity** page lists every trade made on the site (who, what, which market, how much), with filters by
   buys/sells, trader and market. **Your balance history** (linked from it) logs every change to your own balance
   (buys, sells, payouts, losses, refunds, bonuses, admin adjustments) with your balance after each one. Admins can

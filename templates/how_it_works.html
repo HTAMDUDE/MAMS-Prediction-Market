@@ -89,6 +89,14 @@
     at once. If anything is still owed after the due date, it's <b>taken from the borrower's cash automatically</b>,
     including money they receive later, until the loan is paid off. Loans count towards net worth: money you're owed
     adds to yours, and money you owe is subtracted.</p>
+  <p>There are limits so nobody can borrow and vanish. You can owe at most the larger of Ⓜ500 or half of your cash
+    plus the sell-now value of your bets, minus your debts, across at most {{ LOAN_MAX_ACTIVE }} loans, and you can't
+    lend while you're borrowing. <b>While a loan is overdue</b> you can't buy, lend or create markets (selling and
+    repaying still work), and everything you receive goes to your lenders. If it's <b>still unpaid
+    {{ LOAN_GRACE_DAYS }} days after the due date</b>, the lender can <b>force a sale</b> of your bets in open markets
+    or <b>take them over</b> at their current sell-now value, only as much as covers what you owe. Bets in markets
+    that have closed are paid to lenders when the market resolves. Debts never expire, and admins can extend or
+    forgive a loan.</p>
 
   <h2>Read the rules, not just the title</h2>
   <p>A market called “Will the bill pass?” might really mean “signed into law by December 31” or “passed by the House”.

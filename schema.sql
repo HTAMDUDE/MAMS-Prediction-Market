@@ -204,7 +204,8 @@ CREATE TABLE IF NOT EXISTS site_settings (
 );
 
 -- Player-to-player loans. The lender's money is held when they offer; the borrower gets it on accepting and owes
--- principal x (1 + rate/100) by due_at. Overdue loans are collected from the borrower's cash automatically.
+-- principal x (1 + rate/100) by due_at. Overdue loans are collected from the borrower's cash automatically, and after
+-- a grace period the lender can sell or take over the borrower's bets (see seize_position in app.py).
 CREATE TABLE IF NOT EXISTS loans (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     lender_id   INTEGER NOT NULL REFERENCES users(id),
@@ -213,7 +214,7 @@ CREATE TABLE IF NOT EXISTS loans (
     rate        REAL NOT NULL,                  -- flat interest, percent of principal
     days        INTEGER NOT NULL,               -- loan length, counted from acceptance
     note        TEXT NOT NULL DEFAULT '',
-    status      TEXT NOT NULL DEFAULT 'offered', -- offered | active | repaid | declined | cancelled
+    status      TEXT NOT NULL DEFAULT 'offered', -- offered | active | repaid | declined | cancelled | forgiven
     owed        REAL NOT NULL DEFAULT 0,        -- still to pay back (active loans)
     repaid      REAL NOT NULL DEFAULT 0,
     due_at      TEXT,

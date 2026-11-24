@@ -105,7 +105,7 @@
     <tbody>
     {% for t in trades %}
       <tr>
-        <td><span class="kind kind-{{ 'buy' if t.shares > 0 else 'sell' }}">{{ 'Bought' if t.shares > 0 else 'Sold' }}</span>
+        <td><span class="kind kind-{{ 'buy' if t.shares > 0 else 'sell' }}">{% if t.via == 'loan' %}{{ 'Took over' if t.shares > 0 else 'Handed over (loan)' }}{% else %}{{ 'Bought' if t.shares > 0 else 'Sold' }}{% endif %}</span>
           {{ t.shares|abs|money }} × {{ t.label }} — <a href="{{ url_for('market', mid=t.market_id) }}">{{ t.question }}</a></td>
         <td class="num">{{ '−' if t.amount > 0 else '+' }}Ⓜ{{ t.amount|abs|money }}</td>
         <td class="num muted small">{{ t.created_at|ago }}</td>
