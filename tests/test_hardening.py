@@ -99,3 +99,24 @@ def test_owner_email_unset_keeps_the_username_rule(monkeypatch):
     uid = db.execute("INSERT INTO users (username, password_hash, balance, created_at) "
                      "VALUES ('Kaushik', 'x', 1000, ?)", (appmod.now_str(),)).lastrowid
     assert appmod.owner_id(db) == uid
+
+
+def test_app_starts_on_a_database_with_a_running_loan_from_before_the_loan_rules(tmp_path):
+    """The live site crashed on start-up: init_db() runs while app.py is still loading, and with an active loan and no
+    loans_v2_at setting it needed now_str() before it was defined. Import the app fresh, in its own process."""
+    import subprocess
+    db = _fresh_db()
+    ann = db.execute("INSERT INTO users (username, password_hash, balance, created_at) VALUES ('ann', 'x', 0, ?)",
+                     (appmod.now_str(),)).lastrowid
+    bob = db.execute("INSERT INTO users (username, password_hash, balance, created_at) VALUES ('bob', 'x', 0, ?)",
+                     (appmod.now_str(),)).lastrowid
+    db.execute("INSERT INTO loans (lender_id, borrower_id, principal, rate, days, owed, status, due_at, created_at) "
+               "VALUES (?, ?, 10, 0, 7, 10, 'active', '2099-01-01 00:00:00', ?)", (ann, bob, appmod.now_str()))
+    db.execute("DELETE FROM site_settings WHERE key = 'loans_v2_at'")
+    db.close()
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ, MAMS_DB=appmod.DB_PATH)
+    r = subprocess.run([sys.executable, "-c", "import app"], cwd=root, env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    check = appmod.connect().execute("SELECT value FROM site_settings WHERE key = 'loans_v2_at'").fetchone()
+    assert check and check[0] != "1970-01-01 00:00:00"

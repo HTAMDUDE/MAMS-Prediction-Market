@@ -426,6 +426,11 @@ def shorten_dispute_windows(db):
         raise
 
 
+# defined before init_db(), which runs while this module is still loading
+def now_str():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def mark_loan_rules_start(db):
     """Record when lenders were first allowed to collect from a borrower's bets. A loan that was already running then
     gets its grace period counted from that moment, so nobody is seized on terms they never saw. A new database has
@@ -606,10 +611,6 @@ init_db()
 
 
 # ---------------------------------------------------------------- helpers
-
-def now_str():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
 
 def parse_dt(s):
     return datetime.fromisoformat(s)
