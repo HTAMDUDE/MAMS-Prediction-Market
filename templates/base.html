@@ -46,9 +46,9 @@
       {% if not user or request.endpoint == 'how_it_works' %}<a href="{{ url_for('how_it_works') }}" {% if request.endpoint == 'how_it_works' %}class="active" aria-current="page"{% endif %}>How it works</a>{% endif %}
       {% if user %}
         <a href="{{ url_for('portfolio') }}" {% if request.endpoint == 'portfolio' %}class="active" aria-current="page"{% endif %}>Portfolio</a>
-        <a href="{{ url_for('loans') }}" {% if request.endpoint == 'loans' %}class="active" aria-current="page"{% endif %}>Loans{% if loan_alerts %} <span class="badge" title="Loan offers for you or overdue loans">{{ loan_alerts }}</span>{% endif %}</a>
+        <a href="{{ url_for('loans') }}" {% if request.endpoint in ('loans', 'my_credit', 'user_credit', 'loan_borrowers') %}class="active" aria-current="page"{% endif %}>Loans{% if loan_alerts %} <span class="badge" title="Loan offers for you or overdue loans">{{ loan_alerts }}</span>{% endif %}</a>
         <a href="{{ url_for('propose') }}" {% if request.endpoint == 'propose' %}class="active" aria-current="page"{% endif %}>Propose</a>
-        {% if user.is_admin %}<a href="{{ url_for('admin') }}" {% if request.endpoint in ('admin', 'admin_review', 'admin_edit', 'admin_user', 'admin_log') %}class="active" aria-current="page"{% endif %}>Admin{% if pending_proposals %} <span class="badge" title="{{ pending_proposals }} proposal(s) waiting">{{ pending_proposals }}</span>{% endif %}</a>{% endif %}
+        {% if user.is_admin %}<a href="{{ url_for('admin') }}" {% if request.endpoint in ('admin', 'admin_review', 'admin_edit', 'admin_user', 'admin_log', 'admin_credit') %}class="active" aria-current="page"{% endif %}>Admin{% if pending_proposals %} <span class="badge" title="{{ pending_proposals }} proposal(s) waiting">{{ pending_proposals }}</span>{% endif %}</a>{% endif %}
       {% endif %}
 {% endmacro %}
 {% macro bonus_form(extra='') %}
@@ -165,7 +165,7 @@
   {% endif %}
   <a href="{{ url_for('leaderboard') }}" {% if request.endpoint == 'leaderboard' %}class="active" aria-current="page"{% endif %}>{{ icon('board') }}<span>Board</span></a>
   {% if user %}
-  <button type="button" id="menu-btn" aria-haspopup="dialog" aria-controls="menu-sheet" {% if request.endpoint in ('propose', 'admin', 'admin_review', 'admin_edit', 'admin_user', 'admin_log', 'how_it_works', 'account_email', 'loans') %}class="active"{% endif %}>
+  <button type="button" id="menu-btn" aria-haspopup="dialog" aria-controls="menu-sheet" {% if request.endpoint in ('propose', 'admin', 'admin_review', 'admin_edit', 'admin_user', 'admin_log', 'how_it_works', 'account_email', 'loans', 'my_credit', 'user_credit', 'loan_borrowers') %}class="active"{% endif %}>
     {{ icon('more') }}<span>More</span>{% set more_badge = loan_alerts + (pending_proposals if user.is_admin else 0) %}{% if more_badge %}<span class="badge">{{ more_badge }}</span>{% endif %}
   </button>
   {% else %}
@@ -181,9 +181,9 @@
     <button type="button" class="btn btn-small btn-ghost" data-close-sheet aria-label="Close menu">✕</button>
   </div>
   <nav class="sheet-nav" aria-label="More">
-    <a href="{{ url_for('loans') }}" {% if request.endpoint == 'loans' %}class="active"{% endif %}>{{ icon('loans') }}Loans{% if loan_alerts %} <span class="badge">{{ loan_alerts }}</span>{% endif %}</a>
+    <a href="{{ url_for('loans') }}" {% if request.endpoint in ('loans', 'my_credit', 'user_credit', 'loan_borrowers') %}class="active"{% endif %}>{{ icon('loans') }}Loans{% if loan_alerts %} <span class="badge">{{ loan_alerts }}</span>{% endif %}</a>
     <a href="{{ url_for('propose') }}" {% if request.endpoint == 'propose' %}class="active"{% endif %}>{{ icon('propose') }}Propose a market</a>
-    {% if user.is_admin %}<a href="{{ url_for('admin') }}" {% if request.endpoint in ('admin', 'admin_review', 'admin_edit', 'admin_user', 'admin_log') %}class="active"{% endif %}>{{ icon('admin') }}Admin{% if pending_proposals %} <span class="badge">{{ pending_proposals }}</span>{% endif %}</a>{% endif %}
+    {% if user.is_admin %}<a href="{{ url_for('admin') }}" {% if request.endpoint in ('admin', 'admin_review', 'admin_edit', 'admin_user', 'admin_log', 'admin_credit') %}class="active"{% endif %}>{{ icon('admin') }}Admin{% if pending_proposals %} <span class="badge">{{ pending_proposals }}</span>{% endif %}</a>{% endif %}
     <a href="{{ url_for('balance_history') }}">{{ icon('history') }}Balance history</a>
     <a href="{{ url_for('how_it_works') }}" {% if request.endpoint == 'how_it_works' %}class="active"{% endif %}>{{ icon('guide') }}How it works</a>
     <a href="{{ url_for('account_email') }}">{{ icon('mail') }}Change email</a>

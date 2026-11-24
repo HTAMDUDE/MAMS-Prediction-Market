@@ -219,7 +219,8 @@ def test_borrowing_limit_and_loan_count():
     appmod.accept_loan(db, ok, bob)                                  # exactly the limit
 
     appmod.accept_loan(db, too_much, rich)                           # half of 10,000 is well above the floor
-    assert appmod.credit_limit(db, rich)[0] == pytest.approx(0.5 * (10200 - 200))
+    mult = appmod.credit_limit_detail(db, rich)["multiplier"]        # the credit score scales the share-of-net-worth part
+    assert appmod.credit_limit(db, rich)[0] == pytest.approx(0.5 * (10200 - 200) * mult)
 
     carl = _user(db, "carl", balance=100000)
     for _ in range(appmod.LOAN_MAX_ACTIVE):

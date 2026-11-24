@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% from "_credit.html" import pill %}
+{% block title %}Credit · Admin · MAMS Prediction Market{% endblock %}
+{% block content %}
+<div class="activity-head">
+  <div>
+    <h1>Credit</h1>
+    <p class="muted">Every player's credit score, the tier mix, and who to watch. Open a player to adjust their score,
+      fix or freeze their borrowing, or see exactly what's driving it. Every change is recorded in the
+      <a href="{{ url_for('admin_log') }}">admin log</a>.</p>
+  </div>
+  <div class="row-actions">
+    <form method="post" action="{{ url_for('admin_credit_recompute') }}" data-confirm="Re-score every player now?">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button class="btn btn-small btn-ghost">Recompute all</button>
+    </form>
+    <a class="btn btn-small btn-ghost" href="{{ url_for('admin_loans') }}">Loans</a>
+    <a class="btn btn-small btn-ghost" href="{{ url_for('admin') }}">← Admin</a>
+  </div>
+</div>
+
+<div class="kpis">
+  <div class="kpi"><span>Players scored</span><strong>{{ kpis.players }}</strong><small class="muted">average {{ kpis.avg }} · median {{ kpis.median }}</small></div>
+  <div class="kpi"><span>Outstanding loans</span><strong>Ⓜ{{ kpis.outstanding|money }}</strong></div>
+  <div class="kpi"><span>Default rate, 30 days</span><strong class="{{ 'down' if kpis.default_rate > 0.1 }}">{{ (kpis.default_rate * 100)|round(1) }}%</strong><small class="muted">of {{ kpis.due_30 }} loan{{ '' if kpis.due_30 == 1 else 's' }} that fell due</small></div>
+  <div class="kpi"><span>In default / overdue</span><strong class="{{ 'down' if kpis.in_default or kpis.overdue }}">{{ kpis.in_default }} / {{ kpis.overdue }}</strong><small class="muted">players</small></div>
+  <div class="kpi"><span>Frozen · new · adjusted</span><strong>{{ kpis.frozen }} · {{ kpis.thin }} · {{ kpis.adjusted }}</strong></div>
+</div>
+
+<div class="card">
+  <h2>Tiers</h2>
+  <div class="tier-bars">
+    {% set most = tiers.values()|max if tiers else 0 %}
+    {% for name, n in tiers.items() %}
+    <div class="tier-bar"><a href="{{ url_for('admin_credit', tier=name) }}"><span class="credit credit-{{ name|slug }}">{{ name }}</span></a>
+      <div class="factor-bar" role="img" aria-label="{{ n }} players"><b style="width: {{ (n / most * 100)|round|int if most else 0 }}%"></b></div><span class="num">{{ n }}</span></div>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="card" id="watch">
+  <h2>Watchlists</h2>
+  <h3>Biggest drops, last 7 days</h3>
+  {% if drops %}<ul class="reason-list">{% for d in drops %}
+    <li><span class="pts down">−{{ d.drop }}</span><span><a href="{{ url_for('admin_user', uid=d.id) }}#credit">{{ d.username }}</a> {{ d.from }} → {{ d.to }} <span class="muted small">{{ d.tier }}</span></span></li>{% endfor %}</ul>
+  {% else %}<p class="muted small">Nobody has dropped 15 points or more this week.</p>{% endif %}
+  <h3>Possible credit farming</h3>
+  <p class="muted small">Borrowers who've repaid at least Ⓜ50 and where half or more went to lenders the alt detector links to them.</p>
+  {% if farming %}<ul class="reason-list">{% for f in farming %}
+    <li><span class="pts down">{{ (f.share * 100)|round|int }}%</span><span><a href="{{ url_for('admin_user', uid=f.id) }}#credit">{{ f.username }}</a> repaid Ⓜ{{ f.volume|money }}, Ⓜ{{ f.linked|money }} of it to linked accounts</span></li>{% endfor %}</ul>
+  {% else %}<p class="muted small">None right now.</p>{% endif %}
+  <h3>Near their limit</h3>
+  {% if near %}<ul class="reason-list">{% for n in near %}
+    <li><span class="pts down">{{ (n.utilisation * 100)|round|int }}%</span><span><a href="{{ url_for('admin_user', uid=n.id) }}#credit">{{ n.username }}</a> owes Ⓜ{{ n.owed|money }} {{ pill(n.score, n.tier) }}</span></li>{% endfor %}</ul>
+  {% else %}<p class="muted small">Nobody is over 90% of their base limit.</p>{% endif %}
+</div>
+
+<div class="card" id="players">
+  <h2>Players</h2>
+  <form method="get" class="stack" action="{{ url_for('admin_credit') }}#players">
+    <div class="row">
+      <div class="stack"><label for="c-q">Player</label><input id="c-q" type="search" name="q" value="{{ view.q }}"></div>
+      <div class="stack"><label for="c-flag">Show</label><select id="c-flag" name="flag">{% for k, label in flags.items() %}<option value="{{ k }}" {{ 'selected' if view.flag == k }}>{{ label }}</option>{% endfor %}</select></div>
+      <div class="stack"><label for="c-tier">Tier</label><select id="c-tier" name="tier"><option value="">Any</option>{% for t in tiers %}<option {{ 'selected' if view.tier == t }}>{{ t }}</option>{% endfor %}</select></div>
+      <div class="stack"><label for="c-min">Min</label><input id="c-min" type="number" name="min" value="{{ view.min if view.min is not none }}" style="width:5.5rem"></div>
+      <div class="stack"><label for="c-max">Max</label><input id="c-max" type="number" name="max" value="{{ view.max if view.max is not none }}" style="width:5.5rem"></div>
+      <div class="stack"><label for="c-sort">Sort</label><select id="c-sort" name="sort">{% for k, label in [('low', 'Lowest score'), ('score', 'Highest score'), ('use', 'Most credit used'), ('updated', 'Recently scored'), ('name', 'Name')] %}<option value="{{ k }}" {{ 'selected' if view.sort == k }}>{{ label }}</option>{% endfor %}</select></div>
+    </div>
+    <div class="row-actions"><button class="btn btn-small">Filter</button><a class="btn btn-small btn-ghost" href="{{ url_for('admin_credit') }}#players">Clear</a></div>
+  </form>
+  {% if rows %}
+  <div class="table-scroll">
+  <table class="table stack-mobile">
+    <thead><tr><th>Player</th><th>Score</th><th>Record</th><th class="num">Owes</th><th class="num">Used</th><th>Flags</th><th></th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td data-label="Player"><strong>{{ r.username }}</strong></td>
+        <td data-label="Score">{{ pill(r.score, r.tier) }} <span class="muted small">{{ r.tier }} · ×{{ '%g'|format(r.multiplier) }}</span></td>
+        <td data-label="Record" class="small">{{ r.ontime }} · {{ r.late }} · {{ r.defaulted }}</td>
+        <td class="num" data-label="Owes">{% if r.owed %}Ⓜ{{ r.owed|money }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td class="num" data-label="Used">{{ (r.utilisation * 100)|round|int }}%</td>
+        <td data-label="Flags">
+          {% if r.defaulted %}<span class="status status-rejected">default</span>{% endif %}
+          {% if r.frozen %}<span class="status status-rejected">frozen</span>{% endif %}
+          {% if r.held %}<span class="status status-closed">held</span>{% endif %}
+          {% if r.thin %}<span class="tag">new</span>{% endif %}
+          {% if r.adjust %}<span class="tag">{{ '%+d'|format(r.adjust) }} pts</span>{% endif %}
+          {% if r.limit_override is not none %}<span class="tag">fixed limit</span>{% endif %}
+        </td>
+        <td class="num"><a class="btn btn-small btn-ghost" href="{{ url_for('admin_user', uid=r.id) }}#credit">Manage</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="muted small">Page {{ page }} of {{ pages }} · {{ total }} player{{ '' if total == 1 else 's' }}
+    {% if page > 1 %}· <a href="{{ url_for('admin_credit', q=view.q or None, flag=view.flag or None, tier=view.tier or None, min=view.min, max=view.max, sort=view.sort, page=page - 1) }}#players">← Previous</a>{% endif %}
+    {% if page < pages %}· <a href="{{ url_for('admin_credit', q=view.q or None, flag=view.flag or None, tier=view.tier or None, min=view.min, max=view.max, sort=view.sort, page=page + 1) }}#players">Next →</a>{% endif %}</p>
+  {% else %}<p class="muted">No players match.</p>{% endif %}
+</div>
+
+<div class="card" id="model">
+  <h2>Scoring model</h2>
+  {% set c = (preview.cfg if preview else cfg) %}
+  {% if not is_owner %}
+  <p class="muted small">Only the owner can change these. Weights: {% for k, w in cfg.weights.items() %}{{ FACTOR_LABELS[k] }} {{ (w * 100)|round|int }}%{{ ', ' if not loop.last }}{% endfor %}.
+    Tiers: {% for name, floor in cfg.tiers %}{{ name }} {{ floor }}+{{ ', ' if not loop.last }}{% endfor %}.</p>
+  {% else %}
+  <form method="post" action="{{ url_for('admin_credit_config') }}#model" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <h3>Factor weights (must add up to 100%)</h3>
+    <div class="row">{% for k, w in c.weights.items() %}
+      <div class="stack"><label for="w_{{ k }}">{{ FACTOR_LABELS[k] }} %</label>
+        <input id="w_{{ k }}" type="number" name="w_{{ k }}" min="0" max="100" step="1" value="{{ (form['w_' ~ k] if form else (w * 100)|round(1)) }}" style="width:5.5rem"></div>{% endfor %}</div>
+    <h3>Tier cutoffs (lowest score for each tier)</h3>
+    <div class="row">{% for name, floor in c.tiers %}
+      <div class="stack"><label for="t_{{ loop.index0 }}">{{ name }}</label>
+        <input id="t_{{ loop.index0 }}" type="number" name="t_{{ loop.index0 }}" min="300" max="850" value="{{ form['t_' ~ loop.index0] if form else floor }}" style="width:5.5rem"></div>{% endfor %}</div>
+    <h3>Borrowing limit multiplier (score → ×)</h3>
+    <div class="row">{% for x, y in c.multiplier %}
+      <div class="stack"><label for="mx_{{ loop.index0 }}">Score</label><input id="mx_{{ loop.index0 }}" type="number" name="mx_{{ loop.index0 }}" min="300" max="850" value="{{ form['mx_' ~ loop.index0] if form else x }}" style="width:5.5rem"></div>
+      <div class="stack"><label for="my_{{ loop.index0 }}">×</label><input id="my_{{ loop.index0 }}" type="number" name="my_{{ loop.index0 }}" min="0.05" max="5" step="0.05" value="{{ form['my_' ~ loop.index0] if form else y }}" style="width:5.5rem"></div>{% endfor %}</div>
+    <h3>Caps and memory</h3>
+    <div class="row">
+      <div class="stack"><label for="default_cap">Cap: in default</label><input id="default_cap" type="number" name="default_cap" min="300" max="850" value="{{ form.default_cap if form else c.default_cap }}" style="width:5.5rem"></div>
+      <div class="stack"><label for="overdue_cap">Cap: overdue</label><input id="overdue_cap" type="number" name="overdue_cap" min="300" max="850" value="{{ form.overdue_cap if form else c.overdue_cap }}" style="width:5.5rem"></div>
+      <div class="stack"><label for="held_cap">Cap: held account</label><input id="held_cap" type="number" name="held_cap" min="300" max="850" value="{{ form.held_cap if form else c.held_cap }}" style="width:5.5rem"></div>
+      <div class="stack"><label for="half_life">Half-life (days)</label><input id="half_life" type="number" name="half_life" min="7" max="365" value="{{ form.half_life if form else c.half_life|int }}" style="width:5.5rem"></div>
+    </div>
+    <div class="row-actions">
+      <button class="btn btn-small btn-ghost" name="action" value="preview">Preview</button>
+      <button class="btn btn-small" name="action" value="save" data-confirm="Save these settings and re-score every player?">Save and re-score</button>
+      <button class="btn btn-small btn-ghost" name="action" value="reset" data-confirm="Go back to the default settings and re-score every player?">Reset to defaults</button>
+    </div>
+  </form>
+  {% if preview %}
+  <h3>Preview: {{ preview.moved }} player{{ '' if preview.moved == 1 else 's' }} would change score</h3>
+  <div class="table-scroll"><table class="table"><thead><tr><th>Tier</th><th class="num">Now</th><th class="num">After</th></tr></thead>
+    <tbody>{% for name, n in preview.after.items() %}<tr><td><span class="credit credit-{{ name|slug }}">{{ name }}</span></td><td class="num">{{ preview.before.get(name, 0) }}</td><td class="num">{{ n }}</td></tr>{% endfor %}</tbody></table></div>
+  <p class="muted small">Nothing has been saved. Use “Save and re-score” to apply it.</p>
+  {% endif %}
+  {% endif %}
+</div>
+{% endblock %}

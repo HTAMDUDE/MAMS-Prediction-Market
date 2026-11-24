@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% from "_credit.html" import pill %}
+{% block title %}Borrowers · MAMS Prediction Market{% endblock %}
+{% block content %}
+<div class="activity-head">
+  <div>
+    <h1>Borrowers</h1>
+    <p class="muted">Players ranked by credit score, so you can pick who to lend to. Filter by score or tier, and by
+      whether they've paid loans back before. The score is a guide, not a guarantee: you still choose the rate, the
+      term and the minimum score on every offer.</p>
+  </div>
+  <a class="btn btn-small btn-ghost" href="{{ url_for('loans') }}">← Loans</a>
+</div>
+
+<form method="get" class="card stack" action="{{ url_for('loan_borrowers') }}">
+  <div class="row">
+    <div class="stack"><label for="b-q">Player</label><input id="b-q" type="search" name="q" value="{{ view.q }}" placeholder="Search by name"></div>
+    <div class="stack"><label for="b-min">Min score</label><input id="b-min" type="number" name="min" min="300" max="850" value="{{ view.min if view.min is not none }}" style="width:6rem"></div>
+    <div class="stack"><label for="b-max">Max score</label><input id="b-max" type="number" name="max" min="300" max="850" value="{{ view.max if view.max is not none }}" style="width:6rem"></div>
+    <div class="stack"><label for="b-tier">Tier</label>
+      <select id="b-tier" name="tier"><option value="">Any</option>{% for t in tiers %}<option {{ 'selected' if view.tier == t }}>{{ t }}</option>{% endfor %}</select></div>
+    <div class="stack"><label for="b-sort">Sort by</label>
+      <select id="b-sort" name="sort">{% for k, label in [('score', 'Highest score'), ('ontime', 'Most on-time loans'), ('recent', 'Recently borrowed'), ('new', 'Newest players')] %}<option value="{{ k }}" {{ 'selected' if view.sort == k }}>{{ label }}</option>{% endfor %}</select></div>
+  </div>
+  <div class="row-actions">
+    <label><input type="checkbox" name="repaid" value="1" {{ 'checked' if view.repaid }}> Has paid a loan back before</label>
+    <label><input type="checkbox" name="clean" value="1" {{ 'checked' if view.clean }}> No overdue loans right now</label>
+    <button class="btn btn-small">Filter</button>
+    <a class="btn btn-small btn-ghost" href="{{ url_for('loan_borrowers') }}">Clear</a>
+  </div>
+</form>
+
+<div class="card">
+  {% if rows %}
+  <div class="table-scroll">
+  <table class="table stack-mobile">
+    <thead><tr><th>Player</th><th>Score</th><th>Record</th><th class="num">Credit used</th><th>Account</th><th></th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td data-label="Player"><a href="{{ url_for('user_credit', username=r.username) }}"><strong>{{ r.username }}</strong></a>
+          {% if r.held %}<span class="status status-closed">under review</span>{% endif %}
+          {% if r.frozen %}<span class="status status-rejected">borrowing paused</span>{% endif %}</td>
+        <td data-label="Score">{{ pill(r.score, r.tier) }} <span class="muted small">{{ r.tier }}{% if r.thin %} · new{% endif %}</span></td>
+        <td data-label="Record" class="small">{{ r.ontime }} on time · {{ r.late }} late · {{ r.defaulted }} in default</td>
+        <td class="num" data-label="Credit used">{{ (r.utilisation * 100)|round|int }}%</td>
+        <td data-label="Account" class="muted small">{{ r.age_days }} day{{ '' if r.age_days == 1 else 's' }} old{% if r.last_loan %} · last loan {{ r.last_loan|ago }}{% endif %}</td>
+        <td><a class="btn btn-small" href="{{ url_for('loans', to=r.username) }}#lend">Offer a loan</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="muted small">Page {{ page }} of {{ pages }} · {{ total }} player{{ '' if total == 1 else 's' }}
+    {% if page > 1 %}· <a href="{{ url_for('loan_borrowers', q=view.q or None, min=view.min, max=view.max, tier=view.tier or None, sort=view.sort, repaid=1 if view.repaid else None, clean=1 if view.clean else None, page=page - 1) }}">← Previous</a>{% endif %}
+    {% if page < pages %}· <a href="{{ url_for('loan_borrowers', q=view.q or None, min=view.min, max=view.max, tier=view.tier or None, sort=view.sort, repaid=1 if view.repaid else None, clean=1 if view.clean else None, page=page + 1) }}">Next →</a>{% endif %}</p>
+  {% else %}<p class="muted">No players match those filters.</p>{% endif %}
+</div>
+{% endblock %}

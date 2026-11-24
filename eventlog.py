@@ -48,6 +48,10 @@ EVENTS = {
     # requests and errors
     "csrf_failed": ("warn", "Form rejected (expired or forged token)"),
     "admin_denied": ("warn", "Non-admin tried an admin page"),
+    # credit scores
+    "credit_tier_change": ("info", "Credit tier changed"),
+    "credit_frozen": ("warn", "Borrowing frozen by an admin"),
+    "credit_blocked_borrow": ("info", "Borrowing refused by credit rules"),
     "too_large": ("warn", "Oversized request refused"),
     "server_error": ("alert", "Server error"),
     "slow_request": ("warn", "Slow request"),
