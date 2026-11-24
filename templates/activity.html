@@ -6,7 +6,10 @@
     <h1>Activity</h1>
     <p class="muted">Every trade made on the site so far, newest first.</p>
   </div>
-  {% if user %}<a class="btn btn-small btn-ghost" href="{{ url_for('balance_history') }}">Your balance history →</a>{% endif %}
+  <div class="row-actions">
+    <a class="btn btn-small btn-ghost" href="{{ url_for('all_loans') }}">All loans →</a>
+    {% if user %}<a class="btn btn-small btn-ghost" href="{{ url_for('balance_history') }}">Your balance history →</a>{% endif %}
+  </div>
 </div>
 
 <div class="kpis">

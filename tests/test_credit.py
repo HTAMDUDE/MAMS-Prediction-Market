@@ -385,3 +385,36 @@ def test_legacy_overdue_loans_get_their_grace_from_the_rules_start():
     c = score(db, bob)
     assert c["defaulted"] == 0 and c["late"] == 1               # overdue, still in its grace period
     assert not appmod.in_default(db, db.execute("SELECT * FROM loans WHERE borrower_id = ?", (bob,)).fetchone())
+
+
+def test_all_loans_page_is_public_and_leaderboard_shows_scores_and_defaults():
+    db, admin, ann_c, bob_c, ids = pages()
+    cy, dee = _user(db, "cy"), _user(db, "dee")
+    make_loan(db, ids["ann"], cy, status="active", started=3, term=7)         # on time
+    make_loan(db, ids["ann"], dee, status="active", started=60)               # in default
+    db.execute("UPDATE users SET balance = 0 WHERE id IN (?, ?)", (cy, dee))
+    appmod.refresh_credit(db)
+    offer = appmod.offer_loan(db, ids["ann"], "", 25, 0, 7)                   # an open offer is counted, not listed
+    public = appmod.app.test_client()                                          # not logged in
+    html = public.get("/loans/all").get_data(as_text=True)
+    assert "All loans" in html and ">cy<" not in html and "cy" in html and "dee" in html
+    assert html.index("dee") < html.index("cy")                               # in default comes first
+    assert "in default" in html and "1 offer" in html
+    assert 'class="credit credit-' in html                                     # the borrowers' scores are shown
+    board = public.get("/leaderboard").get_data(as_text=True)
+    assert ">Credit<" in board and "in default" in board
+    assert "All loans" in ann_c.get("/activity").get_data(as_text=True)
+    assert offer
+
+
+def test_credit_report_lists_why_it_was_rescored_but_hides_review_reasons_from_the_player():
+    db, admin, ann_c, bob_c, ids = pages()
+    appmod.apply_credit(db, ids["bob"], "loan repayment")
+    db.execute("UPDATE credit_history SET created_at = ?", (ago(1),))
+    db.execute("INSERT INTO user_risk (user_id, score, status, updated_at) VALUES (?, 10, 'clear', 0)", (ids["bob"],))
+    appmod.rescore_credit(db, ids["bob"], reason="risk status")
+    db.execute("INSERT INTO credit_history (user_id, score, tier, reason, created_at) VALUES (?, 500, 'Poor', 'risk status', ?)",
+               (ids["bob"], appmod.now_str()))
+    mine = bob_c.get("/credit").get_data(as_text=True)
+    assert "loan repayment" in mine and "Account review" in mine and "risk status" not in mine
+    assert "risk status" in admin.get("/credit/bob").get_data(as_text=True)

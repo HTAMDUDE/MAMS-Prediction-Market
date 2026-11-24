@@ -2709,13 +2709,18 @@ def leaderboard():
     worth = net_worths(db)
     counts = {r["user_id"]: r["n"] for r in db.execute("SELECT user_id, COUNT(*) AS n FROM trades GROUP BY user_id")}
     # accounts that never confirmed an email and never traded (abandoned sign-ups) aren't listed
-    users = db.execute("SELECT id, username, balance, email_verified FROM users WHERE held = 0").fetchall()
+    users = db.execute("SELECT u.id, u.username, u.balance, u.email_verified, c.score AS credit, c.tier AS credit_tier "
+                       "FROM users u LEFT JOIN user_credit c ON c.user_id = u.id WHERE u.held = 0").fetchall()
+    defaulters = {l["borrower_id"] for l in db.execute("SELECT * FROM loans WHERE status = 'active'")
+                  if in_default(db, l)}
     board_by_name = {u["username"].casefold(): {"username": u["username"], "worth": worth[u["id"]],
+                                                "credit": u["credit"], "credit_tier": u["credit_tier"],
+                                                "defaulted": u["id"] in defaulters,
                                                 "balance": u["balance"], "trades": counts.get(u["id"], 0),
                                                 "is_me": g.user is not None and g.user["id"] == u["id"]}
                      for u in users if u["email_verified"] or counts.get(u["id"], 0)}
     board = sorted(board_by_name.values(), key=lambda x: -x["worth"])
-    return render_template("leaderboard.html", board=board)
+    return render_template("leaderboard.html", board=board, LOAN_GRACE_DAYS=LOAN_GRACE_DAYS)
 
 
 # ---------------------------------------------------------------- loans between players
@@ -3330,6 +3335,30 @@ def _min_score_from_form(db):
     return next((floor for s_, _, floor in tier_options(db) if s_ == slug), None)
 
 
+@app.route("/loans/all")
+def all_loans():
+    """Every loan that's running right now, for anyone to see (logged in or not): who lent to whom, at what rate, what's
+    still owed, the borrower's credit score, and whether it's on time, overdue or in default. Most urgent first. It only
+    reads stored scores, so a public page view never triggers any scoring."""
+    db = get_db()
+    rows = [dict(r) for r in db.execute(
+        "SELECT l.*, lu.username AS lender, bu.username AS borrower, c.score AS borrower_credit, "
+        "c.tier AS borrower_tier FROM loans l JOIN users lu ON lu.id = l.lender_id "
+        "JOIN users bu ON bu.id = l.borrower_id LEFT JOIN user_credit c ON c.user_id = l.borrower_id "
+        "WHERE l.status = 'active' ORDER BY l.due_at, l.id")]
+    now = now_str()
+    for r in rows:
+        r["default"] = in_default(db, r)
+        r["overdue"] = r["due_at"] <= now
+    rows.sort(key=lambda r: (not r["default"], not r["overdue"], r["due_at"]))
+    offers = db.execute("SELECT COUNT(*) AS n, COALESCE(SUM(principal), 0) AS total FROM loans "
+                        "WHERE status = 'offered'").fetchone()
+    return render_template("all_loans.html", rows=rows, now=now, open_offers=offers,
+                           total_owed=sum(r["owed"] for r in rows), LOAN_GRACE_DAYS=LOAN_GRACE_DAYS,
+                           overdue=sum(1 for r in rows if r["overdue"] and not r["default"]),
+                           defaulted=sum(1 for r in rows if r["default"]))
+
+
 def _loan_number(name, kind=float):
     try:
         return kind(request.form.get(name, "").strip())
@@ -3469,7 +3498,9 @@ def _credit_page(db, target, full):
     loans_ = db.execute("SELECT l.*, lu.username AS lender FROM loans l JOIN users lu ON lu.id = l.lender_id "
                         "WHERE l.borrower_id = ? AND l.accepted_at IS NOT NULL ORDER BY l.id DESC LIMIT 20",
                         (target["id"],)).fetchall()
-    return render_template("credit.html", target=target, c=c, detail=detail, history=hist, points=points,
+    return render_template("credit.html", target=target, c=c, detail=detail, history=hist[-10:][::-1], points=points,
+                           spark_n=len(hist), spark_first=hist[0]["score"] if hist else None,
+                           spark_last=hist[-1]["score"] if hist else None, viewer_admin=bool(g.user["is_admin"]),
                            loans=loans_, full=full, mine=target["id"] == g.user["id"], cfg=credit_config(db),
                            CREDIT_MIN=credit.MIN_SCORE, CREDIT_MAX=credit.MAX_SCORE, now=now_str())
 

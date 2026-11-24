@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}All loans · MAMS Prediction Market{% endblock %}
+{% block content %}
+<div class="activity-head">
+  <div>
+    <h1>All loans</h1>
+    <p class="muted">Every loan between players that hasn't been paid back yet, most urgent first, with each borrower's
+      credit score. Overdue loans are collected from the borrower's cash, and loans still unpaid {{ LOAN_GRACE_DAYS }} days
+      after the due date are in default.</p>
+  </div>
+  <div class="row-actions">
+    {% if user %}<a class="btn btn-small btn-ghost" href="{{ url_for('loans') }}">Your loans →</a>
+    <a class="btn btn-small btn-ghost" href="{{ url_for('loan_borrowers') }}">Borrowers →</a>{% endif %}
+  </div>
+</div>
+
+<div class="kpis">
+  <div class="kpi"><span>Running loans</span><strong>{{ rows|length }}</strong></div>
+  <div class="kpi"><span>Still owed in total</span><strong>Ⓜ{{ total_owed|money }}</strong></div>
+  <div class="kpi"><span>Overdue</span><strong class="{{ 'down' if overdue }}">{{ overdue }}</strong></div>
+  <div class="kpi"><span>In default</span><strong class="{{ 'down' if defaulted }}">{{ defaulted }}</strong></div>
+</div>
+
+<div class="card">
+  {% if rows %}
+  <div class="table-scroll">
+  <table class="table stack-mobile">
+    <thead><tr><th>Lender</th><th>Borrower</th><th class="num">Borrowed</th><th class="num">Interest</th>
+      <th class="num">Still owed</th><th>Due</th></tr></thead>
+    <tbody>
+    {% for l in rows %}
+      <tr>
+        <td data-label="Lender">{{ l.lender }}</td>
+        <td data-label="Borrower">{{ l.borrower }}
+          {% if l.borrower_credit is not none %}<span class="credit credit-{{ l.borrower_tier|slug }}" title="Their credit score ({{ l.borrower_tier }})">{{ l.borrower_credit }}</span>{% endif %}
+          {% if user and user.id in (l.lender_id, l.borrower_id) %} <span class="tag">yours</span>{% endif %}</td>
+        <td class="num" data-label="Borrowed">Ⓜ{{ l.principal|money }}</td>
+        <td class="num" data-label="Interest">{{ '%g'|format(l.rate) }}%</td>
+        <td class="num" data-label="Still owed">Ⓜ{{ l.owed|money }}</td>
+        <td data-label="Due">
+          {% if l.default %}<span class="status status-rejected">in default</span>
+          {% elif l.overdue %}<span class="status status-rejected">overdue</span>
+          {% else %}<span class="status status-approved" title="{{ l.due_at|when }}">{{ l.due_at|until }}</span>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}<p class="muted">No loans are running right now.</p>{% endif %}
+  {% if open_offers.n %}<p class="muted small">Plus {{ open_offers.n }} offer{{ '' if open_offers.n == 1 else 's' }}
+    (Ⓜ{{ open_offers.total|money }}) waiting to be taken{% if user %} on the <a href="{{ url_for('loans') }}">Loans page</a>{% endif %}.</p>{% endif %}
+</div>
+{% endblock %}

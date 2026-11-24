@@ -45,6 +45,20 @@ assemblies, and anything else the admins post.
     this shipped count the grace period from `loans_v2_at` in `site_settings`. Bets in closed markets are paid to
     lenders when the market resolves. Debts never expire.
   - **Admins** can forgive, extend or cancel loans at **Admin → Loans**; each is written to the admin log.
+- **Credit scores** (300–850, computed in `credit.py`) come from six weighted factors: payment history (recency- and
+  size-weighted, with a Bayesian prior so one loan can't max it out), credit use, length of history, experience (on-time
+  repayments, volume and number of lenders; repaying accounts the alt detector links to you counts for very little),
+  financial stability and recent borrowing. A player with no loan record sits in a middle band; a default, an overdue
+  loan or a held account caps the score, and alt-risk is subtracted (not for accounts an admin approved). The score
+  multiplies the borrowing limit (×0.25 to ×1.5; the Ⓜ500 floor is kept for new and average borrowers). Lenders can set a
+  **minimum score** on an offer and browse players at **Loans → Browse borrowers** (filter by score range or tier, by
+  whether they've repaid before, and by overdue status). Players see their breakdown at `/credit`; lenders see the score,
+  tier and record only. **All loans** (public, linked from Activity and the footer) lists every running loan with the
+  borrower's score, and the leaderboard shows scores and a tag for loans in default.
+  - **Admins** get **Admin → Credit**: tier mix, default rate, watchlists (biggest drops, possible credit farming,
+    near-limit borrowers), a filterable player table, and per-user actions (adjust ±150 points with a reason, fix a
+    limit, freeze borrowing). The owner can edit the weights, tier cutoffs, multiplier curve and caps there, with a
+    preview before saving. The model's defaults are `credit.DEFAULTS`; overrides live in the `credit_cfg` site setting.
 - The **Activity** page lists every trade made on the site (who, what, which market, how much), with filters by
   buys/sells, trader and market. **Your balance history** (linked from it) logs every change to your own balance
   (buys, sells, payouts, losses, refunds, bonuses, admin adjustments) with your balance after each one. Admins can

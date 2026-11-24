@@ -24,15 +24,16 @@
   {% if board %}
   <div class="table-scroll">
   <table class="table leaderboard">
-    <thead><tr><th>#</th><th>Trader</th><th class="num">Net worth</th><th class="num">Cash</th><th class="num">Trades</th></tr></thead>
+    <thead><tr><th>#</th><th>Trader</th><th class="num">Net worth</th><th class="num">Cash</th><th class="num">Trades</th><th class="num" title="Credit score from how loans are paid back">Credit</th></tr></thead>
     <tbody>
     {% for row in board %}
       <tr class="{{ 'me' if row.is_me }}" {% if row.is_me %}id="me"{% endif %}>
         <td class="rank">{% if loop.index == 1 %}🥇{% elif loop.index == 2 %}🥈{% elif loop.index == 3 %}🥉{% else %}{{ loop.index }}{% endif %}</td>
-        <td><strong>{{ row.username }}</strong>{% if row.is_me %} <span class="muted small">(you)</span>{% endif %}</td>
+        <td><strong>{{ row.username }}</strong>{% if row.is_me %} <span class="muted small">(you)</span>{% endif %}{% if row.defaulted %} <span class="status status-rejected" title="Has a loan that's still unpaid {{ LOAN_GRACE_DAYS }} days after it was due">in default</span>{% endif %}</td>
         <td class="num"><b>Ⓜ{{ row.worth|money }}</b></td>
         <td class="num muted">Ⓜ{{ row.balance|money }}</td>
         <td class="num">{{ row.trades }}</td>
+        <td class="num">{% if row.credit is not none %}<span class="credit credit-{{ row.credit_tier|slug }}" title="{{ row.credit_tier }}">{{ row.credit }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>

@@ -44,8 +44,17 @@
 <div class="card">
   <h2>Last 90 days</h2>
   <svg class="credit-line" viewBox="0 0 240 56" preserveAspectRatio="none" role="img" aria-label="Score history"><polyline points="{{ points }}"/></svg>
-  <p class="muted small">{{ history|length }} change{{ '' if history|length == 1 else 's' }} recorded.
-    {% if history|length > 1 %}From {{ history[0].score }} to {{ history[-1].score }}.{% endif %}</p>
+  <p class="muted small">{{ spark_n }} change{{ '' if spark_n == 1 else 's' }} recorded.
+    {% if spark_n > 1 %}From {{ spark_first }} to {{ spark_last }}.{% endif %}</p>
+  {% if full and history %}
+  <div class="table-scroll"><table class="table stack-mobile">
+    <thead><tr><th>When</th><th class="num">Score</th><th>Why it was re-scored</th></tr></thead>
+    <tbody>{% for h in history %}<tr>
+      <td data-label="When" class="muted small">{{ h.created_at|ago }}</td>
+      <td class="num" data-label="Score"><span class="credit credit-{{ h.tier|slug }}">{{ h.score }}</span></td>
+      <td data-label="Why">{% if h.reason in ('risk status', 'review decision') and not viewer_admin %}Account review{% else %}{{ h.reason or '—' }}{% endif %}</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% endif %}
 </div>
 {% endif %}
 
