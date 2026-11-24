@@ -82,7 +82,8 @@ LOAN_MAX_RATE = 100.0
 LOAN_MAX_DAYS = 30
 OWNER_USERNAME = os.environ.get("MAMS_OWNER", "Kaushik").strip()
 LOGIN_CODE_LIFETIME = 10 * 60
-LOGIN_CODE_RESEND_DELAY = 60
+LOGIN_CODE_RESEND_DELAY = 60  # at most one code a minute per account, and per email address
+EMAIL_CLAIM_HOURS = 24  # an unconfirmed sign-up holds its email this long, so nobody else can sign up with it
 LOGIN_CODE_MAX_ATTEMPTS = 5
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,20}$")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -1418,7 +1419,7 @@ def register():
         elif not EMAIL_RE.match(email):
             flash("Enter a valid email address.", "error")
         elif email_taken(get_db(), email):
-            flash("That email is already used by another account.", "error")
+            flash(EMAIL_TAKEN_MSG, "error")
         elif not PASSWORD_MIN <= len(password) <= PASSWORD_MAX:
             flash(f"Password must be {PASSWORD_MIN}–{PASSWORD_MAX} characters.", "error")
         elif password != request.form.get("confirm", ""):
@@ -1448,7 +1449,14 @@ def register():
                 flash(f"Welcome! You start with {STARTING_BALANCE:,.0f} {CURRENCY}."
                       + (" You're an admin, so you can create and resolve markets." if is_admin else "")
                       + " Confirm your email to start betting.", "success")
-                send_email_code(db, cur.lastrowid, username, email)
+                wait = code_wait(cur.lastrowid, email)
+                if wait:
+                    # this address was just sent a code by another sign-up; still hold it for this account
+                    db.execute("INSERT OR REPLACE INTO login_challenges (username, code_hash, expires_at, requested_at, "
+                               "attempts, email) VALUES (?, '', 0, ?, 0, ?)", (username, time.time(), email))
+                    flash(f"A code was just sent to {email}. Wait {wait} seconds, then ask for one below.", "error")
+                else:
+                    send_email_code(db, cur.lastrowid, username, email)
                 return redirect(url_for("account_email"))
     return render_template("register.html")
 
@@ -1484,9 +1492,33 @@ DUMMY_PASSWORD_HASH = generate_password_hash(secrets.token_hex(16))
 PASSWORD_MIN, PASSWORD_MAX = 6, 128
 
 
+EMAIL_TAKEN_MSG = "That email is already used by another account. If it's yours, log in to that account instead."
+
+
 def email_taken(db, email, except_id=None):
-    row = db.execute("SELECT id FROM users WHERE email = ? COLLATE NOCASE AND email_verified = 1", (email,)).fetchone()
-    return row is not None and row["id"] != except_id
+    """True if another account has confirmed this email, or signed up with it (asked for a code to it) in the last
+    EMAIL_CLAIM_HOURS and hasn't confirmed yet. Unconfirmed claims lapse so a typo can't lock someone out for good."""
+    except_id = -1 if except_id is None else except_id
+    since = time.time() - EMAIL_CLAIM_HOURS * 3600
+    return db.execute(
+        "SELECT 1 FROM users WHERE email = ? COLLATE NOCASE AND email_verified = 1 AND id != ? "
+        "UNION ALL SELECT 1 FROM login_challenges c JOIN users u ON u.username = c.username "
+        "WHERE c.email = ? COLLATE NOCASE AND u.id != ? AND c.requested_at >= ? LIMIT 1",
+        (email, except_id, email, except_id, since)).fetchone() is not None
+
+
+def code_wait(user_id, email):
+    """Seconds until this account may get another code, and until this address may be sent one (whichever is
+    later). 0 means go ahead, and starts the next wait."""
+    keys = [("email-code-minute", user_id), ("email-code-to", email.casefold())]
+    now = time.time()
+    last = max((t for k in keys for t in _hits.get(k, [])), default=0.0)
+    left = LOGIN_CODE_RESEND_DELAY - (now - last)
+    if left > 0:
+        return math.ceil(left)
+    for k in keys:
+        _hits[k] = [now]
+    return 0
 
 
 def send_email_code(db, user_id, username, email):
@@ -1520,10 +1552,9 @@ def account_email():
             if not EMAIL_RE.match(email or ""):
                 flash("Enter a valid email address.", "error")
             elif email_taken(db, email, except_id=u["id"]):
-                flash("That email is already used by another account.", "error")
-            elif challenge and challenge["email"] and challenge["email"].casefold() == email.casefold() \
-                    and time.time() - challenge["requested_at"] < LOGIN_CODE_RESEND_DELAY:
-                flash("We just sent a code. Wait a minute before asking for another.", "error")
+                flash(EMAIL_TAKEN_MSG, "error")
+            elif wait := code_wait(u["id"], email):
+                flash(f"We just sent a code. Wait {wait} seconds before asking for another.", "error")
             elif rate_limited(("email-code", u["id"]), 5, 3600) or rate_limited(("email-code-ip", request.remote_addr), 30, 3600):
                 flash("Too many codes requested. Try again later.", "error")
             else:
@@ -1543,7 +1574,7 @@ def account_email():
                 flash("That code isn't right. Check the email and try again.", "error")
             elif email_taken(db, challenge["email"], except_id=u["id"]):
                 db.execute("DELETE FROM login_challenges WHERE username = ?", (u["username"],))
-                flash("That email is already used by another account.", "error")
+                flash(EMAIL_TAKEN_MSG, "error")
             else:
                 db.execute("UPDATE users SET email = ?, email_verified = 1 WHERE id = ?", (challenge["email"], u["id"]))
                 db.execute("DELETE FROM login_challenges WHERE username = ?", (u["username"],))

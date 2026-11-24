@@ -606,10 +606,15 @@ def test_code_expiry_attempt_limit_and_duplicate_at_confirm(monkeypatch):
     signup(b, "bravo")
     db.execute("UPDATE users SET email = NULL, email_verified = 0")
     _email_post(a, action="send", email="shared@example.com")
-    _email_post(b, action="send", email="shared@example.com")
-    code_a, code_b = sent[0][1], sent[1][1]
-    assert "Email confirmed" in _email_post(a, action="verify", code=code_a).get_data(as_text=True)
-    assert "already used" in _email_post(b, action="verify", code=code_b).get_data(as_text=True)
+    # someone else is already confirming that address: bravo can't claim it too
+    assert "already used" in _email_post(b, action="send", email="Shared@example.com").get_data(as_text=True)
+    assert len(sent) == 1
+    # if two claims do overlap (e.g. one lapsed), whoever confirms second is turned away
+    db.execute("INSERT INTO login_challenges (username, code_hash, expires_at, requested_at, attempts, email) "
+               "VALUES ('bravo', ?, ?, 0, 0, 'shared@example.com')",
+               (appmod.login_code_hash("bravo", "123456"), appmod.time.time() + 600))
+    assert "Email confirmed" in _email_post(a, action="verify", code=sent[0][1]).get_data(as_text=True)
+    assert "already used" in _email_post(b, action="verify", code="123456").get_data(as_text=True)
     # too many wrong codes: the code stops working
     _email_post(b, action="send", email="bravo@example.com")
     wrong = "000000" if sent[-1][1] != "000000" else "111111"
@@ -779,3 +784,43 @@ def test_people_csv_neutralises_formulas_and_is_private():
     text = open(appmod.email_csv_path(), encoding="utf-8-sig").read()
     assert "'-cmd,'=HYPERLINK(1)@x.com" in text
     assert os.stat(appmod.email_csv_path()).st_mode & 0o777 == 0o600
+
+
+def test_signup_rejects_an_email_another_signup_is_confirming(monkeypatch):
+    db = _fresh_db()
+    sent = _capture_codes(monkeypatch)
+    c1, c2 = appmod.app.test_client(), appmod.app.test_client()
+    form = lambda c, name, email: {"csrf_token": csrf(c.get("/register")), "username": name, "email": email,
+                                   "password": "secret1", "confirm": "secret1"}
+    c1.post("/register", data=form(c1, "first", "same@example.com"))
+    page = c2.post("/register", data=form(c2, "second", "SAME@example.com"), follow_redirects=True).get_data(as_text=True)
+    assert "already used" in page and _q(db, "SELECT COUNT(*) FROM users WHERE username = 'second'") == 0
+    assert len(sent) == 1
+    # an unconfirmed claim lapses after EMAIL_CLAIM_HOURS
+    db.execute("UPDATE login_challenges SET requested_at = ?", (appmod.time.time() - 25 * 3600,))
+    appmod._hits.clear()
+    c2.post("/register", data=form(c2, "second", "same@example.com"))
+    assert _q(db, "SELECT COUNT(*) FROM users WHERE username = 'second'") == 1 and len(sent) == 2
+
+
+def test_codes_at_most_once_a_minute_per_account_and_per_address(monkeypatch):
+    db = _fresh_db()
+    sent = _capture_codes(monkeypatch)
+    a, b = appmod.app.test_client(), appmod.app.test_client()
+    signup(a, "alpha")
+    signup(b, "bravo")
+    db.execute("UPDATE users SET email = NULL, email_verified = 0")
+    _email_post(a, action="send", email="one@example.com")
+    assert "Wait" in _email_post(a, action="resend").get_data(as_text=True)
+    _email_post(a, action="change")
+    # a different address doesn't skip the wait
+    assert "Wait" in _email_post(a, action="send", email="two@example.com").get_data(as_text=True)
+    assert len(sent) == 1
+    # another account can't make the site email the same address again straight away
+    assert "Wait" in _email_post(b, action="send", email="one@example.com").get_data(as_text=True)
+    assert len(sent) == 1
+    # a minute later it's fine
+    for k in list(appmod._hits):
+        appmod._hits[k] = [t - 61 for t in appmod._hits[k]]
+    _email_post(a, action="send", email="two@example.com")
+    assert len(sent) == 2 and sent[-1][0] == "two@example.com"

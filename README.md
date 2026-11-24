@@ -77,7 +77,9 @@ Anyone can sign up with a username, email and password. Every account needs a **
 (or, for accounts made before emails existed, after logging in) people are sent to **Confirm your email**, where they
 type a 6-digit code we email them. Until then they can't use the rest of the site. When emails were introduced,
 everyone was logged out once so they'd be asked for one. Each email can belong to one account, and people can change
-theirs from Portfolio.
+theirs from Portfolio. An email someone has signed up with but not yet confirmed is held for them for 24 hours
+(`EMAIL_CLAIM_HOURS`), so nobody else can sign up with it in the meantime. Codes are sent at most once a minute per
+account and once a minute per email address (`LOGIN_CODE_RESEND_DELAY`), plus 5 an hour per account.
 
 Every confirmed email is saved in the database and written to **`instance/people.csv`** (`name,email` for every
 account, blank until confirmed). `instance/` is ignored by Git, so names and emails never reach GitHub.
