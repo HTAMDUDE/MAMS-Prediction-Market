@@ -15,7 +15,8 @@
       {% else %}<span class="muted">none</span>{% endif %}</dd>
     {% if ident.signup %}
     <dt>Signed up</dt>
-    <dd>{{ ident.signup.created_at|ts|when }} from <strong>{{ ident.signup.ip or 'unknown' }}</strong> · {{ ident.signup.agent.text }}{% if ident.signup.agent.bot %} <span class="status status-rejected">looks automated</span>{% endif %}</dd>
+    <dd>{{ ident.signup.created_at|ts|when }} from <strong>{{ ident.signup.ip or 'unknown' }}</strong> · {{ ident.signup.agent.text }}{% if ident.signup.agent.bot %} <span class="status status-rejected">looks automated</span>{% endif %}
+      {% set cap = ident.signup.meta.get('captcha') %}{% if cap == 'ok' %} · <span class="muted small">human check passed</span>{% elif cap == 'unreachable' %} · <span class="status status-closed">human check couldn't run</span>{% endif %}</dd>
     {% endif %}
   </dl>
 
@@ -61,6 +62,18 @@
       <td class="small">{{ {'signup': 'Signed up', 'login': 'Logged in', 'login_fail': 'Wrong password', 'verify': 'Confirmed email'}.get(e.event, e.event) }}</td>
       <td class="small">{{ e.ip or '—' }}</td>
       <td class="small">{{ e.agent.text }}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+  {% endif %}
+
+  {% if ident.log %}
+  <h3>Event log <a class="small" href="{{ url_for('admin_events', q=u.username) }}">all events →</a></h3>
+  <div class="table-scroll"><table class="table">
+    <thead><tr><th>When</th><th>Event</th><th>Detail</th></tr></thead>
+    <tbody>{% for e in ident.log %}<tr>
+      <td class="small muted nowrap" title="{{ e.created_at|ts|when }}">{{ e.created_at|ts|ago }}</td>
+      <td class="small"><span class="sev sev-{{ e.severity }}">{{ e.severity }}</span> {{ catalog.get(e.kind, ['', e.kind])[1] }}</td>
+      <td class="small muted">{{ e.detail }}</td>
     </tr>{% endfor %}</tbody>
   </table></div>
   {% endif %}

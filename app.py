@@ -10,9 +10,11 @@ import re
 import secrets
 import sqlite3
 import smtplib
+import socket
 import ssl
 import time
 from datetime import date, datetime, timedelta
+import email.utils
 from email.message import EmailMessage
 from functools import wraps
 import urllib.error
@@ -20,10 +22,11 @@ import urllib.request
 from urllib.parse import urlencode, urlsplit
 
 from flask import (Flask, abort, flash, g, jsonify, make_response, redirect, render_template,
-                   request, session, url_for, current_app)
+                   request, session, url_for, current_app, has_app_context, has_request_context)
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
+import eventlog
 import lmsr
 import security
 
@@ -115,6 +118,9 @@ if PRODUCTION:
     # Trust the hosting proxy's X-Forwarded-For / -Proto so we see real visitor IPs and HTTPS.
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
+eventlog.configure(app.logger, os.environ.get("MAMS_LOG_DIR") or os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "logs"))
+log = logging.getLogger("mams")
+
 # Simple in-memory rate limiting (one server process is plenty for a school site).
 # Limits are generous because a whole school can share one public IP address.
 _hits = {}
@@ -166,7 +172,89 @@ def get_db():
 def close_db(_exc):
     db = g.pop("db", None)
     if db is not None:
+        flush_events(db)
         db.close()
+
+
+# ---------------------------------------------------------------- event log
+
+def _short(value, n):
+    return str(value if value is not None else "").replace("\n", " ").replace("\r", " ")[:n]
+
+
+def log_event(kind, user=None, detail="", severity=None, user_id=None, username=None):
+    """Record something that happened: a row in the event log (Admin -> Events) and a line in the server log.
+    `user` is a row/dict with id and username; if omitted the logged-in user (if any) is used. It never raises and
+    never holds up a request: if it's called inside an open transaction the row is queued and written afterwards, so
+    a rollback can't lose it and it can't wait on its own lock. Never put secrets in `detail`."""
+    try:
+        default_sev, label = eventlog.EVENTS.get(kind, ("info", kind))
+        sev = severity if severity in eventlog.SEVERITIES else default_sev
+        if user is None and user_id is None and username is None and has_request_context():
+            user = g.get("user")
+        if user is not None:
+            user_id, username = user["id"], user["username"]
+        ip = ua = did = rid = path = ""
+        if has_request_context():
+            ip, ua = _short(request.remote_addr, 64), _short(request.headers.get("User-Agent", ""), 300)
+            did, rid, path = g.get("device_id", ""), g.get("request_id", ""), _short(request.path, 200)
+        row = (time.time(), kind, sev, user_id, _short(username, 40), ip, ua, did, rid, path, _short(detail, 600))
+        log.log(eventlog.LEVELS[sev], "event=%s user=%s ip=%s %s", kind, username or "-", ip or "-", _short(detail, 300))
+        if not has_app_context():
+            return
+        db = get_db()
+        if db.in_transaction:
+            g.setdefault("pending_events", []).append(row)
+        else:
+            _insert_event(db, row)
+    except Exception:
+        try:
+            log.exception("could not record event %s", kind)
+        except Exception:
+            pass
+
+
+def _insert_event(db, row):
+    db.execute("INSERT INTO security_events (created_at, kind, severity, user_id, username, ip, ua, device_id, "
+               "request_id, path, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", row)
+
+
+def flush_events(db):
+    """Write events that were queued while a transaction was open."""
+    try:
+        pending = g.pop("pending_events", None)
+    except RuntimeError:
+        return
+    for row in pending or []:
+        try:
+            _insert_event(db, row)
+        except sqlite3.Error:
+            log.exception("could not write queued event %s", row[1])
+
+
+@app.before_request
+def start_request():
+    g.request_id = secrets.token_hex(4)
+    g.started = time.time()
+
+
+SLOW_REQUEST = 3.0  # seconds
+
+
+@app.after_request
+def finish_request(resp):
+    rid = g.get("request_id")
+    if rid:
+        resp.headers["X-Request-ID"] = rid
+    took = time.time() - g.get("started", time.time())
+    if took > SLOW_REQUEST and request.endpoint not in PWA_ENDPOINTS:
+        log_event("slow_request", detail=f"{request.method} {request.path} took {took:.1f}s")
+    try:
+        if g.get("pending_events") and "db" in g:
+            flush_events(g.db)
+    except Exception:
+        log.exception("could not flush events")
+    return resp
 
 
 # Columns added after the first release. schema.sql only creates missing tables, so databases
@@ -356,34 +444,124 @@ def login_code_hash(username, code):
     return hmac.new(app.config["SECRET_KEY"].encode(), value, hashlib.sha256).hexdigest()
 
 
-def send_login_code_email(recipient, code):
+class EmailError(RuntimeError):
+    """An email couldn't be sent. `reason` is a short, secret-free explanation for the logs and the admin event log;
+    `permanent` means retrying won't help (bad key, unverified sender, rejected recipient)."""
+
+    def __init__(self, reason, permanent=False):
+        super().__init__(reason)
+        self.reason, self.permanent = reason, permanent
+
+
+def email_settings():
+    """Where email goes, from the environment. MAMS_EMAIL_BACKEND is `smtp` (default), `resend` or `console`.
+    `resend` is Resend's SMTP service: host smtp.resend.com, user `resend`, and the API key as the password
+    (MAMS_RESEND_API_KEY). Anything else is plain SMTP from MAMS_SMTP_*. Port 465/2465 uses implicit TLS; other ports
+    (587, 2587, 25) start plain and upgrade with STARTTLS."""
+    backend = os.environ.get("MAMS_EMAIL_BACKEND", "smtp").strip().lower()
+    env = os.environ.get
+    if backend == "resend":
+        host = env("MAMS_SMTP_HOST", "smtp.resend.com").strip()
+        user = env("MAMS_SMTP_USERNAME", "resend").strip()
+        password = (env("MAMS_RESEND_API_KEY") or env("MAMS_SMTP_PASSWORD") or "").strip()
+    else:
+        host, user, password = env("MAMS_SMTP_HOST", "").strip(), env("MAMS_SMTP_USERNAME", ""), env("MAMS_SMTP_PASSWORD", "")
+    try:
+        port = int(env("MAMS_SMTP_PORT", "587"))
+    except ValueError:
+        port = 587
+    try:
+        timeout = float(env("MAMS_SMTP_TIMEOUT", "15"))
+    except ValueError:
+        timeout = 15.0
+    sender = env("MAMS_SMTP_FROM", user if "@" in user else "").strip()
+    return {"backend": backend, "host": host, "port": port, "user": user, "password": password,
+            "sender": sender, "timeout": timeout}
+
+
+def _smtp_error(e):
+    """Turn an smtplib/socket exception into an EmailError with a plain-English reason (never including secrets)."""
+    if isinstance(e, smtplib.SMTPAuthenticationError):
+        return EmailError("SMTP login rejected: check the API key / password", permanent=True)
+    if isinstance(e, smtplib.SMTPSenderRefused):
+        return EmailError("sender address refused: verify the From domain with your email provider", permanent=True)
+    if isinstance(e, smtplib.SMTPRecipientsRefused):
+        return EmailError("recipient address refused by the mail server", permanent=True)
+    if isinstance(e, smtplib.SMTPResponseException):
+        return EmailError(f"mail server replied {e.smtp_code}", permanent=500 <= e.smtp_code < 600)
+    if isinstance(e, (smtplib.SMTPServerDisconnected, ConnectionError)):
+        return EmailError("mail server dropped the connection")
+    if isinstance(e, (socket.timeout, TimeoutError)):
+        return EmailError("mail server timed out")
+    if isinstance(e, socket.gaierror):
+        return EmailError("couldn't find the mail server (check MAMS_SMTP_HOST)", permanent=True)
+    if isinstance(e, ssl.SSLError):
+        return EmailError("TLS error talking to the mail server (check MAMS_SMTP_PORT)")
+    return EmailError(f"{type(e).__name__} while sending")
+
+
+def send_email(recipient, subject, text, html=None):
+    """Send one email through the configured backend. Retries once on a dropped connection or timeout. Raises
+    EmailError with a safe `reason` on failure. Returns a short description of what happened for the logs."""
     if app.config.get("TESTING"):
-        raise RuntimeError("Email delivery is disabled during automated tests.")
-    if os.environ.get("MAMS_EMAIL_BACKEND", "smtp").strip().lower() == "console":
-        current_app.logger.warning("LOCAL VERIFICATION CODE for %s: %s", recipient, code)
-        return
-    host = os.environ.get("MAMS_SMTP_HOST", "").strip()
-    sender = os.environ.get("MAMS_SMTP_FROM", os.environ.get("MAMS_SMTP_USERNAME", "")).strip()
-    if not host or not sender:
-        raise RuntimeError("SMTP host and sender must be configured before email can be sent.")
-    port = int(os.environ.get("MAMS_SMTP_PORT", "587"))
+        raise EmailError("Email delivery is disabled during automated tests.", permanent=True)
+    cfg = email_settings()
+    if cfg["backend"] == "console":
+        current_app.logger.warning("LOCAL EMAIL to %s: %s | %s", recipient, subject, text)
+        return "console"
+    if not cfg["host"] or not cfg["sender"]:
+        raise EmailError("SMTP host and sender (MAMS_SMTP_FROM) must be configured before email can be sent.",
+                         permanent=True)
+    if cfg["backend"] == "resend" and not cfg["password"]:
+        raise EmailError("MAMS_RESEND_API_KEY isn't set", permanent=True)
     message = EmailMessage()
-    message["Subject"] = "Your MAMS Prediction Market verification code"
-    message["From"] = sender
-    message["To"] = recipient
-    message.set_content(
-        f"Your MAMS Prediction Market verification code is {code}. "
-        "It expires in 10 minutes. If you did not request it, you can ignore this email."
-    )
-    with smtplib.SMTP(host, port, timeout=15) as server:
-        server.ehlo()
-        server.starttls(context=ssl.create_default_context())
-        server.ehlo()
-        smtp_username = os.environ.get("MAMS_SMTP_USERNAME", "")
-        smtp_password = os.environ.get("MAMS_SMTP_PASSWORD", "")
-        if smtp_username:
-            server.login(smtp_username, smtp_password)
-        server.send_message(message)
+    message["Subject"], message["From"], message["To"] = subject, cfg["sender"], recipient
+    message["Message-ID"] = email.utils.make_msgid(domain=cfg["sender"].rsplit("@", 1)[-1].rstrip("> ") or None)
+    message["Date"] = email.utils.formatdate(localtime=True)
+    message.set_content(text)
+    if html:
+        message.add_alternative(html, subtype="html")
+    last = None
+    for attempt in (1, 2):
+        started = time.time()
+        try:
+            ctx = ssl.create_default_context()
+            if cfg["port"] in (465, 2465):
+                server = smtplib.SMTP_SSL(cfg["host"], cfg["port"], timeout=cfg["timeout"], context=ctx)
+            else:
+                server = smtplib.SMTP(cfg["host"], cfg["port"], timeout=cfg["timeout"])
+            with server:
+                server.ehlo()
+                if cfg["port"] not in (465, 2465):
+                    server.starttls(context=ctx)
+                    server.ehlo()
+                if cfg["user"]:
+                    server.login(cfg["user"], cfg["password"])
+                server.send_message(message)
+            return f"{cfg['backend']} via {cfg['host']}:{cfg['port']} in {int((time.time() - started) * 1000)} ms" \
+                + (" (2nd try)" if attempt == 2 else "")
+        except EmailError:
+            raise
+        except (smtplib.SMTPException, OSError) as e:
+            last = _smtp_error(e)
+            current_app.logger.warning("email attempt %d to %s failed: %s", attempt, cfg["host"], last.reason)
+            if last.permanent:
+                break
+    raise last
+
+
+def send_login_code_email(recipient, code):
+    if not app.config.get("TESTING") and email_settings()["backend"] == "console":
+        current_app.logger.warning("LOCAL VERIFICATION CODE for %s: %s", recipient, code)  # local development only
+        return "console"
+    text = (f"Your MAMS Prediction Market verification code is {code}. "
+            "It expires in 10 minutes. If you did not request it, you can ignore this email.")
+    html = ("<div style=\"font-family:system-ui,Segoe UI,Arial,sans-serif;max-width:420px;margin:auto;padding:24px\">"
+            "<h2 style=\"margin:0 0 12px\">Confirm your email</h2>"
+            "<p>Enter this code on the MAMS Prediction Market page:</p>"
+            f"<p style=\"font-size:32px;font-weight:700;letter-spacing:6px;margin:16px 0\">{code}</p>"
+            "<p style=\"color:#666\">It expires in 10 minutes. If you didn't ask for it, you can ignore this email.</p></div>")
+    return send_email(recipient, "Your MAMS Prediction Market verification code", text, html)
 
 
 init_db()
@@ -1106,6 +1284,7 @@ def load_user_and_check_csrf():
         if g.user is None:
             session.pop("uid")
         elif session.get("gen", 0) != g.user["session_gen"]:
+            log_event("session_expired", user=g.user, detail="password changed or reset since this session started")
             session.clear()  # password changed elsewhere: this session is no longer valid
             g.user = None
         elif g.user["id"] == g.owner_id and not g.user["is_admin"]:
@@ -1117,6 +1296,7 @@ def load_user_and_check_csrf():
     if request.method == "POST":
         token = request.form.get("csrf_token", "")
         if not token or not secrets.compare_digest(token, session.get("_csrf", "")):
+            log_event("csrf_failed", detail=f"{request.method} {request.endpoint}")
             abort(400, "Your form expired. Go back, reload the page and try again.")
 
 
@@ -1168,6 +1348,7 @@ def hold_check():
     Default-deny: any POST outside HOLD_ALLOWED is refused, so a new route is covered without remembering."""
     if (g.get("user") is not None and g.user["held"] and not g.user["is_admin"] and request.method == "POST"
             and request.endpoint not in HOLD_ALLOWED):
+        log_event("hold_blocked", detail=f"{request.method} {request.endpoint}")
         flash("Your account is waiting for an admin to review it. You can look around, but you can't bet, claim, "
               "lend or post until it's approved.", "error")
         return redirect(referrer_or(url_for("index")))
@@ -1184,12 +1365,13 @@ def periodic_sighting():
     db = get_db()
     try:
         if record_sighting(db, u["id"], u["username"]):
+            log_event("sighting_new", user=u, detail="a new IP or device was seen on a page view")
             apply_risk(db, u["id"])
     except Exception:
         app.logger.exception("alt detection failed on a page view")
 
 
-def record_sighting(db, uid, username, event=None, fp_raw=None):
+def record_sighting(db, uid, username, event=None, fp_raw=None, extra=None):
     """Remember this visitor's IP, device and browser fingerprint against the account, and (for sign-up, log-in and
     email confirmation) add a row to the login history. Loopback and private IPs are ignored as clues. Returns how
     many values were new for this account."""
@@ -1214,7 +1396,7 @@ def record_sighting(db, uid, username, event=None, fp_raw=None):
         db.execute("INSERT INTO login_events (user_id, username, event, ip, ua, device_id, fp_hash, fp_json, created_at) "
                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                    (uid, username, event, ip, ua, did, digest["parts"].get("fp", "") if digest else "",
-                    json.dumps(digest["meta"]) if digest else "", t))
+                    json.dumps({**(digest["meta"] if digest else {}), **(extra or {})}), t))
     return fresh
 
 
@@ -1267,18 +1449,23 @@ def apply_risk(db, uid, pool=None, cfg=None):
         "ON CONFLICT(user_id) DO UPDATE SET score = excluded.score, level = excluded.level, reasons = excluded.reasons, "
         "links = excluded.links, status = excluded.status, updated_at = excluded.updated_at",
         (uid, r["score"], r["level"], json.dumps(r["reasons"]), json.dumps(links), new, time.time()))
+    top = "; ".join(t for _, _, t in r["reasons"][:3])
     if new == "held" and not u["held"]:
         db.execute("UPDATE users SET held = 1 WHERE id = ?", (uid,))
-        top = "; ".join(t for _, _, t in r["reasons"][:3])
         log_audit("user.auto_hold", "user", uid, u["username"], f"Risk {r['score']}/100: {top}", system=True)
+        log_event("risk_held", user_id=uid, username=u["username"], detail=f"risk {r['score']}/100: {top}")
+    elif new != status:
+        kind = {"flagged": "risk_reflagged" if status == "approved" else "risk_flagged", "clear": "risk_cleared"}.get(new)
+        if kind:
+            log_event(kind, user_id=uid, username=u["username"], detail=f"risk {r['score']}/100: {top}")
     return new
 
 
-def track(db, uid, username, event, fp_raw=""):
+def track(db, uid, username, event, fp_raw="", extra=None):
     """Record a sign-up / log-in / email confirmation against the account and re-score it. If anything in the alt
     detection fails it's logged and ignored: it must never stop someone signing up or logging in."""
     try:
-        record_sighting(db, uid, username, event, fp_raw)
+        record_sighting(db, uid, username, event, fp_raw, extra)
         return apply_risk(db, uid)
     except Exception:
         app.logger.exception("alt detection failed for %s", event)
@@ -1429,6 +1616,13 @@ def log_audit(action, target_type, target_id, label="", detail="", system=False)
              str(detail)[:500], now_str()))
     except sqlite3.Error:
         app.logger.exception("could not write audit log entry %s", action)
+    if not system:  # one timeline for everything: the Events page shows admin actions beside logins and failures
+        by = g.user["username"] if g.get("user") is not None else "?"
+        about_user = target_type == "user" and str(target_id).isdigit()
+        log_event("admin_action", user_id=int(target_id) if about_user else None,
+                  username=str(label)[:40] if about_user else None,
+                  detail=f"{AUDIT_ACTIONS[action]} by {by}" + (f" · {label}" if label and not about_user else "")
+                  + (f" · {detail}" if detail else ""))
 
 
 def market_label(db, mid):
@@ -1440,6 +1634,7 @@ def admin_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
         if g.user is None or not g.user["is_admin"]:
+            log_event("admin_denied", detail=f"{request.method} {request.path}")
             abort(403)
         return view(*args, **kwargs)
     return wrapped
@@ -1654,6 +1849,7 @@ def register():
         elif not EMAIL_RE.match(email) or security.normalize_email(email)[1] is None:
             flash("Enter a valid email address.", "error")
         elif problem := email_problem(get_db(), email, username=username):
+            log_event("signup_refused_email", username=username, detail=f"{security.normalize_email(email)[1]}: {problem[:80]}")
             flash(problem, "error")
         elif not PASSWORD_MIN <= len(password) <= PASSWORD_MAX:
             flash(f"Password must be {PASSWORD_MIN}–{PASSWORD_MAX} characters.", "error")
@@ -1661,8 +1857,11 @@ def register():
             flash("Passwords don't match.", "error")
         elif rate_limited(("register", request.remote_addr), 40, 3600) \
                 or rate_limited(("register-device", g.device_id), 8, 3600):
+            log_event("signup_rate_limited", username=username, detail="per IP or per device limit")
             flash("Too many new accounts from this network. Try again in a while.", "error")
-        elif not turnstile_passed(request.form.get("cf-turnstile-response", ""), request.remote_addr):
+        elif (captcha := turnstile_check(request.form.get("cf-turnstile-response", ""), request.remote_addr)) \
+                in ("missing", "failed"):
+            log_event("signup_captcha_failed", username=username, detail=captcha)
             flash("Please complete the “verify you're human” check and try again.", "error")
         else:
             db = get_db()
@@ -1696,7 +1895,12 @@ def register():
                     flash(f"A code was just sent to {email}. Wait {wait} seconds, then ask for one below.", "error")
                 else:
                     send_email_code(db, cur.lastrowid, username, email)
-                track(db, cur.lastrowid, username, "signup", request.form.get("fp", ""))
+                if captcha == "unreachable":
+                    log_event("captcha_unreachable", user_id=cur.lastrowid, username=username,
+                              detail="Cloudflare Turnstile couldn't be reached; sign-up let through")
+                log_event("signup_ok", user_id=cur.lastrowid, username=username,
+                          detail=f"email {security.normalize_email(email)[1]}, human check: {captcha}")
+                track(db, cur.lastrowid, username, "signup", request.form.get("fp", ""), extra={"captcha": captcha})
                 return redirect(url_for("account_email"))
     return render_template("register.html", turnstile_key=TURNSTILE_SITE_KEY if turnstile_enabled() else "")
 
@@ -1705,12 +1909,14 @@ def register():
 def login():
     if request.method == "POST":
         if rate_limited(("login-ip", request.remote_addr), 120, 60):
+            log_event("login_rate_limited", detail="over 120 attempts a minute from this IP")
             flash("Too many log-in attempts from this network. Wait a minute and try again.", "error")
             return render_template("login.html")
         name = request.form.get("username", "").strip()
         fail_key = ("login-fail", name.lower())
         recent_fails = [t for t in _hits.get(fail_key, []) if time.time() - t < 300]
         if len(recent_fails) >= 10:
+            log_event("login_locked", username=name if USERNAME_RE.match(name) else "", detail="10 wrong passwords in 5 minutes")
             flash("Too many wrong passwords for this account. Wait 5 minutes and try again.", "error")
             return render_template("login.html")
         u = get_db().execute("SELECT * FROM users WHERE username = ?", (name,)).fetchone()
@@ -1723,9 +1929,14 @@ def login():
             session["uid"] = u["id"]
             session["gen"] = u["session_gen"]
             db = get_db()
+            log_event("login_ok", user=u)
             track(db, u["id"], u["username"], "login", request.form.get("fp", ""))
             return redirect(safe_path(request.args.get("next", ""), url_for("index")))
         rate_limited(fail_key, 10, 300)  # record the failure
+        # An unknown name is only logged if it looks like a username (people sometimes paste a password into that box).
+        log_event("login_failed" if u else "login_unknown_user", user=u,
+                  username=None if u else (name if USERNAME_RE.match(name) else "(not a username)"),
+                  detail="wrong password" if u else "no such account")
         if u:  # logged for admins, but never counted as a sighting: anyone can type someone else's username
             get_db().execute("INSERT INTO login_events (user_id, username, event, ip, ua, device_id, created_at) "
                              "VALUES (?, ?, 'login_fail', ?, ?, ?, ?)",
@@ -1750,20 +1961,30 @@ def turnstile_enabled():
     return bool(TURNSTILE_SITE_KEY and TURNSTILE_SECRET)
 
 
-def turnstile_passed(token, remote_ip):
-    """Ask Cloudflare whether this sign-up's Turnstile token is genuine (each token works once). If Cloudflare
-    can't be reached, sign-up is allowed and the problem is logged, so an outage doesn't lock everyone out."""
+def turnstile_check(token, remote_ip):
+    """Ask Cloudflare whether this sign-up's Turnstile token is genuine (each token works once). Returns
+    'off' (not configured), 'missing' (no token sent), 'failed' (Cloudflare says no), 'ok', or 'unreachable'. When
+    Cloudflare can't be reached sign-up is allowed (so an outage doesn't lock everyone out); that is logged and the
+    account scores a few risk points for it."""
     if not turnstile_enabled():
-        return True
+        return "off"
     if not token:
-        return False
+        return "missing"
     data = urlencode({"secret": TURNSTILE_SECRET, "response": token, "remoteip": remote_ip or ""}).encode()
     try:
         with urllib.request.urlopen(urllib.request.Request(TURNSTILE_VERIFY_URL, data=data), timeout=10) as resp:
-            return bool(json.loads(resp.read().decode()).get("success"))
+            body = json.loads(resp.read().decode())
+        if not body.get("success"):
+            current_app.logger.info("turnstile rejected a token: %s", ",".join(body.get("error-codes", [])) or "no reason")
+        return "ok" if body.get("success") else "failed"
     except (OSError, ValueError, urllib.error.URLError):
         current_app.logger.exception("Couldn't reach Cloudflare Turnstile; letting this sign-up through.")
-        return True
+        return "unreachable"
+
+
+def turnstile_passed(token, remote_ip):
+    """True unless the check positively failed (kept for callers that only need yes/no)."""
+    return turnstile_check(token, remote_ip) not in ("missing", "failed")
 
 
 EMAIL_TAKEN_MSG = "That email is already used by another account. If it's yours, log in to that account instead."
@@ -1841,15 +2062,24 @@ def code_wait(user_id, email):
 def send_email_code(db, user_id, username, email):
     """Email a 6-digit code to confirm `email` for this account. Returns True if it was sent."""
     code = f"{secrets.randbelow(1_000_000):06d}"
+    started = time.time()
     try:
-        send_login_code_email(email, code)
-    except (OSError, RuntimeError, smtplib.SMTPException, ValueError):
+        how = send_login_code_email(email, code)
+    except EmailError as e:
+        log_event("email_send_failed", user_id=user_id, username=username, detail=f"to {email}: {e.reason}")
+        flash("We couldn't send that email. Check the address and try again in a minute." if "recipient" in e.reason
+              else "We couldn't send an email just now. Try again in a minute.", "error")
+        return False
+    except (OSError, RuntimeError, smtplib.SMTPException, ValueError) as e:
         current_app.logger.exception("Unable to send an email confirmation code.")
+        log_event("email_send_failed", user_id=user_id, username=username, detail=f"to {email}: {type(e).__name__}")
         flash("We couldn't send an email just now. Check the address and try again in a minute.", "error")
         return False
     db.execute("INSERT OR REPLACE INTO login_challenges (username, code_hash, expires_at, requested_at, attempts, email) "
                "VALUES (?, ?, ?, ?, 0, ?)",
                (username, login_code_hash(username, code), time.time() + LOGIN_CODE_LIFETIME, time.time(), email))
+    log_event("email_code_sent", user_id=user_id, username=username,
+              detail=f"to {email} ({how or 'sent'}, {int((time.time() - started) * 1000)} ms total)")
     flash(f"We sent a 6-digit code to {email}. It expires in 10 minutes.", "success")
     return True
 
@@ -1869,10 +2099,13 @@ def account_email():
             if not EMAIL_RE.match(email or "") or security.normalize_email(email)[1] is None:
                 flash("Enter a valid email address.", "error")
             elif problem := email_problem(db, email, except_id=u["id"], username=u["username"]):
+                log_event("email_refused", detail=f"{security.normalize_email(email)[1]}: {problem[:80]}")
                 flash(problem, "error")
             elif wait := code_wait(u["id"], email):
+                log_event("email_code_wait", detail=f"asked again with {wait}s to go")
                 flash(f"We just sent a code. Wait {wait} seconds before asking for another.", "error")
             elif rate_limited(("email-code", u["id"]), 5, 3600) or rate_limited(("email-code-ip", request.remote_addr), 30, 3600):
+                log_event("email_code_rate_limited", detail="5 an hour per account or 30 an hour per IP")
                 flash("Too many codes requested. Try again later.", "error")
             else:
                 send_email_code(db, u["id"], u["username"], security.normalize_email(email)[0])
@@ -1884,10 +2117,12 @@ def account_email():
             code = request.form.get("code", "").strip()
             if not challenge or not challenge["email"] or challenge["expires_at"] < time.time() \
                     or challenge["attempts"] >= LOGIN_CODE_MAX_ATTEMPTS:
+                log_event("email_code_expired", detail="no code pending, expired, or too many wrong tries")
                 db.execute("DELETE FROM login_challenges WHERE username = ?", (u["username"],))
                 flash("That code expired. Enter your email to get a new one.", "error")
             elif not hmac.compare_digest(challenge["code_hash"], login_code_hash(u["username"], code)):
                 db.execute("UPDATE login_challenges SET attempts = attempts + 1 WHERE username = ?", (u["username"],))
+                log_event("email_code_wrong", detail=f"wrong try {challenge['attempts'] + 1} of {LOGIN_CODE_MAX_ATTEMPTS}")
                 flash("That code isn't right. Check the email and try again.", "error")
             else:
                 # Re-check and claim the address in one transaction, so two people can't both confirm one mailbox.
@@ -1897,6 +2132,7 @@ def account_email():
                     if problem:
                         db.execute("DELETE FROM login_challenges WHERE username = ?", (u["username"],))
                         db.execute("COMMIT")
+                        log_event("email_refused", detail=f"at confirmation: {problem[:80]}")
                         flash(problem, "error")
                         return redirect(url_for("account_email"))
                     canon = security.normalize_email(challenge["email"])[1]
@@ -1912,6 +2148,7 @@ def account_email():
                     write_email_csv(db)
                 except OSError:
                     current_app.logger.exception("Couldn't update people.csv.")
+                log_event("email_verified", detail=f"{security.normalize_email(challenge['email'])[1]}")
                 track(db, u["id"], u["username"], "verify")
                 flash("Email confirmed. You're all set!", "success")
                 return redirect(url_for("index"))
@@ -1937,10 +2174,12 @@ def set_temporary_password(db, user_id):
 def change_password():
     cur, new = request.form.get("current", ""), request.form.get("new", "")
     if rate_limited(("change-password", request.remote_addr), 30, 60):
+        log_event("password_change_failed", detail="rate limited")
         flash("Too many attempts. Wait a minute and try again.", "error")
     elif not cur:
         flash("Enter your current password.", "error")
     elif not check_password_hash(g.user["password_hash"], cur):
+        log_event("password_change_failed", detail="current password was wrong")
         flash("Your current password is wrong.", "error")
     elif not PASSWORD_MIN <= len(new) <= PASSWORD_MAX:
         flash(f"Password must be {PASSWORD_MIN}–{PASSWORD_MAX} characters.", "error")
@@ -1951,12 +2190,15 @@ def change_password():
         db.execute("UPDATE users SET password_hash = ?, session_gen = session_gen + 1 WHERE id = ?",
                    (generate_password_hash(new), g.user["id"]))
         session["gen"] = g.user["session_gen"] + 1  # keep this device signed in; every other one is signed out
+        log_event("password_changed", detail="other devices were signed out")
         flash("Password changed.", "success")
     return redirect(url_for("portfolio") + "#account")
 
 
 @app.post("/logout")
 def logout():
+    if g.get("user") is not None:
+        log_event("logout", user=g.user)
     session.clear()
     return redirect(url_for("index"))
 
@@ -3468,7 +3710,7 @@ def admin_user(uid):
     manageable = can_manage(uid)
     return render_template("admin_user.html", u=u, manageable=manageable, me=u["id"] == g.user["id"],
                            is_target_owner=u["id"] == g.owner_id,
-                           ident=user_identity(db, u) if manageable else None)
+                           ident=user_identity(db, u) if manageable else None, catalog=eventlog.EVENTS)
 
 
 def user_action_error(db, uid, action):
@@ -3740,7 +3982,11 @@ def user_identity(db, u):
         security.normalize_email(email)[1] else ("normal", 0, "")
     events = []
     for e in db.execute("SELECT * FROM login_events WHERE user_id = ? ORDER BY id DESC LIMIT 50", (uid,)):
-        events.append(dict(e, agent=security.parse_ua(e["ua"])))
+        try:
+            meta = json.loads(e["fp_json"] or "{}")
+        except ValueError:
+            meta = {}
+        events.append(dict(e, agent=security.parse_ua(e["ua"]), meta=meta))
 
     def shared(kind, value):
         return db.execute("SELECT DISTINCT user_id, username FROM sightings WHERE kind = ? AND value = ? AND user_id != ?",
@@ -3756,7 +4002,9 @@ def user_identity(db, u):
             rows.append(dict(r, others=[(o["username"], o["user_id"] in live, o["user_id"]) for o in others]))
         sightings[kind] = rows
     signup = next((e for e in reversed(events) if e["event"] == "signup"), None)
+    log_rows = db.execute("SELECT * FROM security_events WHERE user_id = ? ORDER BY id DESC LIMIT 40", (uid,)).fetchall()
     return {"email": email, "email_verified": bool(u["email_verified"]), "provider": cls, "events": events,
+            "log": log_rows,
             "sightings": sightings, "signup": signup, "risk": decode_risk(
                 db.execute("SELECT * FROM user_risk WHERE user_id = ?", (uid,)).fetchone())}
 
@@ -3862,6 +4110,51 @@ def admin_users_bulk():
     return back(url_for("admin") + "#users")
 
 
+EVENT_PAGE = 50
+
+
+@app.get("/admin/events")
+@admin_required
+def admin_events():
+    """The event log: sign-ups, log-ins, failures, emails, holds, errors and admin actions, newest first. Events about
+    admins and the owner are only shown to the owner (their IPs and devices are private like everyone else's are
+    to non-admins)."""
+    db = get_db()
+    sev = request.args.get("severity", "")
+    kind = request.args.get("kind", "")
+    q = request.args.get("q", "").strip()
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+    except ValueError:
+        page = 1
+    where, args = [], []
+    if not is_owner():
+        where.append("(e.user_id IS NULL OR u.id IS NULL OR (u.is_admin = 0 AND u.id != ?))")
+        args.append(g.owner_id or -1)
+    if sev in eventlog.SEVERITIES:
+        where.append("e.severity = ?")
+        args.append(sev)
+    if kind in eventlog.EVENTS:
+        where.append("e.kind = ?")
+        args.append(kind)
+    if q:
+        like = f"%{q.lower()}%"
+        where.append("(LOWER(e.username) LIKE ? OR e.ip LIKE ? OR LOWER(e.detail) LIKE ? OR e.request_id = ? "
+                     "OR LOWER(e.path) LIKE ?)")
+        args += [like, f"{q}%", like, q, like]
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+    frm = f"FROM security_events e LEFT JOIN users u ON u.id = e.user_id {clause}"
+    total = db.execute(f"SELECT COUNT(*) {frm}", args).fetchone()[0]
+    pages = max(1, -(-total // EVENT_PAGE))
+    page = min(page, pages)
+    rows = db.execute(f"SELECT e.* {frm} ORDER BY e.id DESC LIMIT ? OFFSET ?", args + [EVENT_PAGE, (page - 1) * EVENT_PAGE]).fetchall()
+    day = time.time() - 86400
+    summary = {r["severity"]: r["n"] for r in db.execute(
+        "SELECT severity, COUNT(*) AS n FROM security_events WHERE created_at >= ? GROUP BY severity", (day,))}
+    return render_template("admin_events.html", rows=rows, q=q, sev=sev, kind=kind, page=page, pages=pages, total=total,
+                           catalog=eventlog.EVENTS, summary=summary)
+
+
 def risk_clusters(db):
     """Groups of accounts tied together by shared devices, IPs, emails or loans (union-find over the saved links)."""
     parent = {}
@@ -3965,7 +4258,12 @@ def admin_release_email():
 @app.errorhandler(413)
 @app.errorhandler(500)
 def error_page(e):
-    return render_template("error.html", error=e), e.code
+    if e.code == 500:
+        orig = getattr(e, "original_exception", None)
+        log_event("server_error", detail=f"{request.method} {request.path}: {type(orig).__name__ if orig else 'error'}")
+    elif e.code == 413:
+        log_event("too_large", detail=f"{request.method} {request.path}")
+    return render_template("error.html", error=e, reference=g.get("request_id")), e.code
 
 
 if __name__ == "__main__":

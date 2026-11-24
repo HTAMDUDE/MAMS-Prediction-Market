@@ -92,16 +92,31 @@ account and once a minute per email address (`LOGIN_CODE_RESEND_DELAY`), plus 5 
 **Bot protection (optional):** set `MAMS_TURNSTILE_SITE_KEY` and `MAMS_TURNSTILE_SECRET` to add Cloudflare Turnstile's
 "verify you're human" check to the sign-up form. Get both keys free at dash.cloudflare.com → Turnstile → Add widget,
 with your site's domain (e.g. `yourname.pythonanywhere.com`). It's off when either is missing. If the server can't
-reach Cloudflare, sign-ups are let through and the error is logged.
+reach Cloudflare, sign-ups are let through, a *Human check unreachable* event is logged, and the account scores 10 risk
+points for not having been verified (so an outage can't be used to skip the check without leaving a trace). Passed,
+failed and missing checks are all in the event log, and an account's Identity card says whether its sign-up was
+verified. Use **Managed** mode for the widget: it only shows a checkbox when a visitor looks risky.
 
 Every confirmed email is saved in the database and written to **`instance/people.csv`** (`name,email` for every
 account, blank until confirmed). `instance/` is ignored by Git, so names and emails never reach GitHub.
 
-Configure `MAMS_SMTP_HOST`, `MAMS_SMTP_PORT` (defaults to `587`), `MAMS_SMTP_USERNAME`, `MAMS_SMTP_PASSWORD`, and
-`MAMS_SMTP_FROM` for the code emails (for Gmail: `smtp.gmail.com`, and an app password from
-`https://myaccount.google.com/apppasswords`, which needs 2-Step Verification). Automated tests never send email.
-To try it locally without sending anything, start the app with `MAMS_EMAIL_BACKEND=console`; codes are printed in the
-server terminal instead. On Windows, `.\scripts\setup-gmail-smtp.ps1` sets up real Gmail delivery for a local server.
+**Email delivery** is set with `MAMS_EMAIL_BACKEND`:
+
+- **`resend`** (Resend over SMTP): set `MAMS_EMAIL_BACKEND=resend`, `MAMS_RESEND_API_KEY=re_…` and
+  `MAMS_SMTP_FROM="MAMS Markets <noreply@your-verified-domain>"`. The host (`smtp.resend.com`) and username (`resend`)
+  are filled in for you; the API key is the SMTP password. Verify the sending domain in Resend first, or every send is
+  refused ("sender address refused"). Port 587 (default, STARTTLS), 2587 and 25 upgrade with STARTTLS; set
+  `MAMS_SMTP_PORT=465` (or 2465) for implicit TLS.
+- **`smtp`** (default): any SMTP server via `MAMS_SMTP_HOST`, `MAMS_SMTP_PORT` (default `587`),
+  `MAMS_SMTP_USERNAME`, `MAMS_SMTP_PASSWORD` and `MAMS_SMTP_FROM` (for Gmail: `smtp.gmail.com`, and an app password from
+  `https://myaccount.google.com/apppasswords`, which needs 2-Step Verification). `.\scripts\setup-gmail-smtp.ps1` sets
+  up Gmail on Windows.
+- **`console`**: nothing is sent; the code is printed in the server terminal. For trying it locally.
+
+Emails go out as plain text plus a simple HTML version. A dropped connection or timeout is retried once; a bad key, an
+unverified sender or a refused recipient isn't (retrying can't fix those). Each send, and each failure with a plain
+reason (never the key), is in the event log. `MAMS_SMTP_TIMEOUT` (seconds, default 15) sets how long to wait. Automated
+tests never send email.
 
 ### Alt detection & risk
 
@@ -148,10 +163,27 @@ account is only flagged again if a *new kind* of signal appears.
 Tunables are the constants at the top of `security.py` (`HOLD_THRESHOLD`, `FLAG_THRESHOLD`, `NEW_ACCOUNT_DAYS`,
 `COMMON_THRESHOLD`, `IP_BUDGET`, `SIGNAL_RETENTION_DAYS`).
 
-**Not done yet: CAPTCHA.** Cloudflare Turnstile is deferred because PythonAnywhere's free plan blocks calls to
-`challenges.cloudflare.com`. When the site can reach it, use **Managed** mode on sign-up, log-in and "send code": it
-only shows a checkbox when a visitor looks risky, which suits a school where everyone shares one IP. Email still goes
-out over SMTP for the same reason (Resend's API is also blocked on the free plan).
+### Logging
+
+Two logs are kept, and a **reference** ties them together: every request gets a short ID, sent back as the
+`X-Request-ID` header, shown on server-error pages ("tell an admin this reference"), and written on every log line and
+event.
+
+- **Event log: Admin → Events** (`/admin/events`). One row per notable thing: sign-ups, log-ins, wrong passwords,
+  lockouts and rate limits, unknown usernames, logouts, password changes, code emails sent and failed, wrong or expired
+  codes, email confirmations, refused emails, human-check results, automatic holds, flags and clears, held accounts
+  trying to act, expired forms (CSRF), non-admins hitting admin pages, oversized requests, slow requests (over 3 s),
+  server errors, and **every admin action** (mirrored from the Admin log). Each row has the time, severity
+  (info / warn / alert), user, IP, browser, device, page, detail and reference. Search by username, IP, detail or
+  reference; filter by severity or event type. An account's page shows its own events. Events about admins and the
+  owner are only visible to the owner. Kept for 180 days.
+- **Server log: `instance/logs/mams.log`** (2 MB × 6 files, readable only by the server's account) and stderr, which is
+  the error log on PythonAnywhere. `MAMS_LOG_LEVEL` (default `INFO`) and `MAMS_LOG_DIR` change it.
+
+Logging never gets in the way: a failure to log is itself logged and ignored, events raised inside a database
+transaction are written after it ends (so a rollback can't lose them), and nothing secret is ever logged: no passwords,
+email codes, human-check tokens or API keys. A "wrong password" for a name that isn't a valid username is logged as
+`(not a username)`, because people sometimes paste their password into that box.
 
 ### Roles
 
@@ -272,6 +304,12 @@ accounts or bets.
 | `MAMS_ADMINS` | (empty)              | Comma-separated usernames that become admins        |
 | `SECRET_KEY`  | auto-generated       | Session signing key (saved to `instance/secret_key`)|
 | `MAMS_PRODUCTION` | (off)            | Set to `1` when hosted on HTTPS: secure cookies, trust proxy IPs |
+| `MAMS_EMAIL_BACKEND` | `smtp`        | `smtp`, `resend` (Resend over SMTP) or `console` (print codes locally) |
+| `MAMS_RESEND_API_KEY` | (empty)      | Resend API key (the SMTP password when the backend is `resend`) |
+| `MAMS_SMTP_HOST` / `_PORT` / `_USERNAME` / `_PASSWORD` / `_FROM` / `_TIMEOUT` | see [Accounts and email](#accounts-and-email) | SMTP settings (the host and username are preset for `resend`) |
+| `MAMS_TURNSTILE_SITE_KEY` / `MAMS_TURNSTILE_SECRET` | (empty) | Cloudflare Turnstile on sign-up; off unless both are set |
+| `MAMS_LOG_LEVEL` | `INFO`            | Server log level                                    |
+| `MAMS_LOG_DIR` | `instance/logs`     | Where `mams.log` is written                         |
 | `MAMS_TZ`     | `America/New_York`   | Time zone for closing times and the daily bonus     |
 | `MAMS_SCHOOL_DOMAINS` | (empty)      | Comma-separated school email domains (e.g. `wpi.edu`); addresses on them lower the risk score |
 
@@ -303,6 +341,7 @@ Starting balance, daily bonus and the category list are constants at the top of 
 ```
 app.py          Flask routes, trading, resolution, admin tools, auth
 lmsr.py         Market-maker math (prices, cost to buy, value when selling)
+eventlog.py     Event catalog and the server log setup (rotating file, request IDs)
 security.py     Alt detection: email normalization and provider lists, user-agent/fingerprint parsing, risk scoring
 security_data/  disposable_domains.txt (refused) and shady_domains.txt (adds risk points)
 static/fp.js    Browser fingerprint collected on the sign-up and log-in pages

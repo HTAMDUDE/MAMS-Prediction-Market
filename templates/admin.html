@@ -13,6 +13,7 @@
 <div class="activity-head"><h1>Admin</h1>
   <div class="row-actions">
     <a class="btn btn-small btn-ghost" href="{{ url_for('admin_security') }}">Alerts &amp; security{% if review_counts.get('held') or review_counts.get('flagged') %} <span class="badge" title="{{ review_counts.get('held', 0) }} held, {{ review_counts.get('flagged', 0) }} flagged">{{ review_counts.get('held', 0) + review_counts.get('flagged', 0) }}</span>{% endif %}</a>
+    <a class="btn btn-small btn-ghost" href="{{ url_for('admin_events') }}">Events</a>
     <a class="btn btn-small btn-ghost" href="{{ url_for('admin_log') }}">Admin log →</a>
   </div>
 </div>

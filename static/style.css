@@ -1165,3 +1165,9 @@ dialog h2 { margin-top: 0; font-size: 1.15rem; }
 .reasons .pts.neg { color: var(--yes); }
 #identity h3 { margin: 1.1rem 0 .4rem; font-size: .95rem; }
 .held-banner .ann-tag { background: var(--no-tint); color: var(--no); }
+
+/* Event log severity */
+.sev { display: inline-block; padding: 0 7px; border-radius: 4px; font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; vertical-align: middle; }
+.sev-info { background: var(--surface-2); color: var(--muted); }
+.sev-warn { background: var(--gold-tint); color: color-mix(in srgb, var(--gold) 70%, var(--ink)); }
+.sev-alert { background: var(--no-tint); color: var(--no); }

@@ -285,3 +285,24 @@ CREATE TABLE IF NOT EXISTS email_ledger (
     released_by    TEXT,
     released_at    REAL
 );
+
+-- The event log (Admin -> Events): one row per notable thing that happened. No foreign keys, so it survives deleted
+-- accounts. severity: info | warn | alert. Never holds passwords, codes or tokens.
+CREATE TABLE IF NOT EXISTS security_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at REAL NOT NULL,
+    kind       TEXT NOT NULL,
+    severity   TEXT NOT NULL DEFAULT 'info',
+    user_id    INTEGER,
+    username   TEXT NOT NULL DEFAULT '',
+    ip         TEXT NOT NULL DEFAULT '',
+    ua         TEXT NOT NULL DEFAULT '',
+    device_id  TEXT NOT NULL DEFAULT '',
+    request_id TEXT NOT NULL DEFAULT '',
+    path       TEXT NOT NULL DEFAULT '',
+    detail     TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_sevents_time ON security_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_sevents_kind ON security_events(kind, created_at);
+CREATE INDEX IF NOT EXISTS idx_sevents_user ON security_events(user_id, id);
+CREATE INDEX IF NOT EXISTS idx_sevents_ip ON security_events(ip);
