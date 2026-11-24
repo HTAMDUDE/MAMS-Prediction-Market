@@ -486,6 +486,7 @@ def test_turnstile_check_outcomes(monkeypatch):
         assert not appmod.turnstile_passed("good", "1.2.3.4")                  # outage: rejected
         _turnstile(monkeypatch, "up")
         assert appmod.turnstile_passed("good", "1.2.3.4") and not appmod.turnstile_passed("", "1.2.3.4")
+        assert not appmod.turnstile_passed("bad", "1.2.3.4")
 
 
 def test_failed_human_check_is_logged_and_makes_no_account(monkeypatch, sent):
