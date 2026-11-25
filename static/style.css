@@ -133,7 +133,7 @@ main.wrap { padding-top: 8px; padding-bottom: 48px; }
 .brand-text b { font-weight: 750; }
 .brand-text .short { display: none; }
 .logo {
-  width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; flex: none;
+  width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; flex: none;
   background: transparent; overflow: hidden;
   box-shadow: 0 1px 4px rgba(0, 0, 0, .35);
   transition: transform var(--t3) var(--spring);
@@ -1011,7 +1011,7 @@ td .tag, .tag.pill { background: var(--surface-2); padding: 2px 7px; border-radi
 /* ================================================================ 13. auth, guide, error, footer, dialog */
 .auth { max-width: 420px; margin: 40px auto; padding: 28px; position: relative; overflow: hidden; }
 .auth::before { content: ""; position: absolute; inset: 0 0 auto; height: 4px; background: linear-gradient(90deg, var(--brand), #c23744 50%, var(--wpi-gray)); }
-.auth .logo { width: 52px; height: 52px; border-radius: 50%; margin-bottom: 14px; }
+.auth .logo { width: 64px; height: 64px; border-radius: 50%; margin-bottom: 14px; }
 .auth h1 { font-size: 1.6rem; margin: 0 0 6px; }
 .auth > .muted { margin-bottom: 18px; }
 .auth form { margin-top: 18px; }
