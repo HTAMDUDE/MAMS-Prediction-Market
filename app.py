@@ -937,7 +937,7 @@ def refund_user_in_market(db, user_id, market_id, reason="Refund"):
                      (user_id, market_id)).fetchone()[0]
     for p in db.execute("SELECT p.outcome_id, p.shares FROM positions p JOIN outcomes o ON o.id = p.outcome_id "
                         "WHERE p.user_id = ? AND o.market_id = ?", (user_id, market_id)).fetchall():
-        db.execute("UPDATE outcomes SET shares = shares - ? WHERE id = ?", (p["shares"], p["outcome_id"]))
+        db.execute("UPDATE outcomes SET shares = ROUND(shares - ?, 2) WHERE id = ?", (p["shares"], p["outcome_id"]))
     db.execute("DELETE FROM positions WHERE user_id = ? AND outcome_id IN "
                "(SELECT id FROM outcomes WHERE market_id = ?)", (user_id, market_id))
     db.execute("DELETE FROM trades WHERE user_id = ? AND market_id = ?", (user_id, market_id))
@@ -975,7 +975,7 @@ def cancel_trade(db, trade_id, reason="Refund"):
         shares = min(t["shares"], held)
         refund = cents(max(t["amount"], 0.0))
         set_position(db, t["user_id"], t["outcome_id"], held - shares, max(pos["cost"] - refund, 0.0))
-        db.execute("UPDATE outcomes SET shares = shares - ? WHERE id = ?", (shares, t["outcome_id"]))
+        db.execute("UPDATE outcomes SET shares = ROUND(shares - ?, 2) WHERE id = ?", (shares, t["outcome_id"]))
         db.execute("DELETE FROM trades WHERE id = ?", (trade_id,))
         if refund > 0:
             db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (refund, t["user_id"]))
@@ -1045,17 +1045,25 @@ def check_trade(m, outs, idx, action, value, balance=None, held=None, fee=0.0):
     """Validate a trade and price it. Returns (shares, coins, late): shares bought/sold, coins spent/received
     before fees, and the late-trading fee. Raises TradeError with a user-facing message. balance/held may be None
     to skip those checks (used for logged-out quotes). Shared by execute_trade and the /api/quote preview so they
-    always agree. `fee` is the entry fee owed on this buy, if any."""
-    q = [o["shares"] for o in outs]
+    always agree. `fee` is the entry fee owed on this buy, if any.
+
+    Priced in whole cents and hundredths of a share, rounding against the trader (bought shares floored, buy cost
+    rounded up, sale proceeds floored) so buying and selling back can never mint coins."""
+    q_centi = [lmsr.to_centi_shares(o["shares"]) for o in outs]
     label = outs[idx]["label"]
     t = late_multiplier(m)
     if action == "buy":
-        amount = cents(value)
-        if amount < MIN_BET:
+        spend_cents = lmsr.to_cents(value)
+        if spend_cents < lmsr.to_cents(MIN_BET):
             raise TradeError(f"Minimum bet is Ⓜ{MIN_BET:.0f}.")
-        shares = lmsr.shares_for_amount(q, m["b"], idx, amount)
+        try:
+            shares_centi, cost_cents = lmsr.quote_buy_cents(q_centi, m["b"], idx, spend_cents)
+        except ValueError as e:
+            raise TradeError(str(e))
+        shares = lmsr.from_centi_shares(shares_centi)
+        amount = lmsr.from_cents(cost_cents)
         late = late_fee(shares, amount / shares, t)
-        if balance is not None and amount + fee + late > balance + EPS:
+        if balance is not None and cost_cents + lmsr.to_cents(fee) + lmsr.to_cents(late) > lmsr.to_cents(balance):
             extras = [f"Ⓜ{amount:,.2f} bet"]
             if fee:
                 extras.append(f"Ⓜ{fee:,.0f} entry fee")
@@ -1070,25 +1078,30 @@ def check_trade(m, outs, idx, action, value, balance=None, held=None, fee=0.0):
         shares = value
         if held is not None and abs(shares - held) < 1e-6:
             shares = held
-        if shares <= EPS:
+        sell_centi = lmsr.to_centi_shares(shares)
+        if sell_centi <= 0:
             raise TradeError("Enter a number of shares to sell.")
-        if held is not None and shares > held + EPS:
+        if held is not None and sell_centi > lmsr.to_centi_shares(held):
             raise TradeError(f"You only own {held:.2f} shares of “{label}”.")
-        coins = math.floor(lmsr.sell_value(q, m["b"], idx, shares) * 100) / 100
-        if coins < 0.01:
+        if sell_centi > q_centi[idx]:
+            raise TradeError("Cannot sell more shares than are outstanding in the market.")
+        proceeds_cents = lmsr.quote_sell_cents(q_centi, m["b"], idx, sell_centi)
+        if proceeds_cents < 1:
             raise TradeError("That's worth less than Ⓜ0.01. Sell more shares at once.")
+        shares = lmsr.from_centi_shares(sell_centi)
+        coins = lmsr.from_cents(proceeds_cents)
         return shares, coins, min(late_fee(shares, coins / shares, t, buy=False), coins)
     raise TradeError("Unknown action.")
 
 
 def set_position(db, user_id, outcome_id, shares, cost):
     """Store a user's holding of one outcome (removing it when nothing is left). Call inside a transaction."""
-    if shares <= 1e-9:
+    if lmsr.to_centi_shares(shares) <= 0:
         db.execute("DELETE FROM positions WHERE user_id = ? AND outcome_id = ?", (user_id, outcome_id))
     else:
         db.execute("INSERT INTO positions (user_id, outcome_id, shares, cost) VALUES (?, ?, ?, ?) "
                    "ON CONFLICT(user_id, outcome_id) DO UPDATE SET shares = excluded.shares, cost = excluded.cost",
-                   (user_id, outcome_id, shares, cost))
+                   (user_id, outcome_id, lmsr.from_centi_shares(lmsr.to_centi_shares(shares)), cents(cost)))
 
 
 def execute_trade(db, user_id, market_id, outcome_id, action, value, min_out=None):
@@ -1135,21 +1148,26 @@ def execute_trade(db, user_id, market_id, outcome_id, action, value, min_out=Non
                        (market_id, user_id, m["created_by"], fee, now_str()))
         q[idx] += shares if action == "buy" else -shares
         now_pct = lmsr.prices(q, m["b"])[idx] * 100
+        shares_centi, coins_cents, held_centi = (lmsr.to_centi_shares(shares), lmsr.to_cents(coins),
+                                                 lmsr.to_centi_shares(held))
         if action == "buy":
-            d_shares, d_cash = shares, -coins
-            new_shares, new_cost = held + shares, held_cost + coins
+            d_shares_centi, d_cash = shares_centi, -coins
+            new_shares = lmsr.from_centi_shares(held_centi + shares_centi)
+            new_cost = lmsr.from_cents(lmsr.to_cents(held_cost) + coins_cents)
             msg = (f"You paid Ⓜ{coins:,.2f} for {shares:,.2f} shares of “{label}”"
                    + (f" plus a Ⓜ{fee:,.0f} entry fee to {creator}" if fee else "") +
                    f". If it wins they pay Ⓜ{new_shares:,.2f} in total. Price now {now_pct:.0f}%.")
             detail = f"Bought {shares:,.2f} shares of “{label}”"
         else:
-            d_shares, d_cash = -shares, coins
-            new_shares = held - shares
+            d_shares_centi, d_cash = -shares_centi, coins
+            new_shares = lmsr.from_centi_shares(held_centi - shares_centi)
             new_cost = held_cost * (new_shares / held) if held > 0 else 0.0
             msg = f"You received Ⓜ{coins:,.2f} for {shares:,.2f} shares of “{label}”. Price now {now_pct:.0f}%."
             detail = f"Sold {shares:,.2f} shares of “{label}”"
 
-        db.execute("UPDATE outcomes SET shares = shares + ? WHERE id = ?", (d_shares, outcome_id))
+        d_shares = lmsr.from_centi_shares(d_shares_centi)
+        db.execute("UPDATE outcomes SET shares = ? WHERE id = ?",
+                   (lmsr.from_centi_shares(lmsr.to_centi_shares(outs[idx]["shares"]) + d_shares_centi), outcome_id))
         db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (d_cash, user_id))
         log_activity(db, user_id, action, d_cash, m, detail)
         if late:
@@ -3321,15 +3339,21 @@ def seize_position(db, loan_id, lender_id, outcome_id, mode):
         idx = [x["id"] for x in outs].index(outcome_id)
         q = [x["shares"] for x in outs]
         n, coins = shares_to_cover(q, m["b"], idx, pos["shares"], loan["owed"])
+        # whole hundredths of a share (rounded up, so the sale still covers what's owed), priced like any sale
+        held_centi = lmsr.to_centi_shares(pos["shares"])
+        n_centi = min(held_centi, max(1, math.ceil(n * lmsr.SHARES_SCALE - 1e-9)))
+        n = lmsr.from_centi_shares(n_centi)
+        coins = lmsr.from_cents(lmsr.quote_sell_cents([lmsr.to_centi_shares(x) for x in q], m["b"], idx, n_centi))
         if coins < 0.01:
             raise TradeError("That bet is worth less than Ⓜ0.01.")
         names = {r["id"]: r["username"] for r in db.execute(
             "SELECT id, username FROM users WHERE id IN (?, ?)", (borrower_id, lender_id))}
         label = o["label"]
-        new_shares = pos["shares"] - n
+        new_shares = lmsr.from_centi_shares(held_centi - n_centi)
         new_cost = pos["cost"] * (new_shares / pos["shares"])
         if mode == "sell":
-            db.execute("UPDATE outcomes SET shares = shares - ? WHERE id = ?", (n, outcome_id))
+            db.execute("UPDATE outcomes SET shares = ? WHERE id = ?",
+                       (lmsr.from_centi_shares(lmsr.to_centi_shares(outs[idx]["shares"]) - n_centi), outcome_id))
             set_position(db, borrower_id, outcome_id, new_shares, new_cost)
             db.execute("UPDATE users SET balance = ROUND(balance + ?, 2) WHERE id = ?", (coins, borrower_id))
             log_activity(db, borrower_id, "sell", coins, m,

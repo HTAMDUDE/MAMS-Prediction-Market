@@ -2023,3 +2023,28 @@ def test_admin_can_cancel_and_refund_one_purchase():
             appmod.cancel_trade(db, hal_buy)
     finally:
         appmod.DB_PATH = old
+
+
+def test_fixed_point_round_trips_never_mint_coins():
+    """From PR #8: buys and sells are priced in whole cents and hundredths of a share, rounded against the trader."""
+    for b in (50, 100, 1000):
+        for spend_cents in (100, 1234, 5000):
+            q = [0, 0, 0]
+            sc, cost_c = lmsr.quote_buy_cents(q, b, 0, spend_cents)
+            assert cost_c <= spend_cents and sc > 0
+            q[0] += sc
+            assert lmsr.quote_sell_cents(q, b, 0, sc) <= cost_c
+
+    db = appmod.connect()
+    uid = db.execute("INSERT INTO users (username, password_hash, balance, created_at) VALUES ('fixie', 'x', 1000, ?)",
+                     (appmod.now_str(),)).lastrowid
+    closes = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+    mid = appmod.create_market(db, "Fixed point?", "", "Other", closes, ["A", "B"], 100)
+    oid = appmod.get_outcomes(db, mid)[0]["id"]
+    for _ in range(5):
+        appmod.execute_trade(db, uid, mid, oid, "buy", 12.34)
+        held = db.execute("SELECT shares FROM positions WHERE user_id=?", (uid,)).fetchone()[0]
+        appmod.execute_trade(db, uid, mid, oid, "sell", held)
+    assert db.execute("SELECT balance FROM users WHERE id=?", (uid,)).fetchone()[0] <= 1000
+    for (s,) in db.execute("SELECT shares FROM trades WHERE market_id=?", (mid,)):
+        assert round(s, 2) == s                                    # whole hundredths of a share

@@ -88,11 +88,11 @@ def test_tiny_sell_is_refused_in_trade_and_quote():
     appmod.execute_trade(db, a, mid, o0, "buy", 1)
     held = _q(db, "SELECT shares FROM positions WHERE user_id=?", a)
     with pytest.raises(appmod.TradeError, match="less than Ⓜ0.01"):
-        appmod.execute_trade(db, a, mid, o0, "sell", 0.001)
+        appmod.execute_trade(db, a, mid, o0, "sell", 0.01)
     assert held > 0
     outs = appmod.get_outcomes(db, mid)
     with pytest.raises(appmod.TradeError, match="less than Ⓜ0.01"):
-        appmod.check_trade(appmod_market(db, mid), outs, 0, "sell", 0.001)
+        appmod.check_trade(appmod_market(db, mid), outs, 0, "sell", 0.01)
 
 
 def appmod_market(db, mid):
