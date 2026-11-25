@@ -5,7 +5,8 @@
 <h1>Loans</h1>
 <p class="muted">Lend your {{ CURRENCY }} to other players at an interest rate you choose, or borrow from them.
   Interest is a flat percentage of the amount: borrow Ⓜ100 at 10% and you pay back Ⓜ110, whenever you like before
-  the due date. After that a <b>{{ (LOAN_LATE_FEE * 100)|round|int }}% late fee</b> is added (it goes to the lender), and anything
+  the due date. After that a <b>{{ (LOAN_LATE_FEE * 100)|round|int }}% late fee</b> is added (it goes to the lender), and again at
+  the start of each day it stays unpaid, each time on the new total, for {{ LOAN_GRACE_DAYS }} days. Anything
   still owed is <b>taken from the borrower's cash automatically</b>, including
   money they get later, until it's paid off. While a loan is overdue the borrower can't buy, lend or create markets,
   and if it's still unpaid {{ LOAN_GRACE_DAYS }} days after the due date the lender can <b>sell or take over their

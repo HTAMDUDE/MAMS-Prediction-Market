@@ -94,7 +94,8 @@ LOAN_CREDIT_FLOOR = 500.0   # anyone can owe at least this much in total...
 LOAN_CREDIT_RATIO = 0.5     # ...or this share of cash + bets - debts, whichever is more
 LOAN_MAX_ACTIVE = 5         # running loans as a borrower
 LOAN_GRACE_DAYS = 2         # after the due date, before lenders may sell or take over the borrower's bets
-LOAN_LATE_FEE = 0.10        # added once to what's still owed when a loan goes past its due date; goes to the lender
+LOAN_LATE_FEE = 0.10        # added to what's still owed when a loan goes past its due date, then again at the start of
+                            # each further day it stays unpaid (compounding) until the grace period ends; goes to the lender
 OWNER_USERNAME = os.environ.get("MAMS_OWNER", "Kaushik").strip()
 # Optional. When set, the owner account only gets owner powers once it has confirmed this email address, so if the
 # database is ever reset, whoever signs up first with the owner's username doesn't become owner.
@@ -306,8 +307,9 @@ NEW_COLUMNS = {
     "trades": [("via", "TEXT")],
     # min_score: an offer only borrowers with at least this credit score may take
     "loans": [("min_score", "INTEGER"),
-              # late_at: when the late fee was added; penalty: how much it was
-              ("late_at", "TEXT"), ("penalty", "REAL NOT NULL DEFAULT 0")],
+              # late_at: when the first late fee was added; penalty: all late fees so far; late_fees: how many
+              ("late_at", "TEXT"), ("penalty", "REAL NOT NULL DEFAULT 0"),
+              ("late_fees", "INTEGER NOT NULL DEFAULT 0")],
 }
 
 
@@ -445,12 +447,23 @@ def mark_loan_rules_start(db):
                (now_str() if running else "1970-01-01 00:00:00",))
 
 
+def mark_compound_late_fees(db):
+    """Late fees used to be added once; now they compound daily through the grace period. Loans that were already
+    overdue when that changed keep the single fee they got, so nobody is charged on terms they never saw."""
+    if db.execute("SELECT 1 FROM site_settings WHERE key = 'late_fees_daily_at'").fetchone():
+        return
+    db.execute("UPDATE loans SET late_fees = ? WHERE late_at IS NOT NULL AND late_fees = 0", (LOAN_GRACE_DAYS,))
+    db.execute("INSERT INTO site_settings (key, value, updated_at) VALUES ('late_fees_daily_at', ?, datetime('now'))",
+               (now_str(),))
+
+
 def init_db():
     db = connect()
     with open(os.path.join(BASE_DIR, "schema.sql")) as f:
         db.executescript(f.read())
     migrate(db)
     mark_loan_rules_start(db)
+    mark_compound_late_fees(db)
     backfill_security(db)
     require_emails_once(db)
     deepen_liquidity(db)
@@ -2984,10 +2997,10 @@ def collect_overdue_loans(db):
     """Take what's owed on overdue loans out of the borrower's cash, as much as they have. Runs on every request,
     so money a borrower gets later (sales, payouts, bonuses) goes to their lenders until the debt is cleared.
     Oldest loans are paid first. Loan offers an overdue borrower still has open are withdrawn first, so the money
-    they hold goes to their lenders as well. A loan that has just gone past its due date first gets a late fee
-    (LOAN_LATE_FEE of what's still owed), added once."""
-    if not db.execute("SELECT 1 FROM loans WHERE status = 'active' AND due_at <= ? AND late_at IS NULL LIMIT 1",
-                      (now_str(),)).fetchone() and not db.execute("SELECT 1 FROM loans l JOIN users u ON u.id = l.borrower_id WHERE l.status = 'active' "
+    they hold goes to their lenders as well. Before that, overdue loans get their late fees: LOAN_LATE_FEE of what's
+    still owed when the due date passes, then again at the start of each further day it's unpaid, each fee on the
+    new total (so they compound), until the grace period ends and lenders may collect from bets."""
+    if not db.execute(f"SELECT 1 FROM loans WHERE {LATE_FEE_DUE_SQL} LIMIT 1", (LOAN_GRACE_DAYS, now_str())).fetchone() and not db.execute("SELECT 1 FROM loans l JOIN users u ON u.id = l.borrower_id WHERE l.status = 'active' "
                       "AND l.due_at <= ? AND u.balance >= 0.01 LIMIT 1", (now_str(),)).fetchone() \
             and not db.execute("SELECT 1 FROM loans o WHERE o.status = 'offered' AND EXISTS (SELECT 1 FROM loans a "
                                "WHERE a.status = 'active' AND a.borrower_id = o.lender_id AND a.due_at <= ?) LIMIT 1",
@@ -2996,14 +3009,8 @@ def collect_overdue_loans(db):
     paid_borrowers = []
     db.execute("BEGIN IMMEDIATE")
     try:
-        for l in db.execute("SELECT * FROM loans WHERE status = 'active' AND due_at <= ? AND late_at IS NULL",
-                            (now_str(),)).fetchall():
-            fee = cents(l["owed"] * LOAN_LATE_FEE)
-            db.execute("UPDATE loans SET late_at = ?, penalty = ?, owed = ROUND(owed + ?, 2) WHERE id = ?",
-                       (now_str(), fee, fee, l["id"]))
-            if fee > 0:
-                log_activity(db, l["borrower_id"], "loan", 0, None,
-                             f"Late fee of Ⓜ{fee:,.2f} added to an overdue loan ({LOAN_LATE_FEE:.0%} of what was owed)")
+        for l in db.execute(f"SELECT * FROM loans WHERE {LATE_FEE_DUE_SQL}", (LOAN_GRACE_DAYS, now_str())).fetchall():
+            add_late_fees(db, l)
         for offer in db.execute("SELECT * FROM loans o WHERE o.status = 'offered' AND EXISTS (SELECT 1 FROM loans a "
                                 "WHERE a.status = 'active' AND a.borrower_id = o.lender_id AND a.due_at <= ?)",
                                 (now_str(),)).fetchall():
@@ -3018,6 +3025,37 @@ def collect_overdue_loans(db):
         raise
     if paid_borrowers:  # only when money actually moved, so a borrower with nothing to take isn't re-scored every request
         rescore_credit(db, *paid_borrowers, reason="overdue loan collected")
+
+
+# Active loans owed another late fee: the next one is due `late_fees` days after the due date, up to LOAN_GRACE_DAYS.
+LATE_FEE_DUE_SQL = ("status = 'active' AND late_fees < ? "
+                    "AND datetime(due_at, '+' || late_fees || ' days') <= ?")
+
+
+def late_fees_due(loan, now=None):
+    """How many late fees this loan should have had by now: one at the due date and one at the start of each further
+    day it's unpaid, at most LOAN_GRACE_DAYS."""
+    late = (now or datetime.now()) - parse_dt(loan["due_at"])
+    if late < timedelta(0):
+        return 0
+    return min(LOAN_GRACE_DAYS, late.days + 1)
+
+
+def add_late_fees(db, loan):
+    """Add every late fee this loan is owed and hasn't had (more than one if nobody visited the site for a while).
+    Each is LOAN_LATE_FEE of what's owed after the fees before it. Call inside a transaction."""
+    owed, penalty, done = loan["owed"], loan["penalty"], loan["late_fees"]
+    due = late_fees_due(loan)
+    for k in range(done, due):
+        fee = cents(owed * LOAN_LATE_FEE)
+        owed, penalty = cents(owed + fee), cents(penalty + fee)
+        if fee > 0:
+            log_activity(db, loan["borrower_id"], "loan", 0, None,
+                         f"Late fee of Ⓜ{fee:,.2f} added to an overdue loan ({LOAN_LATE_FEE:.0%} of what was owed, "
+                         f"day {k + 1} of {LOAN_GRACE_DAYS})")
+    if due > done:
+        db.execute("UPDATE loans SET late_at = COALESCE(late_at, ?), penalty = ?, owed = ?, late_fees = ? WHERE id = ?",
+                   (now_str(), penalty, owed, due, loan["id"]))
 
 
 def has_overdue_loan(db, user_id):

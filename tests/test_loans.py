@@ -273,8 +273,8 @@ def test_overdue_borrower_is_frozen_but_can_sell_and_repay():
     appmod.execute_trade(db, bob, mid, yes, "sell", shares(db, bob, yes))   # selling is fine...
     appmod.collect_overdue_loans(db)                                         # ...and the money goes to the lender
     l = loan(db, lid)
-    assert l["repaid"] > 40 and l["owed"] == pytest.approx(110 - l["repaid"])          # the sale's proceeds, all of it
-    assert l["penalty"] == 10                                                           # 10% late fee on the 100
+    assert l["repaid"] > 40 and l["owed"] == pytest.approx(121 - l["repaid"])          # the sale's proceeds, all of it
+    assert l["penalty"] == 21                                   # 3 days overdue: 10% on 100, then 10% on 110 (capped at 2)
     assert bal(db, bob) == 0 and bal(db, ann) == pytest.approx(900 + l["repaid"])
 
 
@@ -575,7 +575,7 @@ def test_take_over_needs_cash_for_the_entry_fee():
     assert shares(db, ann, yes) == 0 and loan(db, lid)["status"] == "active" and bal(db, ann) == 5
 
 
-def test_late_fee_is_added_once_when_a_loan_goes_overdue():
+def test_late_fee_is_added_once_per_day_not_once_per_request():
     db = _fresh_db()
     ann, bob = _user(db, "ann"), _user(db, "bob", balance=0)
     lid = appmod.offer_loan(db, ann, "bob", 100, 0, 7)
@@ -609,3 +609,59 @@ def test_deleting_an_account_clears_the_old_credit_events_table():
                "VALUES (?, -40, 560, 'late', '2026-01-01 00:00:00')", (bob,))
     appmod.delete_account(db, bob)
     assert db.execute("SELECT COUNT(*) FROM credit_events").fetchone()[0] == 0
+
+
+def test_late_fee_compounds_daily_until_the_grace_period_ends():
+    db = _fresh_db()
+    ann, bob = _user(db, "ann"), _user(db, "bob", balance=0)
+    lid = appmod.offer_loan(db, ann, "bob", 100, 0, 7)
+    appmod.accept_loan(db, lid, bob)
+    db.execute("UPDATE users SET balance = 0 WHERE id = ?", (bob,))
+    state = lambda: (loan(db, lid)["late_fees"], loan(db, lid)["penalty"], loan(db, lid)["owed"])
+
+    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(1), lid))       # day 1 late
+    appmod.collect_overdue_loans(db)
+    appmod.collect_overdue_loans(db)
+    assert state() == (1, 10, 110)
+    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(25), lid))      # day 2: 10% of 110
+    appmod.collect_overdue_loans(db)
+    assert state() == (2, 21, 121)
+    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(24 * 10), lid)) # past the deadline: no more
+    appmod.collect_overdue_loans(db)
+    assert state() == (2, 21, 121)
+    fees = [r[0] for r in db.execute("SELECT detail FROM activity WHERE user_id = ? AND detail LIKE 'Late fee%' "
+                                     "ORDER BY id", (bob,))]
+    assert len(fees) == 2 and "Ⓜ11.00" in fees[1] and "day 2 of 2" in fees[1]
+
+
+def test_missed_days_are_caught_up_and_payments_stop_further_fees():
+    db = _fresh_db()
+    ann, bob, carl = _user(db, "ann"), _user(db, "bob", balance=0), _user(db, "carl", balance=50)
+    lid = appmod.offer_loan(db, ann, "bob", 100, 0, 7)
+    appmod.accept_loan(db, lid, bob)
+    db.execute("UPDATE users SET balance = 0 WHERE id = ?", (bob,))
+    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(30), lid))      # nobody visited for a day
+    appmod.collect_overdue_loans(db)
+    assert loan(db, lid)["late_fees"] == 2 and loan(db, lid)["owed"] == 121
+
+    paid = appmod.offer_loan(db, ann, "carl", 100, 0, 7)
+    appmod.accept_loan(db, paid, carl)                              # carl keeps the cash, so it's collected on day 1
+    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(1), paid))
+    appmod.collect_overdue_loans(db)
+    db.execute("UPDATE loans SET due_at = ? WHERE id = ?", (past(30), paid))
+    appmod.collect_overdue_loans(db)
+    assert loan(db, paid)["status"] == "repaid" and loan(db, paid)["penalty"] == 10
+
+
+def test_loans_already_late_keep_their_single_fee_after_the_change():
+    db = _fresh_db()
+    ann, bob = _user(db, "ann"), _user(db, "bob", balance=0)
+    lid = appmod.offer_loan(db, ann, "bob", 100, 0, 7)
+    appmod.accept_loan(db, lid, bob)
+    db.execute("UPDATE users SET balance = 0 WHERE id = ?", (bob,))
+    db.execute("UPDATE loans SET due_at = ?, late_at = ?, penalty = 10, owed = 110, late_fees = 0 WHERE id = ?",
+               (past(30), past(30), lid))                                        # charged under the old one-off rule
+    db.execute("DELETE FROM site_settings WHERE key = 'late_fees_daily_at'")
+    appmod.mark_compound_late_fees(db)
+    appmod.collect_overdue_loans(db)
+    assert loan(db, lid)["owed"] == 110 and loan(db, lid)["penalty"] == 10
