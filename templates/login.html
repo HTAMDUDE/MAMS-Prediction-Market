@@ -2,7 +2,7 @@
 {% block title %}Log in · MAMS Prediction Market{% endblock %}
 {% block content %}
 <div class="auth card">
-  <span class="logo" aria-hidden="true">M</span>
+  <span class="logo" aria-hidden="true">{% with logo_id='login' %}{% include '_logo.html' %}{% endwith %}</span>
   <h1>Welcome back</h1>
   <p class="muted">Log in to trade on what happens next at Mass Academy.</p>
   <form method="post" class="stack">

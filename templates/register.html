@@ -2,7 +2,7 @@
 {% block title %}Sign up · MAMS Prediction Market{% endblock %}
 {% block content %}
 <div class="auth card">
-  <span class="logo" aria-hidden="true">M</span>
+  <span class="logo" aria-hidden="true">{% with logo_id='register' %}{% include '_logo.html' %}{% endwith %}</span>
   <h1>Create an account</h1>
   <p class="muted">You'll start with Ⓜ1,000 {{ CURRENCY }} — play money, no real value.</p>
   <form method="post" class="stack">
