@@ -1934,7 +1934,9 @@ def pct_filter(p):
 
 @app.template_filter("when")
 def when_filter(s):
-    return parse_dt(s).strftime("%b %-d, %Y %-I:%M %p")
+    dt = parse_dt(s)
+    hour = dt.strftime("%I").lstrip("0") or "12"
+    return f"{dt.strftime('%b')} {dt.day}, {dt.year} {hour}:{dt.strftime('%M %p')}"
 
 
 @app.template_filter("ago")

@@ -35,7 +35,7 @@ function tween(el, from, to, ms, format) {
   el._tween = requestAnimationFrame(step);
 }
 
-// Price-over-time chart: one stepped line per outcome, with 1D / 1W / All range buttons next to it.
+// Price-over-time chart: smoothed diagonal lines per outcome with dynamic Y-axis scaling and 1D / 1W / All range buttons.
 // `lines` limits how many outcomes are drawn (a live Yes/No market only needs its Yes line).
 // `colors` overrides the outcome palette (Yes/No markets use the Yes and No colours).
 function drawChart(el, history, allLabels, endTime, lines, tz, colors) {
@@ -47,10 +47,65 @@ function drawChart(el, history, allLabels, endTime, lines, tz, colors) {
   const all = history.map(h => ({ t: parseTime(h.t), p: h.p }));
   const end = endTime ? parseTime(endTime) : wallNow(tz || 'America/New_York');
   all.push({ t: Math.max(end, all[all.length - 1].t), p: all[all.length - 1].p });
-  const priceAt = (pts, t) => {
+  const stepPriceAt = (pts, t) => {
     let cur = pts[0];
     for (const pt of pts) { if (pt.t <= t) cur = pt; else break; }
     return cur.p;
+  };
+  // Time-weighted average over [a, b] on a step-function price series, smoothing rapid bursts into gradual diagonals.
+  const bucketSeries = (pts, t0, t1, bins) => {
+    if (pts.length <= 2 || t1 <= t0) return pts;
+    const dt = (t1 - t0) / bins;
+    const out = [{ t: t0, p: pts[0].p.slice() }];
+    let idx = 0;
+    for (let k = 1; k < bins; k++) {
+      const a = t0 + (k - 1) * dt;
+      const b = t0 + k * dt;
+      while (idx + 1 < pts.length && pts[idx + 1].t <= a) idx++;
+      const acc = new Array(labels.length).fill(0);
+      let curT = a;
+      let j = idx;
+      while (j + 1 < pts.length && pts[j + 1].t < b) {
+        const seg = pts[j + 1].t - curT;
+        for (let i = 0; i < labels.length; i++) acc[i] += pts[j].p[i] * seg;
+        curT = pts[j + 1].t;
+        j++;
+      }
+      const rem = b - curT;
+      for (let i = 0; i < labels.length; i++) acc[i] = (acc[i] + pts[j].p[i] * rem) / dt;
+      out.push({ t: b, p: acc });
+    }
+    out.push({ t: t1, p: pts[pts.length - 1].p.slice() });
+    return out;
+  };
+  // Linear interpolation along the rendered diagonal series so hover dots track the drawn line exactly.
+  const interpPriceAt = (series, t) => {
+    if (t <= series[0].t) return series[0].p;
+    const last = series[series.length - 1];
+    if (t >= last.t) return last.p;
+    let lo = 0, hi = series.length - 1;
+    while (lo + 1 < hi) {
+      const mid = (lo + hi) >> 1;
+      if (series[mid].t <= t) lo = mid; else hi = mid;
+    }
+    const a = series[lo], b = series[hi];
+    const f = b.t > a.t ? (t - a.t) / (b.t - a.t) : 0;
+    return a.p.map((v, i) => v + (b.p[i] - v) * f);
+  };
+  const computeYAxis = series => {
+    let maxP = 0;
+    for (const pt of series) {
+      for (let i = 0; i < labels.length; i++) {
+        if (pt.p[i] > maxP) maxP = pt.p[i];
+      }
+    }
+    const rawMax = Math.min(1, Math.max(0.1, maxP * 1.2));
+    if (rawMax >= 0.85) return { yMax: 1, ticks: [0, 0.25, 0.5, 0.75, 1] };
+    const step = rawMax <= 0.20 ? 0.05 : rawMax <= 0.50 ? 0.10 : 0.20;
+    const yMax = Math.min(1, Math.ceil(rawMax / step - 1e-9) * step);
+    const ticks = [];
+    for (let v = 0; v <= yMax + 1e-9; v += step) ticks.push(Math.min(1, Math.round(v * 100) / 100));
+    return { yMax, ticks };
   };
   const span = all[all.length - 1].t - all[0].t;
   const buttons = [...(el.parentElement.querySelectorAll('[data-range]') || [])];
@@ -68,16 +123,19 @@ function drawChart(el, history, allLabels, endTime, lines, tz, colors) {
     let pts = all;
     if (range && end - range > all[0].t) {
       const start = end - range;
-      pts = [{ t: start, p: priceAt(all, start) }, ...all.filter(x => x.t > start)];
+      pts = [{ t: start, p: stepPriceAt(all, start) }, ...all.filter(x => x.t > start)];
     }
     const t0 = pts[0].t, t1 = Math.max(pts[pts.length - 1].t, t0 + 1);
+    const bins = Math.min(48, Math.max(16, Math.round((W - L - R) / 14)));
+    const series = bucketSeries(pts, t0, t1, bins);
+    const { yMax, ticks } = computeYAxis(series);
     const x = t => L + (t - t0) / (t1 - t0) * (W - L - R);
-    const y = p => T + (1 - p) * (H - T - B);
+    const y = p => T + (1 - Math.min(yMax, Math.max(0, p)) / yMax) * (H - T - B);
 
     const root = svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Price history chart' });
-    for (const g of [0, 0.25, 0.5, 0.75, 1]) {
+    for (const g of ticks) {
       svg('line', { x1: L, x2: W - R, y1: y(g), y2: y(g), class: 'gridline' }, root);
-      svg('text', { x: L - 8, y: y(g) + 4, class: 'axis', 'text-anchor': 'end' }, root).textContent = `${g * 100}%`;
+      svg('text', { x: L - 8, y: y(g) + 4, class: 'axis', 'text-anchor': 'end' }, root).textContent = `${Math.round(g * 100)}%`;
     }
     // Time axis: clock times when the chart spans under a day, dates otherwise; the last tick says "now" while live.
     const shortSpan = t1 - t0 < 86400000;
@@ -96,11 +154,12 @@ function drawChart(el, history, allLabels, endTime, lines, tz, colors) {
     }
 
     const animate = firstDraw && !reducedMotion();
+    const last = series[series.length - 1];
     labels.forEach((_, i) => {
       let d = '';
-      pts.forEach((pt, k) => {
+      series.forEach((pt, k) => {
         const px = x(pt.t).toFixed(1), py = y(pt.p[i]).toFixed(1);
-        d += k === 0 ? `M${px},${py}` : `H${px}V${py}`;
+        d += k === 0 ? `M${px},${py}` : `L${px},${py}`;
       });
       if (labels.length === 1) {  // a single line gets a soft gradient under it
         const id = `cg${Math.random().toString(36).slice(2, 8)}`;
@@ -108,10 +167,9 @@ function drawChart(el, history, allLabels, endTime, lines, tz, colors) {
         const grad = svg('linearGradient', { id, x1: 0, x2: 0, y1: 0, y2: 1 }, defs);
         svg('stop', { offset: '0%', style: `stop-color: ${color(i)}; stop-opacity: .22` }, grad);
         svg('stop', { offset: '100%', style: `stop-color: ${color(i)}; stop-opacity: 0` }, grad);
-        svg('path', { d: `${d}V${y(0)}H${x(pts[0].t)}Z`, fill: `url(#${id})`, class: animate ? 'area' : '' }, root);
+        svg('path', { d: `${d}L${x(last.t).toFixed(1)},${y(0).toFixed(1)}L${x(series[0].t).toFixed(1)},${y(0).toFixed(1)}Z`, fill: `url(#${id})`, class: animate ? 'area' : '' }, root);
       }
       svg('path', { d, class: `line${animate ? ' draw' : ''}`, pathLength: 1, style: `stroke: ${color(i)}` }, root);
-      const last = pts[pts.length - 1];
       if (!endTime) svg('circle', { cx: x(last.t), cy: y(last.p[i]), r: 4, class: 'end-pulse', style: `fill: ${color(i)}` }, root);
       svg('circle', { cx: x(last.t), cy: y(last.p[i]), r: 4, class: 'end-dot', style: `fill: ${color(i)}` }, root);
     });
@@ -131,7 +189,7 @@ function drawChart(el, history, allLabels, endTime, lines, tz, colors) {
       const vx = (e.clientX - box.left) / box.width * W;
       if (vx < L || vx > W - R) return hide();
       const t = t0 + (vx - L) / (W - L - R) * (t1 - t0);
-      const p = priceAt(pts, t);
+      const p = interpPriceAt(series, t);
       guide.setAttribute('x1', vx); guide.setAttribute('x2', vx); guide.setAttribute('visibility', 'visible');
       dots.forEach((d, i) => { d.setAttribute('cx', vx); d.setAttribute('cy', y(p[i])); d.setAttribute('visibility', 'visible'); });
       tip.hidden = false;

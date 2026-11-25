@@ -2,7 +2,7 @@
 {% block title %}Confirm your email · MAMS Prediction Market{% endblock %}
 {% block content %}
 <div class="auth card">
-  <span class="logo" aria-hidden="true">M</span>
+  <span class="logo" aria-hidden="true">{% with logo_id='email' %}{% include '_logo.html' %}{% endwith %}</span>
   <h1>{% if current %}Change your email{% else %}Confirm your email{% endif %}</h1>
   {% if pending %}
     <p class="muted">Enter the 6-digit code we sent to <strong>{{ pending }}</strong>.</p>
