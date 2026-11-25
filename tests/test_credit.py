@@ -398,7 +398,8 @@ def test_all_loans_page_is_public_and_leaderboard_shows_scores_and_defaults():
     public = appmod.app.test_client()                                          # not logged in
     html = public.get("/loans/all").get_data(as_text=True)
     assert "All loans" in html and ">cy<" not in html and "cy" in html and "dee" in html
-    assert html.index("dee") < html.index("cy")                               # in default comes first
+    body = html[html.index("<main"):]                                       # skip the header (the logo SVG has cy=)
+    assert body.index("dee") < body.index("cy")                               # in default comes first
     assert "in default" in html and "1 offer" in html
     assert 'class="credit credit-' in html                                     # the borrowers' scores are shown
     board = public.get("/leaderboard").get_data(as_text=True)
