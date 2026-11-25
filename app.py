@@ -2651,11 +2651,11 @@ def send_email_code(db, user_id, username, email):
     return True
 
 
+@app.route("/profile", methods=["GET", "POST"])
 @app.route("/account/email", methods=["GET", "POST"])
 @login_required
 def account_email():
-    """Add (or change) your email: enter it, then type the code we send to it. Accounts without a confirmed email
-    are sent here before they can use the rest of the site."""
+    """Profile settings (and email confirmation gate for accounts without a confirmed email)."""
     db = get_db()
     u = g.user
     challenge = db.execute("SELECT * FROM login_challenges WHERE username = ?", (u["username"],)).fetchone()
@@ -2725,6 +2725,53 @@ def account_email():
                            current=u["email"] if u["email_verified"] else None)
 
 
+@app.post("/account/username")
+@login_required
+def change_username():
+    new_name = request.form.get("username", "").strip()
+    old_name = g.user["username"]
+    if rate_limited(("change-username", g.user["id"]), 10, 3600):
+        flash("You're changing your name too often. Try again later.", "error")
+    elif not USERNAME_RE.match(new_name):
+        flash("Name must be 3–20 characters: letters, numbers, _, - or .", "error")
+    elif new_name == old_name:
+        flash("That's already your name.", "info")
+    elif OWNER_USERNAME and (
+        (old_name.lower() == OWNER_USERNAME.lower() and new_name.lower() != OWNER_USERNAME.lower())
+        or (old_name.lower() != OWNER_USERNAME.lower() and new_name.lower() == OWNER_USERNAME.lower())
+    ):
+        flash("That username is reserved for the site owner.", "error")
+    else:
+        db = get_db()
+        taken = db.execute(
+            "SELECT id FROM users WHERE username = ? COLLATE NOCASE AND id != ?",
+            (new_name, g.user["id"]),
+        ).fetchone()
+        if taken:
+            flash("That name is already taken.", "error")
+        else:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.execute("UPDATE users SET username = ? WHERE id = ?", (new_name, g.user["id"]))
+                db.execute("UPDATE sightings SET username = ? WHERE user_id = ?", (new_name, g.user["id"]))
+                db.execute("DELETE FROM login_challenges WHERE username = ? COLLATE NOCASE", (old_name,))
+                db.execute("COMMIT")
+            except sqlite3.IntegrityError:
+                db.execute("ROLLBACK")
+                flash("That name is already taken.", "error")
+                return redirect(url_for("account_email"))
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+            try:
+                write_email_csv(db)
+            except OSError:
+                current_app.logger.exception("Couldn't update people.csv.")
+            log_event("username_changed", detail=f"{old_name} -> {new_name}")
+            flash(f"Your name is now {new_name}.", "success")
+    return redirect(url_for("account_email"))
+
+
 def set_temporary_password(db, user_id):
     """Give a user a new random password, sign them out everywhere and clear their login lockout.
     Returns the password (shown once to whoever reset it)."""
@@ -2760,6 +2807,9 @@ def change_password():
         session["gen"] = g.user["session_gen"] + 1  # keep this device signed in; every other one is signed out
         log_event("password_changed", detail="other devices were signed out")
         flash("Password changed.", "success")
+    nxt = (request.form.get("next") or "").strip()
+    if nxt.startswith("/") and not nxt.startswith("//"):
+        return redirect(nxt)
     return redirect(url_for("portfolio") + "#account")
 
 
