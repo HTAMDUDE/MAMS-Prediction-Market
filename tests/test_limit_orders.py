@@ -296,3 +296,47 @@ def test_resolve_and_cancel_market_cancel_open_limits(env):
     open_cnt = db.execute("SELECT COUNT(*) FROM limit_orders WHERE status = 'open'").fetchone()[0]
     assert open_cnt == 0
     db.close()
+
+
+def test_entry_fee_and_late_fee_apply_on_limit_orders(env):
+    creator = make_user("creator", 1000.0)
+    alice = make_user("alice", 25.0)
+    bob = make_user("bob", 1000.0)
+
+    # Market closing in 15 minutes -> max late trading fee tier (x6) + creator entry fee (M10).
+    db = appmod.connect()
+    soon = (datetime.now() + timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
+    mid = appmod.create_market(
+        db, "Closing soon?", "Resolves YES.", "Events", soon,
+        ["Yes", "No"], 100.0, created_by=creator,
+    )
+    yes_id, no_id = [o["id"] for o in appmod.get_outcomes(db, mid)]
+
+    # Alice has M25 and places a M25 limit buy at 60% (immediately marketable).
+    # Entry fee (M10) + late fee must be deducted from available cash so Alice never goes negative.
+    appmod.place_limit_order(db, alice, mid, yes_id, "buy", 25.0, 0.60)
+    alice_bal = db.execute("SELECT balance FROM users WHERE id = ?", (alice,)).fetchone()["balance"]
+    assert 0.0 <= alice_bal < 25.0
+    fees_alice = db.execute(
+        "SELECT SUM(amount) FROM activity WHERE user_id = ? AND kind = 'fee'", (alice,)
+    ).fetchone()[0]
+    assert fees_alice < -10.0  # M10 entry fee + late fee
+    assert db.execute(
+        "SELECT fee FROM market_entries WHERE market_id = ? AND user_id = ?", (mid, alice)
+    ).fetchone()["fee"] == pytest.approx(appmod.ENTRY_FEE)
+
+    # Creator received both the entry fee and Alice's late trading fee.
+    creator_earnings = db.execute(
+        "SELECT SUM(amount) FROM activity WHERE user_id = ? AND kind = 'earning'", (creator,)
+    ).fetchone()[0]
+    assert creator_earnings > appmod.ENTRY_FEE
+
+    # Limit sell also charges late trading fee.
+    held = db.execute("SELECT shares FROM positions WHERE user_id = ? AND outcome_id = ?", (alice, yes_id)).fetchone()["shares"]
+    appmod.place_limit_order(db, alice, mid, yes_id, "sell", held, 0.40)
+    sell_fees = db.execute(
+        "SELECT COUNT(*) FROM activity WHERE user_id = ? AND kind = 'fee'", (alice,)
+    ).fetchone()[0]
+    assert sell_fees >= 3  # entry fee + buy late fee + sell late fee (and any subsequent fill)
+    db.close()
+
