@@ -2048,3 +2048,26 @@ def test_fixed_point_round_trips_never_mint_coins():
     assert db.execute("SELECT balance FROM users WHERE id=?", (uid,)).fetchone()[0] <= 1000
     for (s,) in db.execute("SELECT shares FROM trades WHERE market_id=?", (mid,)):
         assert round(s, 2) == s                                    # whole hundredths of a share
+
+
+def test_bundle_many_matches_bundle():
+    """The batched market loader (from PR #8) must give exactly what loading markets one at a time gives."""
+    db = appmod.connect()
+    uid = db.execute("INSERT INTO users (username, password_hash, balance, created_at) VALUES ('batchy', 'x', 1000, ?)",
+                     (appmod.now_str(),)).lastrowid
+    later = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+    quiet = appmod.create_market(db, "Batch quiet?", "", "Other", later, ["Yes", "No"], 100)
+    busy = appmod.create_market(db, "Batch busy?", "", "Other", later, ["A", "B", "C"], 100)
+    disputed = appmod.create_market(db, "Batch disputed?", "", "Other", later, ["Yes", "No"], 100)
+    for mid in (busy, disputed):
+        appmod.execute_trade(db, uid, mid, appmod.get_outcomes(db, mid)[0]["id"], "buy", 20)
+    db.execute("UPDATE markets SET closes_at = ? WHERE id = ?", (past(), disputed))
+    appmod.propose_result(db, disputed, appmod.get_outcomes(db, disputed)[0]["id"], uid)
+    appmod.add_dispute(db, uid, disputed, "That is the wrong result.")
+    rows = db.execute("SELECT * FROM markets ORDER BY id").fetchall()
+    singles = [appmod.bundle(db, m) for m in rows]
+    assert appmod.bundle_many(db, rows) == singles
+    assert appmod.bundle_many(db, []) == []
+    states = {b["m"]["id"]: b["state"] for b in singles}
+    assert states[disputed] == "disputed" and states[quiet] == "open"
+    assert {b["m"]["id"]: b["traders"] for b in singles}[busy] == 1

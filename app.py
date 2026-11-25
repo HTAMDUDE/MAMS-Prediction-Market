@@ -12,6 +12,7 @@ import sqlite3
 import smtplib
 import socket
 import ssl
+import threading
 import time
 from datetime import date, datetime, timedelta
 import email.utils
@@ -134,6 +135,7 @@ log = logging.getLogger("mams")
 # Simple in-memory rate limiting (one server process is plenty for a school site).
 # Limits are generous because a whole school can share one public IP address.
 _hits = {}
+_hits_lock = threading.Lock()  # Flask may serve requests on several threads
 HITS_MAX_KEYS = 10000
 HITS_MAX_WINDOW = 3600  # the longest window any limit uses
 
@@ -142,7 +144,7 @@ def _prune_hits(now):
     """Keep _hits bounded without forgetting live limits. (Clearing everything would let someone wipe every
     lockout just by trying lots of different usernames.) Drops keys with no hit inside the longest window, then,
     if still too many, the ones with the fewest recent hits (oldest first), so keys close to a limit survive a flood
-    of one-off keys."""
+    of one-off keys. Caller holds _hits_lock."""
     for key in [k for k, ts in _hits.items() if not ts or now - ts[-1] >= HITS_MAX_WINDOW]:
         del _hits[key]
     if len(_hits) > HITS_MAX_KEYS:
@@ -160,14 +162,15 @@ HEAVY_PAGE_LIMITS = {"user": (60, 60), "ip": (240, 60)}
 
 def rate_limited(key, limit, window_seconds):
     now = time.time()
-    recent = [t for t in _hits.get(key, []) if now - t < window_seconds]
-    limited = len(recent) >= limit
-    if not limited:
-        recent.append(now)
-    _hits[key] = recent
-    if len(_hits) > HITS_MAX_KEYS:
-        _prune_hits(now)
-    return limited
+    with _hits_lock:
+        recent = [t for t in _hits.get(key, []) if now - t < window_seconds]
+        limited = len(recent) >= limit
+        if not limited:
+            recent.append(now)
+        _hits[key] = recent
+        if len(_hits) > HITS_MAX_KEYS:
+            _prune_hits(now)
+        return limited
 
 
 # ---------------------------------------------------------------- database
@@ -678,18 +681,13 @@ def get_outcomes(db, market_id):
     return db.execute("SELECT * FROM outcomes WHERE market_id = ? ORDER BY position", (market_id,)).fetchall()
 
 
-def bundle(db, m):
-    """A market plus its outcomes and current prices, ready for templates."""
-    outs = get_outcomes(db, m["id"])
+def _build_bundle(m, outs, stats, has_dispute):
     if m["status"] == "resolved":
         ps = [1.0 if o["id"] == m["resolved_outcome_id"] else 0.0 for o in outs]
     else:
         ps = lmsr.prices([o["shares"] for o in outs], m["b"])
-    stats = db.execute(
-        "SELECT COALESCE(SUM(ABS(amount)), 0) AS volume, COUNT(DISTINCT user_id) AS traders "
-        "FROM trades WHERE market_id = ?", (m["id"],)).fetchone()
     state = market_state(m)
-    if state == "proposed" and open_disputes(db, m["id"]):
+    if state == "proposed" and has_dispute:
         state = "disputed"
     return {
         "m": m,
@@ -701,15 +699,59 @@ def bundle(db, m):
                if m["ou_line"] is not None else None),
         "outcomes": [{"id": o["id"], "label": o["label"], "shares": o["shares"], "price": p}
                      for o, p in zip(outs, ps)],
-        "volume": stats["volume"],
-        "traders": stats["traders"],
+        "volume": stats["volume"] if stats else 0,
+        "traders": stats["traders"] if stats else 0,
     }
+
+
+def bundle(db, m):
+    """A market plus its outcomes and current prices, ready for templates."""
+    outs = get_outcomes(db, m["id"])
+    stats = db.execute(
+        "SELECT COALESCE(SUM(ABS(amount)), 0) AS volume, COUNT(DISTINCT user_id) AS traders "
+        "FROM trades WHERE market_id = ?", (m["id"],)).fetchone()
+    has_dispute = market_state(m) == "proposed" and bool(open_disputes(db, m["id"]))
+    return _build_bundle(m, outs, stats, has_dispute)
+
+
+def bundle_many(db, market_rows):
+    """Batch-build bundles for many markets in 3 queries instead of 2*M+1."""
+    if not market_rows:
+        return []
+    mids = [m["id"] for m in market_rows]
+    ph = ",".join("?" * len(mids))
+    outs_by_mid = {mid: [] for mid in mids}
+    for o in db.execute(f"SELECT * FROM outcomes WHERE market_id IN ({ph}) ORDER BY market_id, position", mids):
+        outs_by_mid[o["market_id"]].append(o)
+    stats_by_mid = {
+        r["market_id"]: r
+        for r in db.execute(
+            f"SELECT market_id, COALESCE(SUM(ABS(amount)), 0) AS volume, COUNT(DISTINCT user_id) AS traders "
+            f"FROM trades WHERE market_id IN ({ph}) GROUP BY market_id", mids
+        )
+    }
+    disputed_mids = set()
+    proposed_mids = [m["id"] for m in market_rows if market_state(m) == "proposed"]
+    if proposed_mids:
+        pph = ",".join("?" * len(proposed_mids))
+        disputed_mids = {
+            r["market_id"]
+            for r in db.execute(
+                f"SELECT DISTINCT market_id FROM disputes WHERE handled_at IS NULL AND market_id IN ({pph})",
+                proposed_mids,
+            )
+        }
+    return [
+        _build_bundle(m, outs_by_mid[m["id"]], stats_by_mid.get(m["id"]), m["id"] in disputed_mids)
+        for m in market_rows
+    ]
 
 
 def price_trends(db, market_ids, points=32):
     """Per market id: `spark`, a downsampled list of price snapshots (each a list with one price per outcome) for
     sparklines, and `delta`, each outcome's change since the last snapshot at least 24 hours old (or since the
-    first snapshot when the market is younger than that). Times are school wall-clock strings, like now_str()."""
+    first snapshot when the market is younger than that). Times are school wall-clock strings, like now_str().
+    Only the snapshots actually used are JSON-decoded."""
     market_ids = list(market_ids)
     if not market_ids:
         return {}
@@ -717,19 +759,21 @@ def price_trends(db, market_ids, points=32):
     series = {}
     for r in db.execute(f"SELECT market_id, prices, created_at FROM price_history WHERE market_id IN "
                         f"({','.join('?' * len(market_ids))}) ORDER BY id", market_ids):
-        series.setdefault(r["market_id"], []).append((r["created_at"], json.loads(r["prices"])))
+        series.setdefault(r["market_id"], []).append((r["created_at"], r["prices"]))
     out = {}
     for mid, s in series.items():
-        latest = s[-1][1]
-        base = s[0][1]
-        for t, p in s:
+        latest_raw = s[-1][1]
+        base_raw = s[0][1]
+        for t, p_raw in s:
             if t <= cutoff:
-                base = p
+                base_raw = p_raw
             else:
                 break
         if len(s) > points:  # keep the first and last snapshot, evenly spaced in between
             s = [s[round(i * (len(s) - 1) / (points - 1))] for i in range(points)]
-        out[mid] = {"spark": [p for _, p in s], "delta": [a - b for a, b in zip(latest, base)]}
+        latest = json.loads(latest_raw)
+        base = json.loads(base_raw)
+        out[mid] = {"spark": [json.loads(p_raw) for _, p_raw in s], "delta": [a - b for a, b in zip(latest, base)]}
     return out
 
 
@@ -761,9 +805,17 @@ def snapshot_prices(db, market_id, b):
 def open_book_values(db):
     """{user_id: {market_id: cash-out value}} for every unresolved market. Each value is what the user's
     whole holding in that market would sell for right now, so buying can't inflate it."""
+    open_rows = db.execute("SELECT id, b FROM markets WHERE status = 'open'").fetchall()
+    if not open_rows:
+        return {}
+    outs_by_mid = {m["id"]: [] for m in open_rows}
+    mids = list(outs_by_mid.keys())
+    ph = ",".join("?" * len(mids))
+    for o in db.execute(f"SELECT id, market_id, shares FROM outcomes WHERE market_id IN ({ph}) ORDER BY market_id, position", mids):
+        outs_by_mid[o["market_id"]].append(o)
     markets = {}
-    for m in db.execute("SELECT * FROM markets WHERE status = 'open'").fetchall():
-        outs = get_outcomes(db, m["id"])
+    for m in open_rows:
+        outs = outs_by_mid[m["id"]]
         markets[m["id"]] = (m["b"], [o["shares"] for o in outs], {o["id"]: i for i, o in enumerate(outs)})
     holdings = {}  # (user_id, market_id) -> share vector
     for p in db.execute("SELECT p.user_id, p.outcome_id, p.shares, o.market_id FROM positions p "
@@ -780,6 +832,7 @@ def open_book_values(db):
 
 NET_WORTH_TTL = 30  # seconds; the cache is also dropped as soon as any trade, balance or loan changes
 _net_worth_cache = {}
+_net_worth_lock = threading.Lock()
 
 
 def net_worths(db):
@@ -790,11 +843,13 @@ def net_worths(db):
         "(SELECT COUNT(*) FROM users), (SELECT ROUND(SUM(balance), 2) FROM users), "
         "(SELECT COUNT(*) FROM loans), (SELECT ROUND(SUM(owed + principal), 2) FROM loans "
         "WHERE status IN ('offered', 'active')), (SELECT COUNT(*) FROM markets WHERE status = 'open')").fetchone())
-    hit = _net_worth_cache.get("v")
-    if hit and hit[0] == version and time.time() - hit[1] < NET_WORTH_TTL:
-        return dict(hit[2])
+    with _net_worth_lock:
+        hit = _net_worth_cache.get("v")
+        if hit and hit[0] == version and time.time() - hit[1] < NET_WORTH_TTL:
+            return dict(hit[2])
     worth = _compute_net_worths(db)
-    _net_worth_cache["v"] = (version, time.time(), worth)
+    with _net_worth_lock:
+        _net_worth_cache["v"] = (version, time.time(), worth)
     return dict(worth)
 
 
@@ -2095,7 +2150,8 @@ def login():
             return render_template("login.html")
         name = request.form.get("username", "").strip()
         fail_key = ("login-fail", name.lower())
-        recent_fails = [t for t in _hits.get(fail_key, []) if time.time() - t < 300]
+        with _hits_lock:
+            recent_fails = [t for t in _hits.get(fail_key, []) if time.time() - t < 300]
         if len(recent_fails) >= 10:
             log_event("login_locked", username=name if USERNAME_RE.match(name) else "", detail="10 wrong passwords in 5 minutes")
             flash("Too many wrong passwords for this account. Wait 5 minutes and try again.", "error")
@@ -2104,7 +2160,8 @@ def login():
         # Unknown usernames still pay for a hash check, so response time doesn't reveal which accounts exist.
         ok = check_password_hash(u["password_hash"] if u else DUMMY_PASSWORD_HASH, request.form.get("password", ""))
         if u and ok:
-            _hits.pop(fail_key, None)
+            with _hits_lock:
+                _hits.pop(fail_key, None)
             session.clear()
             session.permanent = True
             session["uid"] = u["id"]
@@ -2231,12 +2288,13 @@ def code_wait(user_id, email):
     later). 0 means go ahead, and starts the next wait."""
     keys = [("email-code-minute", user_id), ("email-code-to", security.normalize_email(email)[1] or email.casefold())]
     now = time.time()
-    last = max((t for k in keys for t in _hits.get(k, [])), default=0.0)
-    left = LOGIN_CODE_RESEND_DELAY - (now - last)
-    if left > 0:
-        return math.ceil(left)
-    for k in keys:
-        _hits[k] = [now]
+    with _hits_lock:
+        last = max((t for k in keys for t in _hits.get(k, [])), default=0.0)
+        left = LOGIN_CODE_RESEND_DELAY - (now - last)
+        if left > 0:
+            return math.ceil(left)
+        for k in keys:
+            _hits[k] = [now]
     return 0
 
 
@@ -2346,7 +2404,8 @@ def set_temporary_password(db, user_id):
     name = db.execute("SELECT username FROM users WHERE id = ?", (user_id,)).fetchone()["username"]
     db.execute("UPDATE users SET password_hash = ?, session_gen = session_gen + 1 WHERE id = ?",
                (generate_password_hash(pw), user_id))
-    _hits.pop(("login-fail", name.lower()), None)
+    with _hits_lock:
+        _hits.pop(("login-fail", name.lower()), None)
     return pw
 
 
@@ -2428,7 +2487,7 @@ def index():
     status = status if status in dict(STATUS_TABS) else "open"
     cat = request.args.get("cat", "")
     cat = cat if cat in CATEGORIES else ""
-    markets = [bundle(db, m) for m in db.execute("SELECT * FROM markets ORDER BY closes_at").fetchall()]
+    markets = bundle_many(db, db.execute("SELECT * FROM markets ORDER BY closes_at").fetchall())
 
     def sort_key(b):
         rank = STATE_ORDER.index(b["state"])
@@ -3825,9 +3884,8 @@ def get_setting(db, key):
 @admin_required
 def admin():
     db = get_db()
-    markets = [bundle(db, m) for m in db.execute("SELECT * FROM markets WHERE status = 'open' ORDER BY closes_at")]
-    settled = [bundle(db, m) for m in db.execute(
-        "SELECT * FROM markets WHERE status != 'open' ORDER BY resolved_at DESC")]
+    markets = bundle_many(db, db.execute("SELECT * FROM markets WHERE status = 'open' ORDER BY closes_at").fetchall())
+    settled = bundle_many(db, db.execute("SELECT * FROM markets WHERE status != 'open' ORDER BY resolved_at DESC").fetchall())
     users, user_view = list_users(db)
     proposals =[dict(p, outcomes=json.loads(p["outcomes"])) for p in db.execute(
         "SELECT p.*, u.username FROM proposals p JOIN users u ON u.id = p.user_id "
